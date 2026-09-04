@@ -1,0 +1,130 @@
+services:
+  qwen38-llama:
+    build:
+      context: .
+      # Multi-stage build: compiles llama.cpp in the CUDA devel image, ships a
+      # ~5 GB runtime image instead of ~15 GB. Verified equivalent to
+      # Dockerfile.full (same pinned commit, same CMD flags).
+      dockerfile: Dockerfile.multistage
+      args:
+        # Parallelism for the llama.cpp compile step (see Dockerfile).
+        BUILD_JOBS: "${BUILD_JOBS:-8}"
+    # Explicit name so `docker build -t qwen38-llama .` and compose share one
+    # image; with it present, `compose up` reuses it without rebuilding.
+    # Shared by both services below (27B + 9B); only env vars differ.
+    image: boris271142/llama-server-on-salad:cuda128
+
+    container_name: qwen38-llama-fa-api
+    restart: unless-stopped
+
+    # llama-server exits cleanly if stdin reaches EOF in some code paths; keep
+    # it open so a detached container never sees EOF (harmless otherwise).
+    stdin_open: true
+
+    # Pin to ONE physical card by nvidia-smi index. Exposing only that card also
+    # stops llama.cpp from spreading layers across every visible GPU — with
+    # several cards exposed it does that by default, and --main-gpu alone does
+    # NOT hide the others. The card is chosen via $GPU_ID (first argument of
+    # run_27b.sh, default 0). On this box: 0/2 = RTX 3090 (24 GB),
+    # 1 = RTX 3080 Ti (12 GB).
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["${GPU_ID:-0}"]
+              capabilities: [gpu]
+
+    ports:
+      # Host port is overridable (e.g. HOST_PORT=8090) while another server
+      # already occupies :8080 on this box.
+      - "${HOST_PORT:-8080}:8080"
+      # Status API (uvicorn in-container, api_app.py): /startup, /live, /ready.
+      # Container side is fixed at 9999 (Dockerfile ENV API_PORT).
+      - "${STATUS_API_HOST_PORT:-9999}:9999"
+
+    environment:
+      # Defaults target the production setup (Qwen3.8-27B on an idle RTX 3090).
+      # For the 9B smoke-test server use the dedicated `qwen38-9b` service below.
+      MODEL_REPO: "${MODEL_REPO:-unsloth/Qwen3.8-27B-GGUF}"
+
+      # Verified to exist in the repo (15.3 GiB). Other options if you want
+      # more/less quality: Qwen3.8-27B-Q4_0.gguf (14.9 GiB),
+      # Qwen3.8-27B-UD-Q4_K_S.gguf (14.3 GiB),
+      # Qwen3.8-27B-UD-Q5_K_M.gguf (18.4 GiB, tight on 24 GB at 131k ctx).
+      MODEL_FILE: "${MODEL_FILE:-Qwen3.8-27B-UD-Q4_K_M.gguf}"
+
+      # Optional if the repo is gated or you hit rate limits:
+      HF_TOKEN: "${HF_TOKEN:-}"
+
+      # llama-server auth key; run_*.sh exports it from api.txt in this folder.
+      # Empty -> server runs without API-key auth.
+      API_KEY: "${API_KEY:-}"
+
+      # Passed to llama-server as --main-gpu. Must stay "0": only one card is
+      # exposed (device_ids above). The shell env var GPU_ID (set by run_27b.sh)
+      # selects WHICH card; it does not leak into the container.
+      GPU_ID: "0"
+
+      HOST: "0.0.0.0"
+      PORT: "8080"
+
+      # Dual-stack bind for the status API so both localhost (IPv4) and [::1]
+      # work — Docker's IPv6 is enabled on this machine (daemon.json). Set
+      # API_HOST=0.0.0.0 in your env if you ever disable it again.
+      API_HOST: "${API_HOST:-::}"
+
+      # Qwen3.8-27B is a hybrid model (only every 4th layer is full attention),
+      # so even 131k context costs only ~2.3 GB of q4_0 KV cache.
+      CTX_SIZE: "${CTX_SIZE:-131072}"
+
+      # Full offload on an idle 24 GB card. Lower (e.g. "24") if the GPU is
+      # shared with other workloads; expect slower generation.
+      N_GPU_LAYERS: "${N_GPU_LAYERS:-99}"
+
+      THREADS: "${THREADS:-8}"
+      BATCH_SIZE: "${BATCH_SIZE:-256}"
+      UBATCH_SIZE: "${UBATCH_SIZE:-256}"
+
+    # NOTE: no bind mount for /models on purpose. The model is downloaded into
+    # the container's writable layer, so `docker compose down` removes it along
+    # with the container and nothing is left on the host disk. Re-add
+    # `- ./models:/models` if you want to cache the download across recreates
+    # (then clean up manually with `rm -rf ./models`).
+
+  # Qwen3.8-9B smoke-test server, on the RTX 3080 Ti by default
+  # (nvidia-smi index 1; override with ./run_9b.sh <GPU_ID>).
+  # Same image as above; only env vars and port differ. Bring up alone with:
+  #   docker compose up -d qwen38-9b     (or ./run_9b.sh)
+  qwen38-9b:
+    image: boris271142/llama-server-on-salad:cuda128
+
+    container_name: qwen38-9b
+    restart: unless-stopped
+    stdin_open: true
+
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              # RTX 3080 Ti by default; override with ./run_9b.sh <GPU_ID>
+              device_ids: ["${GPU_ID:-1}"]
+              capabilities: [gpu]
+
+    ports:
+      - "8081:8080"
+      # Same status API as the 27B service; different host port because both
+      # services can run at once (container-side port is 9999 in both).
+      - "${STATUS_API_9B_HOST_PORT:-9998}:9999"
+
+    environment:
+      MODEL_REPO: "empero-ai/Qwen3.8-9B-Distill-GGUF"
+      MODEL_FILE: "Qwen3.8-9B-Q4_K_M.gguf"
+      CTX_SIZE: "32768"
+      GPU_ID: "0"                 # single card exposed -> always index 0 inside
+      N_GPU_LAYERS: "99"
+      API_KEY: "${API_KEY:-}"     # exported by run_9b.sh from api.txt
+      # Same dual-stack status-API bind as the 27B service (see above).
+      API_HOST: "${API_HOST:-::}"
+

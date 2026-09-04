@@ -1,0 +1,13 @@
+# v1/ is an old backup copy of this project — excluded from the build context,
+# but do NOT delete it (not referenced by any current Dockerfile).
+v1/
+
+# api.txt holds the llama-server API key (read by run_*.sh at runtime); keep it
+# out of the build context so it's never sent to a remote build daemon.
+api.txt
+
+# comfy/ is a separate project that happens to live here; it has its own
+# Dockerfile/compose with its own build context, so excluding it only keeps
+# the qwen38 build context clean.
+comfy/
+other/

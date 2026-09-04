@@ -1,0 +1,267 @@
+# Qwen3.8-27B (GGUF) served by llama.cpp on a single NVIDIA GPU (RTX 3090 / 24 GB).
+#
+# Multi-stage variant of Dockerfile.full. Stage 1 compiles llama.cpp in the full
+# CUDA -devel image; stage 2 ships only the compiled binary plus runtime libs on
+# the much smaller nvidia/cuda -runtime base. Final image ~2.6 GB instead of
+# ~15.3 GB, so that's what you want to deploy on someone else's machine.
+# CUDA 12.8 base; llama.cpp is built with NCCL support (-DGGML_CUDA_NCCL=ON).
+#
+# Build: docker build -f Dockerfile.multistage -t qwen38-llama .
+# Run:   see docker-compose.yml (point `dockerfile:` at Dockerfile.multistage)
+
+###############################################################################
+# Stage 1: builder — CUDA devel toolchain + compilers; discarded after build
+###############################################################################
+FROM nvidia/cuda:12.8.2-devel-ubuntu22.04 AS builder
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    LLAMA_CPP_DIR=/opt/llama.cpp
+
+# Pinned to a commit known to support the Qwen3.8 (qwen3_5) hybrid architecture.
+# Bump deliberately; do not track master blindly.
+ENV LLAMA_CPP_COMMIT=3af988fabcf79fd81f8720505e684d2aa5bfc786
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    cmake \
+    git \
+    ca-certificates \
+    curl \
+    libcurl4-openssl-dev \
+    libncurses-dev \
+    libudev-dev \
+    libdrm-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# NCCL 2.26.2 (+cuda12.8) - same version as the host's /usr/local/cuda-12.8/nccl
+# (see /usr/local/bin/cuda128). Extracted with dpkg -x into a folder inside the
+# CUDA toolkit dir instead of being installed system-wide; ggml's FindNCCL.cmake
+# honors NCCL_ROOT as a hint for both find_path(nccl.h, PATH_SUFFIXES include)
+# and find_library(PATH_SUFFIXES lib lib64). The .debs ship everything under
+# lib/x86_64-linux-gnu/, which find_library does NOT probe — so symlinks are
+# added at the ${NCCL_ROOT}/lib/ level (without them NCCL is silently skipped:
+# ggml-cuda only warns "NCCL not found" and builds without GGML_USE_NCCL).
+# CPATH/LIBRARY_PATH remain as a fallback for direct compiles of <nccl.h>.
+# ubuntu2204 .debs to match the jammy base.
+ENV NCCL_ROOT=/usr/local/cuda/nccl
+
+ENV CPATH=${NCCL_ROOT}/include \
+    LIBRARY_PATH=${NCCL_ROOT}/lib/x86_64-linux-gnu
+
+RUN mkdir -p /tmp/nccl-pkg && \
+    curl -fsSL -o /tmp/nccl-pkg/libnccl2.deb \
+        https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/x86_64/libnccl2_2.26.2-1+cuda12.8_amd64.deb && \
+    curl -fsSL -o /tmp/nccl-pkg/libnccl-dev.deb \
+        https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/x86_64/libnccl-dev_2.26.2-1+cuda12.8_amd64.deb && \
+    dpkg -x /tmp/nccl-pkg/libnccl2.deb /tmp/nccl-pkg && \
+    dpkg -x /tmp/nccl-pkg/libnccl-dev.deb /tmp/nccl-pkg && \
+    mkdir -p ${NCCL_ROOT} && \
+    mv /tmp/nccl-pkg/usr/* ${NCCL_ROOT}/ && \
+    rm -rf /tmp/nccl-pkg && \
+    ln -sf x86_64-linux-gnu/libnccl.so   ${NCCL_ROOT}/lib/libnccl.so && \
+    ln -sf x86_64-linux-gnu/libnccl.so.2 ${NCCL_ROOT}/lib/libnccl.so.2 && \
+    test -f ${NCCL_ROOT}/include/nccl.h && \
+    test -f ${NCCL_ROOT}/lib/x86_64-linux-gnu/libnccl.so && \
+    test -f ${NCCL_ROOT}/lib/libnccl.so
+
+# Cap parallel compilation: nvcc/cicc instances are memory-hungry (~1-2 GB each)
+# and -j$(nproc) can OOM a busy host mid-build. Override if you have headroom:
+#   docker build --build-arg BUILD_JOBS=16 ...
+ARG BUILD_JOBS=16
+
+# CUDA 12.8 reorganized the toolkit under /usr/local/cuda-12.8/targets/... and no
+# longer ships the forward-compat driver (no /usr/local/cuda/compat). The only
+# libcuda.so.1 available at build time is the driver-API link stub in
+# targets/x86_64-linux/lib/stubs/libcuda.so (SONAME libcuda.so.1, all cu* symbols
+# defined). ggml-cuda gets a DT_NEEDED on libcuda.so.1, so executables must be able
+# to resolve it at link time or they fail with "undefined reference to
+# cuMemCreate/cuGetErrorString". ld searches rpath-link dirs by the exact needed
+# filename (libcuda.so.1), but the stub file is named libcuda.so — hence the
+# SONAME-named symlink in a dedicated dir on the rpath-link. -rpath-link is
+# link-time only: at runtime the real host driver (injected by nvidia-container-
+# toolkit via --gpus) is used instead.
+RUN mkdir -p /usr/local/cuda/stubs && \
+    ln -sf ../targets/x86_64-linux/lib/stubs/libcuda.so /usr/local/cuda/stubs/libcuda.so.1 && \
+    test -f /usr/local/cuda/stubs/libcuda.so.1
+
+RUN git clone https://github.com/ggml-org/llama.cpp.git ${LLAMA_CPP_DIR} && \
+    cd ${LLAMA_CPP_DIR} && \
+    git checkout --quiet ${LLAMA_CPP_COMMIT} && \
+    cmake -S . -B build \
+      -DGGML_CUDA=ON -DGGML_CUDA_FA_ALL_QUANTS=ON -DGGML_CUDA_NCCL=ON \
+      -DCMAKE_BUILD_TYPE=Release \
+      "-DCMAKE_EXE_LINKER_FLAGS=-Wl,-rpath-link,/usr/local/cuda/stubs" && \
+    cmake --build build --config Release -j${BUILD_JOBS}
+
+# nvtop — GPU/CPU/RAM monitor for `docker exec -it`. Not in Ubuntu 22.04 repos, so
+# built from a pinned release tag here (stage 1 already has cmake/git/build-essential).
+# NVIDIA support dlopen()s libnvml.so at runtime (host driver, injected by
+# nvidia-container-toolkit) — no NVML/CUDA dev packages are needed to build it.
+# libudev-dev + libdrm-dev are required because the AMD/Intel GPU backends are ON by default.
+ENV NVTOP_TAG=3.3.2
+
+RUN git clone --quiet --depth 1 --branch ${NVTOP_TAG} https://github.com/Syllo/nvtop.git /opt/nvtop && \
+    cmake -S /opt/nvtop -B /opt/nvtop/build \
+      -DNVIDIA_SUPPORT=ON -DCMAKE_BUILD_TYPE=Release && \
+    cmake --build /opt/nvtop/build --config Release
+
+###############################################################################
+# Stage 2: runtime — CUDA runtime libs + just enough to run llama-server and
+# download the model with `hf` on first start
+###############################################################################
+FROM nvidia/cuda:12.8.2-runtime-ubuntu22.04
+
+# Same NCCL location as stage 1 (used by the COPY below).
+ENV NCCL_ROOT=/usr/local/cuda/nccl
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    LLAMA_CPP_DIR=/opt/llama.cpp
+
+# Runtime deps only (nothing from the 5 GB devel toolchain):
+#   libcurl4    - llama.cpp is built with curl support (libcurl4-openssl-dev in stage 1)
+#   libgomp1    - OpenMP runtime (GGML_OPENMP is ON by default in llama.cpp)
+#   libstdc++6  - C++ runtime for the ggml-cuda code
+#   python3/pip - provides the `hf` CLI used to download the model on first start
+#   curl        - quick API checks from inside the container (e.g. curl localhost:8080/health)
+#   openssh-client - ssh/scp/sftp out of the container
+#   vim-tiny    - minimal vi editor; jammy's package ships only /usr/bin/vim.tiny, so a
+#                 `vi` symlink is added explicitly below (swap for full `vim` if needed)
+#   htop        - interactive process monitor
+#   net-tools   - classic network tools (ifconfig/netstat/route) for debugging container networking
+#   socat       - forwards all IPv6 TCP :8888 to the llama-server on 127.0.0.1:8080 (see CMD)
+#   libncurses6/libtinfo6 - runtime libs of the nvtop binary built in stage 1
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3 \
+    python3-pip \
+    ca-certificates \
+    libcurl4 \
+    libgomp1 \
+    libstdc++6 \
+    curl \
+    openssh-client \
+    vim-tiny \
+    htop \
+    net-tools \
+    socat \
+    libncurses6 \
+    libtinfo6 \
+    && ln -sf /usr/bin/vim.tiny /usr/local/bin/vi \
+    && rm -rf /var/lib/apt/lists/*
+
+# Pinned, verified working:
+#   huggingface_hub - provides the `hf` CLI used to download the model on first start
+#   fastapi/uvicorn - serve the status API on :9999 (/startup, /live, /ready — api_app.py)
+# Note: Ubuntu 22.04 ships pip 22 (pre-PEP 668), so --break-system-packages is NOT needed here and would actually fail
+# with "no such option".
+RUN python3 -m pip install --no-cache-dir \
+    "huggingface_hub==1.28.0" \
+    "fastapi==0.116.1" \
+    "uvicorn==0.35.0"
+
+# Only the compiled binaries are needed at runtime; the ~2.4 GB source + build
+# tree from stage 1 is discarded.
+COPY --from=builder ${LLAMA_CPP_DIR}/build/bin/ ${LLAMA_CPP_DIR}/build/bin/
+COPY --from=builder /opt/nvtop/build/src/nvtop /usr/local/bin/nvtop
+
+# NCCL runtime lib: llama-server is built with GGML_CUDA_NCCL=ON and carries a
+# hard DT_NEEDED on libnccl.so.2, which the -runtime base image does not ship.
+COPY --from=builder ${NCCL_ROOT}/lib/x86_64-linux-gnu/libnccl.so* ${NCCL_ROOT}/lib/x86_64-linux-gnu/
+RUN echo "${NCCL_ROOT}/lib/x86_64-linux-gnu" > /etc/ld.so.conf.d/nccl.conf && ldconfig
+
+# Status API app, served by uvicorn on :9999 (started in the CMD below).
+COPY api_app.py ${LLAMA_CPP_DIR}/api_app.py
+COPY run_api.py ${LLAMA_CPP_DIR}/run_api.py
+
+ENV MODEL_REPO=unsloth/Qwen3.8-27B-GGUF \
+    MODEL_FILE=Qwen3.8-27B-UD-Q4_K_M.gguf \
+    MODEL_DIR=/models
+
+# High-performance transfer for large model downloads (hf 1.x name; the old
+# HF_HUB_ENABLE_HF_TRANSFER variable is deprecated in huggingface_hub >= 1.x).
+ENV HF_XET_HIGH_PERFORMANCE=1
+
+ENV HOST=0.0.0.0 \
+    PORT=8080 \
+    CTX_SIZE=131072
+
+# Status API (uvicorn, api_app.py): /startup, /live, /ready served on this port.
+ENV API_PORT=9999
+
+# Bind address for the status API. Default 0.0.0.0 works everywhere; set "::"
+# when Docker's IPv6 is enabled and you want localhost/[::1] to work too — a
+# single dual-stack v6 bind also accepts IPv4, so both host stacks reach it.
+ENV API_HOST=0.0.0.0
+
+# Where the start script drops lifecycle markers that api_app.py reads
+# (download_started flag) and where the background processes' logs go
+# (uvicorn: api.log, socat: socat.log).
+ENV API_STATE_DIR=/tmp/llama-api
+
+# Physical GPU index llama-server runs on (host numbering, as shown by nvidia-smi).
+# All cards are exposed to the container (see docker-compose.yml); this selects one.
+ENV GPU_ID=0
+
+# Q4_K_M weights (~15.3 GB) + 131k q4_0 KV cache (~2.3 GB; only 16 of the 64
+# layers are full-attention) fit on a single idle 24 GB card, so offload all
+# layers by default. Lower this (e.g. 24) if you share the GPU with other jobs.
+ENV N_GPU_LAYERS=99
+
+ENV THREADS=8 \
+    BATCH_SIZE=256 \
+    UBATCH_SIZE=256
+
+# llama-server's auth key. Passed in from outside at runtime (the run_*.sh
+# scripts export it from api.txt); empty/unset -> server runs without API-key
+# auth (see the conditional flag in CMD below).
+ENV API_KEY=
+
+WORKDIR ${LLAMA_CPP_DIR}
+
+CMD ["/bin/bash", "-lc", "\
+set -euo pipefail; \
+mkdir -p \"${MODEL_DIR}\" \"${API_STATE_DIR}\"; \
+nohup python3 run_api.py >>\"${API_STATE_DIR}/api.log\" 2>&1 & \
+# Forward all IPv6 TCP :8888 -> 127.0.0.1:8080 (llama-server). TCP6-LISTEN binds \
+# [::]:8888, i.e. every IPv6 interface; fork handles concurrent connections. \
+nohup socat TCP6-LISTEN:8888,fork,reuseaddr TCP4:127.0.0.1:8080 >>\"${API_STATE_DIR}/socat.log\" 2>&1 & \
+nohup socat TCP6-LISTEN:8889,fork,reuseaddr TCP4:127.0.0.1:9999 >>\"${API_STATE_DIR}/socat2.log\" 2>&1 & \
+if [ ! -f \"${MODEL_DIR}/${MODEL_FILE}\" ]; then \
+  # /startup flips to ok from here on (flag is read by api_app.py). \
+  touch \"${API_STATE_DIR}/download_started\"; \
+  hf download \
+    \"${MODEL_REPO}\" \
+    \"${MODEL_FILE}\" \
+    --local-dir \"${MODEL_DIR}\" \
+    ${HF_TOKEN:+--token \"$HF_TOKEN\"}; \
+else \
+  # Model already present (container restart): nothing to wait for, mark started. \
+  touch \"${API_STATE_DIR}/download_started\"; \
+fi; \
+exec ${LLAMA_CPP_DIR}/build/bin/llama-server \
+  --model \"${MODEL_DIR}/${MODEL_FILE}\" \
+  --host \"${HOST}\" \
+  --port \"${PORT}\" \
+  --ctx-size \"${CTX_SIZE}\" \
+  --jinja \
+  --cache-prompt \
+  --spec-type ngram-mod \
+  --spec-ngram-mod-n-match 24 \
+  --spec-ngram-mod-n-min 48 \
+  --spec-ngram-mod-n-max 64 \
+  --parallel 1 \
+  --cont-batching \
+  --metrics \
+  --temp 0.1 \
+  --top-p 0.95 \
+  --min-p 0.05 \
+  --repeat-penalty 1.0 \
+  --flash-attn on \
+  ${API_KEY:+--api-key \"$API_KEY\"} \
+  --cache-type-k q4_0 \
+  --cache-type-v q4_0 \
+  --main-gpu \"${GPU_ID}\" \
+  --n-gpu-layers \"${N_GPU_LAYERS}\" \
+  --threads \"${THREADS}\" \
+  --batch-size \"${BATCH_SIZE}\" \
+  --ubatch-size \"${UBATCH_SIZE}\" \
+"]

@@ -1,0 +1,22 @@
+i have docker images : 
+boris271142/llama-server-on-salad:cuda128          d6957b0f97bb       7.95GB         3.23GB    U   
+boris271142/llama-server-on-salad:latest           dbc20a5047d3       5.11GB         1.88GB        
+boris271142/llama-server-on-salad_cuda124:latest   dbc20a5047d3       5.11GB         1.88GB        
+boris271142/qwen:latest                            4b4b87ed044a       5.09GB         1.87GB        
+hello-world:latest                                 96498ffd522e       25.9kB         9.49kB    U   
+nvidia/cuda:12.6.2-base-ubuntu24.04                631ec7090c36        353MB         91.6MB        
+nvidia/cuda:12.8.2-devel-ubuntu22.04               4c3d61ac8217       14.2GB         5.07GB        
+pgvector/pgvector:pg16                             ccc6e83d6e35        621MB          156MB    U   
+qwen38-llama-fa-api:latest 
+
+i want to rename : boris271142/llama-server-on-salad_cuda124:latest  into boris271142/llama-server-on-salad:cuda124
+
+and finally i want to keep only:
+
+boris271142/llama-server-on-salad:cuda128          d6957b0f97bb       7.95GB         3.23GB    U       
+boris271142/llama-server-on-salad:cuda124          dbc20a5047d3       5.11GB         1.88GB        
+nvidia/cuda:12.6.2-base-ubuntu24.04                631ec7090c36        353MB         91.6MB        
+nvidia/cuda:12.8.2-devel-ubuntu22.04               4c3d61ac8217       14.2GB         5.07GB        
+pgvector/pgvector:pg16                             ccc6e83d6e35        621MB          156MB    U   
+
+in my docker hub account boris271142 i want to keep only repository boris271142/llama-server-on-salad, remove all other repos
