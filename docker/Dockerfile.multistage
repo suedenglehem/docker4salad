@@ -127,6 +127,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
 #   vim-tiny    - minimal vi editor; jammy's package ships only /usr/bin/vim.tiny, so a
 #                 `vi` symlink is added explicitly below (swap for full `vim` if needed)
 #   htop        - interactive process monitor
+#   bmon        - network bandwidth monitor (per-interface RX/TX rates)
 #   net-tools   - classic network tools (ifconfig/netstat/route) for debugging container networking
 #   socat       - forwards all IPv6 TCP :8888 to the llama-server on 127.0.0.1:8080 (see CMD)
 #   libncurses6/libtinfo6 - runtime libs of the nvtop binary built in stage 1
@@ -141,6 +142,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     openssh-client \
     vim-tiny \
     htop \
+    bmon \
     net-tools \
     socat \
     libncurses6 \
@@ -151,12 +153,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Pinned, verified working:
 #   huggingface_hub - provides the `hf` CLI used to download the model on first start
 #   fastapi/uvicorn - serve the status API on :9999 (/startup, /live, /ready — api_app.py)
+#   llm             - Simon Willison's `llm` CLI; `llm.sh` uses it to chat with the local server
 # Note: Ubuntu 22.04 ships pip 22 (pre-PEP 668), so --break-system-packages is NOT needed here and would actually fail
 # with "no such option".
 RUN python3 -m pip install --no-cache-dir \
     "huggingface_hub==1.28.0" \
     "fastapi==0.116.1" \
-    "uvicorn==0.35.0"
+    "uvicorn==0.35.0" \
+    "llm==0.36"
 
 # Only the compiled binaries are needed at runtime; the ~2.4 GB source + build
 # tree from stage 1 is discarded.
@@ -172,9 +176,37 @@ RUN echo "${NCCL_ROOT}/lib/x86_64-linux-gnu" > /etc/ld.so.conf.d/nccl.conf && ld
 COPY api_app.py ${LLAMA_CPP_DIR}/api_app.py
 COPY run_api.py ${LLAMA_CPP_DIR}/run_api.py
 
+# Chat template passed to llama-server as --chat-template (see CMD). The one
+# embedded in the GGUF is too strict for Claude Code's Anthropic-format
+# requests ("Jinja Exception: System message must be at the beginning" on
+# /v1/messages); this template accepts system messages anywhere in the
+# conversation and adds the reasoning-effort instructions + tool-calling
+# protocol. Override the path with CHAT_TEMPLATE at runtime.
+COPY qwen3.8.q6.jinja ${LLAMA_CPP_DIR}/qwen3.8.q6.jinja
+
+# Developer helpers on PATH (/usr/local/bin precedes /usr/bin, so `uptime` below
+# shadows the stock /usr/bin/uptime in every shell):
+#   llm.sh      - wraps the `llm` CLI: `llm.sh [-m model]` chats with the local
+#                 llama-server via `llm openai endpoint http://localhost:8080/v1`.
+#   question.sh - one-shot smoke test: POSTs a fixed prompt to the local
+#                 llama-server and prints the raw JSON response
+#                 (`question.sh [-p port] [-m model]`).
+#   uptime      - prints how long PID 1 (the container's main process) has been
+#                 running, not the host kernel's uptime. `ps -p 1 -o etime=` is
+#                 the elapsed time of PID 1; the trailing `=` suppresses the header.
+COPY docker_tests/llm.sh /usr/local/bin/llm.sh
+COPY docker_tests/question.sh /usr/local/bin/question.sh
+RUN chmod +x /usr/local/bin/llm.sh /usr/local/bin/question.sh \
+    && printf '#!/bin/sh\nexec ps -p 1 -o etime=\n' > /usr/local/bin/uptime \
+    && chmod +x /usr/local/bin/uptime
+
 ENV MODEL_REPO=unsloth/Qwen3.8-27B-GGUF \
     MODEL_FILE=Qwen3.8-27B-UD-Q4_K_M.gguf \
-    MODEL_DIR=/models
+    MODEL_DIR=/models \
+    MODEL_ALIAS=qwen38-27b
+
+# Jinja chat template (shipped by the COPY above); --chat-template in the CMD.
+ENV CHAT_TEMPLATE=${LLAMA_CPP_DIR}/qwen3.8.q6.jinja
 
 # High-performance transfer for large model downloads (hf 1.x name; the old
 # HF_HUB_ENABLE_HF_TRANSFER variable is deprecated in huggingface_hub >= 1.x).
@@ -239,10 +271,12 @@ else \
 fi; \
 exec ${LLAMA_CPP_DIR}/build/bin/llama-server \
   --model \"${MODEL_DIR}/${MODEL_FILE}\" \
+  --alias \"${MODEL_ALIAS}\" \
   --host \"${HOST}\" \
   --port \"${PORT}\" \
   --ctx-size \"${CTX_SIZE}\" \
   --jinja \
+  --chat-template \"${CHAT_TEMPLATE}\" \
   --cache-prompt \
   --spec-type ngram-mod \
   --spec-ngram-mod-n-match 24 \

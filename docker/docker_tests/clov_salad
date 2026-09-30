@@ -1,0 +1,67 @@
+#!/bin/sh
+# clov_salad — claude CLI pointed at the Qwen3.8-27B on SaladCloud.
+#
+# Based on /usr/local/bin/clov (tr4:8091), but instead of a hardcoded
+# endpoint it takes the SaladCloud access URL and port as arguments and
+# routes through the local salad_proxy (127.0.0.1:8931), because the
+# gateway only authenticates via the Salad-Api-Key header — which claude
+# cannot set itself.
+#
+# Usage:
+#   clov_salad                     # defaults: raisin-bean-...salad.cloud:443
+#   clov_salad URL [PORT] [claude args...]
+#   clov_salad -p "Say hi"         # first arg not a URL -> straight to claude
+#
+# The proxy is auto-started / restarted when it points at a stale upstream.
+DIR=/dd2/andrei/docker/on_salad/docker/docker_tests
+PROXY_PORT="${SALAD_PROXY_PORT:-8931}"
+
+URL="raisin-bean-gy0v5oyd2bt9wfvy.salad.cloud"
+PORT=443
+if [ $# -gt 0 ]; then
+  case "$1" in
+    -*) : ;;                        # claude flag first -> keep defaults
+    *)  URL="$1"; shift ;;
+  esac
+fi
+if [ $# -gt 0 ]; then
+  case "$1" in
+    ''|*[!0-9]*) : ;;               # not a bare number -> not a port
+    *)  PORT="$1"; shift ;;
+  esac
+fi
+
+# Normalize: strip scheme and trailing slash. Port defaults to 443 — the
+# domain is Cloudflare-fronted, only standard ports are proxied (never 8888).
+URL="${URL#http://}"; URL="${URL#https://}"; URL="${URL%/}"
+EXPECTED="https://${URL}:${PORT}"
+
+# ---- proxy: start / restart if stale ----------------------------------------
+CURRENT="$(curl -s --max-time 2 "http://127.0.0.1:${PROXY_PORT}/__upstream" 2>/dev/null)"
+if [ "$CURRENT" != "$EXPECTED" ]; then
+  if [ -f "/tmp/salad_proxy.${PROXY_PORT}.pid" ]; then
+    kill "$(cat "/tmp/salad_proxy.${PROXY_PORT}.pid")" 2>/dev/null
+    sleep 1
+  fi
+  nohup python3 "${DIR}/salad_proxy.py" "${URL}:${PORT}" "${PROXY_PORT}" \
+    >>/tmp/salad_proxy.log 2>&1 &
+  i=0
+  while [ $i -lt 40 ]; do
+    CURRENT="$(curl -s --max-time 2 "http://127.0.0.1:${PROXY_PORT}/__upstream" 2>/dev/null)"
+    [ "$CURRENT" = "$EXPECTED" ] && break
+    sleep 0.5
+    i=$((i+1))
+  done
+  if [ "$CURRENT" != "$EXPECTED" ]; then
+    echo "clov_salad: proxy did not come up on 127.0.0.1:${PROXY_PORT} (see /tmp/salad_proxy.log)" >&2
+    exit 1
+  fi
+fi
+
+# ---- claude ------------------------------------------------------------------
+export ANTHROPIC_BASE_URL="http://127.0.0.1:${PROXY_PORT}"
+export ANTHROPIC_API_KEY="${ANTHROPIC_API_KEY:-local}"
+export CLAUDE_CODE_MAX_CONTEXT_TOKENS=140000
+export CLAUDE_CODE_MAX_OUTPUT_TOKENS=65536
+
+exec "$HOME/.local/bin/claude" --permission-mode bypassPermissions --model qwen "$@"
