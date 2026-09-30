@@ -1,11 +1,13 @@
 """Deploy container group 'qwen38-27b' into new project 'qwen38-27b' (org ma-casa-in-paris).
 
 The script fetches the existing group 'qwen9bter' (project qwen9b-ter) LIVE and
-mirrors its configuration — image, cpu/shm resources, networking (Container
-Gateway config), readiness probe, replicas, restart policy, priority,
-autostart/scheduled scaling — so everything stays identical to qwen9bter by
-construction. Three things are parameterized:
+mirrors its configuration — cpu/shm resources, networking (Container Gateway
+config), readiness probe, replicas, restart policy, priority, autostart/
+scheduled scaling — so everything stays identical to qwen9bter by construction.
+Four things are parameterized:
 
+  * --image : Docker image to deploy (default
+    boris271142/llama-server-on-salad:cuda128); overrides the source group's image
   * --gpu {rtx3090,rtx5090} : GPU class, resolved live via list_gpu_classes
     ('RTX 3090 (24 GB)' / 'RTX 5090 (32 GB)')
   * --disk-size / --memory-size : disk space and memory allocated to the new
@@ -57,6 +59,8 @@ def parse_args() -> argparse.Namespace:
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument("--gpu", required=True, choices=GPU_CHOICES, help="GPU class to deploy on")
+    parser.add_argument("--image", default="boris271142/llama-server-on-salad:cuda128",
+                        help="Docker image for the new group (overrides the source group's image)")
     # Resource allocation for the new group (in GB; converted per spec: memory MB / storage bytes)
     parser.add_argument("--disk-size", type=float, default=25.0,
                         help="Disk space to allocate, in GB (sent as storage_amount bytes)")
@@ -92,12 +96,14 @@ def build_request(
     gpu_uuid: str,
     env: dict[str, str],
     group_name: str,
+    image: str,
     memory_mb: int,
     storage_amount: int,
 ) -> CreateContainerGroupRequest:
     """Map qwen9bter's live GET response onto a ContainerGroupPrototype create request.
 
-    cpu and shm_size are mirrored from the source; memory (MB) and disk
+    cpu and shm_size are mirrored from the source; the container image comes
+    from --image (not the source group); memory (MB) and disk
     (storage_amount, bytes) come from --memory-size / --disk-size.
 
     Field mapping notes (spec-verified):
@@ -117,7 +123,7 @@ def build_request(
         autostart_policy=bool(raw.get("autostart_policy", False)),
         replicas=int(raw["replicas"]),
         restart_policy=str(raw["restart_policy"]),
-        container_image=str(container["image"]),
+        container_image=image,
         command=tuple(container.get("command") or []),
         environment_variables=dict(env),
         cpu=int(resources["cpu"]),
@@ -138,7 +144,8 @@ def main() -> int:
 
     print(f"[1/5] reading source group {SOURCE_GROUP} ({ORGANIZATION_NAME}/{SOURCE_PROJECT})")
     source = get_container_group(ORGANIZATION_NAME, SOURCE_PROJECT, SOURCE_GROUP)
-    print(f"      status={source.current_status!r} image={source.raw['container']['image']!r}")
+    print(f"      status={source.current_status!r} source_image={source.raw['container']['image']!r} "
+          f"(new group will use {args.image!r})")
 
     print("[2/5] resolving GPU class")
     classes = list_gpu_classes(ORGANIZATION_NAME)
@@ -168,11 +175,11 @@ def main() -> int:
     memory_mb = int(round(args.memory_size * 1024))
     storage_amount = int(round(args.disk_size * 1024**3))
     request = build_request(
-        source, gpu.id, env, GROUP_NAMES[0],
+        source, gpu.id, env, GROUP_NAMES[0], image=args.image,
         memory_mb=memory_mb, storage_amount=storage_amount,
     )
     print(f"[4/5] creating container group {request.name!r} in project {NEW_PROJECT!r} "
-          f"(memory={memory_mb} MB, disk={storage_amount} bytes)")
+          f"(image={args.image!r}, memory={memory_mb} MB, disk={storage_amount} bytes)")
     try:
         result = create_container_group(ORGANIZATION_NAME, NEW_PROJECT, request)
     except SaladApiError as e:
