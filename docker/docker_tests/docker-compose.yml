@@ -46,13 +46,15 @@ services:
     environment:
       # Defaults target the production setup (Qwen3.8-27B on an idle RTX 3090).
       # For the 9B smoke-test server use the dedicated `qwen38-9b` service below.
-      MODEL_REPO: "${MODEL_REPO:-unsloth/Qwen3.8-27B-GGUF}"
+      MODEL_REPO: "${MODEL_REPO:-JonathanColetti/Qwen3.8-27B-Uncensored-GGUF}"
 
-      # Verified to exist in the repo (15.3 GiB). Other options if you want
-      # more/less quality: Qwen3.8-27B-Q4_0.gguf (14.9 GiB),
-      # Qwen3.8-27B-UD-Q4_K_S.gguf (14.3 GiB),
-      # Qwen3.8-27B-UD-Q5_K_M.gguf (18.4 GiB, tight on 24 GB at 131k ctx).
-      MODEL_FILE: "${MODEL_FILE:-Qwen3.8-27B-UD-Q4_K_M.gguf}"
+      # The noMTP build (16.55 GB): its MTP draft module is NOT embedded — it
+      # comes from the image's DRAFT_MODEL_FILE (same repo, ~3 GB,
+      # --spec-type draft-mtp). The repo's other variants (Q4_K_M, Q5_K_M,
+      # Q6_K, Q8_0, IQ2_M, IQ4_XS) EMBED the draft: run those with
+      # DRAFT_MODEL_FILE="" so the server doesn't load a double draft.
+      # Other 27B repos (unsloth, bartowski) have no draft: DRAFT_MODEL_FILE="" too.
+      MODEL_FILE: "${MODEL_FILE:-Qwen3.8-27B-Uncensored-noMTP-Q4_K_M.gguf}"
 
       # Optional if the repo is gated or you hit rate limits:
       HF_TOKEN: "${HF_TOKEN:-}"
@@ -75,7 +77,9 @@ services:
       API_HOST: "${API_HOST:-::}"
 
       # Qwen3.8-27B is a hybrid model (only every 4th layer is full attention),
-      # so even 131k context costs only ~2.3 GB of q4_0 KV cache.
+      # so even 131k context costs only ~4.6 GB of q8_0 KV cache. With the
+      # noMTP weights (~15.4 GB) + MTP draft (~3 GB) that's ~23 GB: fits an
+      # idle 24 GB card, but lower CTX_SIZE if the GPU is shared.
       CTX_SIZE: "${CTX_SIZE:-131072}"
 
       # Full offload on an idle 24 GB card. Lower (e.g. "24") if the GPU is
@@ -121,6 +125,9 @@ services:
     environment:
       MODEL_REPO: "empero-ai/Qwen3.8-9B-Distill-GGUF"
       MODEL_FILE: "Qwen3.8-9B-Q4_K_M.gguf"
+      # No MTP draft for the 9B: the image default draft is a 27B file in a
+      # different repo, so disable it explicitly (n-gram self-speculation).
+      DRAFT_MODEL_FILE: ""
       CTX_SIZE: "32768"
       GPU_ID: "0"                 # single card exposed -> always index 0 inside
       N_GPU_LAYERS: "99"

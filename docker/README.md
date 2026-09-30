@@ -2,7 +2,7 @@
 
 Dockerized [llama.cpp](https://github.com/ggml-org/llama.cpp) server for Qwen3.8 GGUF models, pinned to **one** NVIDIA GPU via `GPU_ID`. OpenAI-compatible API on the host port you choose.
 
-- Image: `qwen38-llama-fa-api` — built from `Dockerfile.multistage`: llama.cpp compiled with CUDA + flash attention + NCCL (`-DGGML_CUDA_NCCL=ON`, pinned commit `3af988fab`, build tag b10572) in a CUDA devel stage, shipped on the ~5 GB `nvidia/cuda:12.8.2-runtime` base. Binary lives at `/opt/llama.cpp/build/bin/llama-server`.
+- Image: `boris271142/llama-server-on-salad:cuda128` (container name `qwen38-llama-fa-api`) — built from `Dockerfile.multistage`: llama.cpp compiled with CUDA + flash attention + NCCL (`-DGGML_CUDA_NCCL=ON`, pinned commit `3af988fab`, build tag b10572) in a CUDA devel stage, shipped on the `nvidia/cuda:12.8.2-runtime` base. Binary lives at `/opt/llama.cpp/build/bin/llama-server`.
 - Also ships a small status API on port **9999** (`/startup`, `/live`, `/ready` — see [Status API](#status-api-port-9999)) and debug tools inside the container: `curl`, `ssh`, `vi`, `htop`, `nvtop` (GPU monitor, built from source — not in Ubuntu 22.04 repos).
 - Models are downloaded on first start into `/models` **inside** the container (no host bind mount), so `docker compose down` removes them — nothing is left behind on the host disk.
 
@@ -10,18 +10,18 @@ Dockerized [llama.cpp](https://github.com/ggml-org/llama.cpp) server for Qwen3.8
 
 - Docker + compose v2
 - `nvidia-container-toolkit` installed (so `device_ids` GPU pinning works)
-- Free VRAM on the target card: ~17.6 GB for 27B at 131k ctx, ~6 GB for 9B at 32k ctx
+- Free VRAM on the target card: ~23 GB for 27B at 131k ctx (noMTP Q4_K_M weights + MTP draft + q8_0 KV cache), ~6 GB for 9B at 32k ctx
 
 ## Run it
 
 Full command with every overridable argument spelled out (defaults shown = production setup: Qwen3.8-27B on an idle RTX 3090):
 
 ```bash
-cd /dd2/andrei/docker && \
+cd /dd2/andrei/docker/on_salad/docker/docker_tests && \
 GPU_ID=0 \
 HOST_PORT=8080 \
-MODEL_REPO="unsloth/Qwen3.8-27B-GGUF" \
-MODEL_FILE="Qwen3.8-27B-UD-Q4_K_M.gguf" \
+MODEL_REPO="JonathanColetti/Qwen3.8-27B-Uncensored-GGUF" \
+MODEL_FILE="Qwen3.8-27B-Uncensored-noMTP-Q4_K_M.gguf" \
 CTX_SIZE=131072 \
 N_GPU_LAYERS=99 \
 THREADS=8 \
@@ -35,9 +35,11 @@ timeout 30 docker compose up -d
 
 | Arg | Change it if… |
 |---|---|
-| `GPU_ID` (script arg) | First argument of `run_27b.sh` / `run_9b.sh` (or export it before a raw `docker compose up`): selects the physical card by nvidia-smi index via `device_ids`. Defaults: 27B → `0`, 9B → `1`. Exposing a single card also stops llama.cpp spreading layers across all visible GPUs. On this box: `0`/`2` = RTX 3090 (24 GB), `1` = RTX 3080 Ti (12 GB). Check free VRAM first with `nvidia-smi` — the 27B needs ~17.6 GB free on one card |
+| `GPU_ID` (script arg) | First argument of `run_27b.sh` / `run_9b.sh` (or export it before a raw `docker compose up`): selects the physical card by nvidia-smi index via `device_ids`. Defaults: 27B → `0`, 9B → `1`. Exposing a single card also stops llama.cpp spreading layers across all visible GPUs. On this box: `0`/`2` = RTX 3090 (24 GB), `1` = RTX 3080 Ti (12 GB). Check free VRAM first with `nvidia-smi` — the 27B needs ~23 GB free on one card |
 | `HOST_PORT` | :8080 is taken by another server → use e.g. `8090` until you free it |
-| `MODEL_REPO` / `MODEL_FILE` | Different quant or model. Verified options in the unsloth repo: `Qwen3.8-27B-Q4_0.gguf`, `Qwen3.8-27B-UD-Q4_K_S.gguf`, `Qwen3.8-27B-UD-Q5_K_M.gguf` (18.4 GiB — tight at 131k ctx). For the 9B smoke test: repo `empero-ai/Qwen3.8-9B-Distill-GGUF`, file `Qwen3.8-9B-Q4_K_M.gguf` |
+| `MODEL_REPO` / `MODEL_FILE` | Different quant or model. Default (verified in `JonathanColetti/Qwen3.8-27B-Uncensored-GGUF`): the noMTP `Q4_K_M` build — its MTP draft module is not embedded, it comes from `DRAFT_MODEL_FILE`. The repo's other variants (`Q4_K_M`, `Q5_K_M`, `Q6_K`, `Q8_0`, `IQ2_M`, `IQ4_XS`) embed the draft — run them with `DRAFT_MODEL_FILE=""`. Other 27B repos (unsloth, bartowski) have no draft file: also `DRAFT_MODEL_FILE=""`. For the 9B smoke test: repo `empero-ai/Qwen3.8-9B-Distill-GGUF`, file `Qwen3.8-9B-Q4_K_M.gguf` (the compose file already disables the draft there) |
+| `DRAFT_MODEL_FILE` | MTP draft for `--spec-type draft-mtp` speculative decoding. Default `Qwen3.8-27B-Uncensored-draft-Q8_0.gguf` (~3 GB, same repo as the default model). Set to `""` to disable — the server falls back to n-gram self-speculation (needed for models whose draft isn't in `MODEL_REPO`, or on VRAM-tight cards) |
+| `CHAT_TEMPLATE` | Jinja chat template passed as `--chat-template`. Default empty → the template embedded in the GGUF is used (the default Uncensored model already embeds a permissive one that accepts system messages anywhere). Opt in with `CHAT_TEMPLATE=/opt/llama.cpp/qwen3.8.q6.jinja` (shipped in the image) for models whose embedded template is strict, e.g. Claude Code's Anthropic-format `/v1/messages` |
 | `CTX_SIZE` | Lower it (e.g. `32768`) if VRAM is tight or you don't need 131k — KV cache scales with this |
 | `N_GPU_LAYERS` | Keep `99` for full offload; lower only if the GPU is shared and you want some layers on CPU (slower) |
 | `THREADS` / `BATCH_SIZE` / `UBATCH_SIZE` | Rarely needed; leave as-is unless tuning throughput |
@@ -46,7 +48,7 @@ timeout 30 docker compose up -d
 
 Notes:
 - The `timeout 30` wrapper just guards against a hung build — with the image already built, `up -d` returns in seconds. Drop it if you prefer.
-- If you edit the Dockerfile later, run `docker compose build` first (or add `--build`). Compose reuses the existing `qwen38-llama` image otherwise.
+- If you edit the Dockerfile later, run `docker compose build` first (or add `--build`). Compose reuses the existing `boris271142/llama-server-on-salad:cuda128` image otherwise.
 - First start downloads the model file into the container's `/models`; restarting a stopped container loads it from disk in seconds, but `docker compose down` removes it (the next `up` re-downloads).
 
 ### Smoke test variant — permanent 9B service on the RTX 3080 Ti
@@ -114,32 +116,32 @@ The image itself also lives in Docker's storage (`/var/lib/docker`). Full cleanu
 
 ```bash
 docker compose down && \
-docker rmi qwen38-llama-fa-api nvidia/cuda:12.8.2-runtime-ubuntu22.04
+docker rmi boris271142/llama-server-on-salad:cuda128 nvidia/cuda:12.8.2-runtime-ubuntu22.04
 ```
 
-That removes the container (including the ~15 GB model), the built image, and its base layers. Only your source folder remains. (On a machine you don't mind nuking more broadly, `docker system prune -af` does the same plus any other unused images/volumes.)
+That removes the container (including the ~20 GB of model files), the built image, and its base layers. Only your source folder remains. (On a machine you don't mind nuking more broadly, `docker system prune -af` does the same plus any other unused images/volumes.)
 
 ## Running on another machine (via registry)
 
-Push exactly ONE image — `qwen38-llama-fa-api` (~5 GB). Both services share it; only env vars differ. CUDA base images come from Docker Hub, models download from HF on first start.
+Push exactly ONE image — `boris271142/llama-server-on-salad:cuda128`. Both services share it; only env vars differ. CUDA base images come from Docker Hub, models download from HF on first start.
 
 ```bash
 # On this machine: tag + push (use a meaningful tag, e.g. the llama.cpp build)
-docker tag  qwen38-llama-fa-api:latest ghcr.io/YOUR_USER/qwen38-llama-fa-api:b10572
-docker push ghcr.io/YOUR_USER/qwen38-llama-fa-api:b10572
+docker tag  qwen38-llama:latest boris271142/llama-server-on-salad:b10572
+docker push boris271142/llama-server-on-salad:b10572
 ```
 
 On the remote machine (needs Docker + nvidia-container-toolkit):
-1. Copy this folder over (compose file, `Dockerfile.multistage`, `.dockerignore`, `run_*.sh`).
-2. In docker-compose.yml set both services' `image:` to `ghcr.io/YOUR_USER/qwen38-llama-fa-api:b10572` (the `build:` block then just becomes a local-rebuild fallback).
+1. Copy the `docker_tests/` folder over (compose file, `run_*.sh`, `api.txt`) and `Dockerfile.multistage` + the app files it COPYs (or the whole `docker/` folder).
+2. In docker-compose.yml set both services' `image:` to `boris271142/llama-server-on-salad:b10572` (the `build:` block then just becomes a local-rebuild fallback).
 3. Pull and start — the model downloads from HF on first run:
 
 ```bash
-docker login ghcr.io   # if the repo is private
-docker pull ghcr.io/YOUR_USER/qwen38-llama-fa-api:b10572
-./run_9b.sh            # or ./run_27b.sh; pass the GPU_ID arg for that machine's card layout
+docker login   # Docker Hub, if the repo is private
+docker pull boris271142/llama-server-on-salad:b10572
+./run_9b.sh    # or ./run_27b.sh; pass the GPU_ID arg for that machine's card layout
 ```
 
-Air-gapped (no registry access): `docker save qwen38-llama-fa-api | ssh remote 'docker load'`.
+Air-gapped (no registry access): `docker save boris271142/llama-server-on-salad:b10572 | ssh remote 'docker load'`.
 
 The API key is no longer baked into the image (it's passed via env from api.txt — see `API_KEY` above), so a public registry would be fine; copy `api.txt` to the remote machine too if you want the same auth.

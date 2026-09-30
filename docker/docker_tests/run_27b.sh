@@ -3,7 +3,7 @@
 # Usage: ./run_27b.sh [GPU_ID]
 #   GPU_ID: nvidia-smi index of the card to run on (default: 0).
 #           On this box: 0/2 = RTX 3090 (24 GB), 1 = RTX 3080 Ti (12 GB).
-#           Check free VRAM first with nvidia-smi — the 27B needs ~17.6 GB free.
+#           Check free VRAM first with nvidia-smi — the 27B needs ~23 GB free.
 # Note: switching cards recreates the container, which re-downloads the model
 #       (no host bind mount by design — see docker-compose.yml).
 cd /dd2/andrei/docker/on_salad/docker/docker_tests || exit 1

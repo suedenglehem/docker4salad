@@ -1,6 +1,7 @@
 """Deploy container group 'qwen38-27b-rtx5090' into project 'qwen38-27b' (org ma-casa-in-paris).
 
-Serves Qwen3.8-27B (Q4_K_M) on a single RTX 5090 (32 GB) from image
+Serves Qwen3.8-27B (Uncensored noMTP Q4_K_M + MTP draft speculative decoding)
+on a single RTX 5090 (32 GB) from image
 boris271142/llama-server-on-salad:cuda128 — the CUDA 12.8 build, which is
 required for Blackwell (RTX 5090, sm_120) and matches the pin in
 deploy_qwen38_27b.py.
@@ -17,10 +18,13 @@ Every value below was verified before deployment:
     image's CMD hardcodes the listeners — socat TCP6-LISTEN:8888 ->
     llama-server and TCP6-LISTEN:8889 -> status API — i.e. dual-stack IPv6
     binds, so the gateway is IPv6-capable by construction.
-  * Env vars sized for the 32 GB card: Q4_K_M weights ~15.3 GB + ~132k q4_0
-    KV cache ~2.4 GB (Dockerfile.multistage: 131k ctx measured at ~17.6 GB
-    total) + CUDA/NCCL overhead -> ~20 GB, leaving comfortable headroom.
-    N_GPU_LAYERS=99 (full offload).
+  * Env vars sized for the 32 GB card: noMTP Q4_K_M weights ~15.4 GB + MTP
+    draft Q8_0 ~3 GB + ~132k q8_0 KV cache ~4.6 GB (only 16 of 64 layers are
+    full-attention; see Dockerfile.multistage) -> ~23 GB, comfortable
+    headroom. N_GPU_LAYERS=99 (full offload). The draft lives in the same
+    repo as the main model, so the image's DRAFT_MODEL_REPO= (which falls
+    back to MODEL_REPO) works unmodified; DRAFT_MODEL_FILE='' disables the
+    draft (server falls back to n-gram self-speculation).
   * GPU_ID=0: SaladCloud supports one GPU per container
     (container-engine/docker-run.mdx), so the allocated card is index 0
     inside the container. (The old 'qwen38-27b' group's GPU_ID=1 was a
@@ -89,8 +93,10 @@ def parse_args() -> argparse.Namespace:
                         help="Disk space to allocate, in GB (sent as storage_amount bytes)")
     parser.add_argument("--memory-size", type=float, default=16.0,
                         help="Memory to allocate, in GB (sent as memory MB)")
-    parser.add_argument("--model-repo", default="bartowski/Qwen3.8-27B-GGUF", help="env MODEL_REPO")
-    parser.add_argument("--model-file", default="Qwen3.8-27B-Q4_K_M.gguf", help="env MODEL_FILE")
+    parser.add_argument("--model-repo", default="JonathanColetti/Qwen3.8-27B-Uncensored-GGUF", help="env MODEL_REPO")
+    parser.add_argument("--model-file", default="Qwen3.8-27B-Uncensored-noMTP-Q4_K_M.gguf", help="env MODEL_FILE")
+    parser.add_argument("--draft-model-file", default="Qwen3.8-27B-Uncensored-draft-Q8_0.gguf",
+                        help="env DRAFT_MODEL_FILE (empty disables the draft -> n-gram self-speculation)")
     parser.add_argument("--ctx-size", default="132768", help="env CTX_SIZE")
     return parser.parse_args()
 
@@ -160,6 +166,7 @@ def main() -> int:
         "GPU_ID": "0",
         "MODEL_REPO": args.model_repo,
         "MODEL_FILE": args.model_file,
+        "DRAFT_MODEL_FILE": args.draft_model_file,
         "CTX_SIZE": args.ctx_size,
         "N_GPU_LAYERS": "99",
         "NAME": GROUP_NAME,

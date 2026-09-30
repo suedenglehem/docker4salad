@@ -7,7 +7,7 @@
 # CUDA 12.8 base; llama.cpp is built with NCCL support (-DGGML_CUDA_NCCL=ON).
 #
 # Build: docker build -f Dockerfile.multistage -t qwen38-llama .
-# Run:   see docker-compose.yml (point `dockerfile:` at Dockerfile.multistage)
+# Run:   see docker_tests/docker-compose.yml (or ./run_27b.sh / ./run_9b.sh there)
 
 ###############################################################################
 # Stage 1: builder — CUDA devel toolchain + compilers; discarded after build
@@ -176,12 +176,12 @@ RUN echo "${NCCL_ROOT}/lib/x86_64-linux-gnu" > /etc/ld.so.conf.d/nccl.conf && ld
 COPY api_app.py ${LLAMA_CPP_DIR}/api_app.py
 COPY run_api.py ${LLAMA_CPP_DIR}/run_api.py
 
-# Chat template passed to llama-server as --chat-template (see CMD). The one
-# embedded in the GGUF is too strict for Claude Code's Anthropic-format
-# requests ("Jinja Exception: System message must be at the beginning" on
-# /v1/messages); this template accepts system messages anywhere in the
-# conversation and adds the reasoning-effort instructions + tool-calling
-# protocol. Override the path with CHAT_TEMPLATE at runtime.
+# Permissive Jinja chat template, shipped but NOT used by default (see the
+# CHAT_TEMPLATE env below): opt in by pointing CHAT_TEMPLATE at it. It accepts
+# system messages anywhere in the conversation ("Jinja Exception: System
+# message must be at the beginning" on strict embedded templates) and adds the
+# reasoning-effort instructions + tool-calling protocol — what Claude Code's
+# Anthropic-format /v1/messages requests need.
 COPY qwen3.8.q6.jinja ${LLAMA_CPP_DIR}/qwen3.8.q6.jinja
 
 # Developer helpers on PATH (/usr/local/bin precedes /usr/bin, so `uptime` below
@@ -200,13 +200,34 @@ RUN chmod +x /usr/local/bin/llm.sh /usr/local/bin/question.sh \
     && printf '#!/bin/sh\nexec ps -p 1 -o etime=\n' > /usr/local/bin/uptime \
     && chmod +x /usr/local/bin/uptime
 
-ENV MODEL_REPO=unsloth/Qwen3.8-27B-GGUF \
-    MODEL_FILE=Qwen3.8-27B-UD-Q4_K_M.gguf \
+# Model to serve; both files are downloaded on first start if missing (CMD).
+#   MODEL_*       - main model. The default is the noMTP build: its MTP draft
+#                   module is NOT embedded, it comes from DRAFT_MODEL_FILE.
+#                   (The non-noMTP variants, e.g. Q6_K, embed the draft and
+#                   should run with DRAFT_MODEL_FILE= empty.)
+#   DRAFT_MODEL_* - separate MTP draft model for --spec-type draft-mtp
+#                   speculative decoding (see /dd2/llama-server/cloq4.sh).
+#                   Empty DRAFT_MODEL_FILE -> no draft, llama-server falls
+#                   back to n-gram self-speculation. Empty DRAFT_MODEL_REPO
+#                   -> the draft is fetched from MODEL_REPO.
+#   SPEC_DRAFT_N_MAX - max speculative tokens per draft step (cloq4.sh: 5).
+ENV MODEL_REPO=JonathanColetti/Qwen3.8-27B-Uncensored-GGUF \
+    MODEL_FILE=Qwen3.8-27B-Uncensored-noMTP-Q4_K_M.gguf \
     MODEL_DIR=/models \
-    MODEL_ALIAS=qwen38-27b
+    MODEL_ALIAS=qwen38-27b \
+    DRAFT_MODEL_REPO= \
+    DRAFT_MODEL_FILE=Qwen3.8-27B-Uncensored-draft-Q8_0.gguf \
+    DRAFT_MODEL_DIR=/models \
+    SPEC_DRAFT_N_MAX=5
 
-# Jinja chat template (shipped by the COPY above); --chat-template in the CMD.
-ENV CHAT_TEMPLATE=${LLAMA_CPP_DIR}/qwen3.8.q6.jinja
+# Chat template passed to llama-server as --chat-template (see CMD).
+# Empty (the default) -> the template embedded in the GGUF is used. The default
+# model (JonathanColetti/Qwen3.8-27B-Uncensored) already embeds the permissive
+# template that accepts system messages anywhere in the conversation, so it
+# needs no override — the custom template stays off unless explicitly enabled,
+# e.g. for Claude Code against a model whose embedded template is strict:
+#   CHAT_TEMPLATE=/opt/llama.cpp/qwen3.8.q6.jinja   (shipped by the COPY above)
+ENV CHAT_TEMPLATE=
 
 # High-performance transfer for large model downloads (hf 1.x name; the old
 # HF_HUB_ENABLE_HF_TRANSFER variable is deprecated in huggingface_hub >= 1.x).
@@ -233,9 +254,11 @@ ENV API_STATE_DIR=/tmp/llama-api
 # All cards are exposed to the container (see docker-compose.yml); this selects one.
 ENV GPU_ID=0
 
-# Q4_K_M weights (~15.3 GB) + 131k q4_0 KV cache (~2.3 GB; only 16 of the 64
-# layers are full-attention) fit on a single idle 24 GB card, so offload all
-# layers by default. Lower this (e.g. 24) if you share the GPU with other jobs.
+# noMTP-Q4_K_M weights (~15.4 GB) + MTP draft (~3 GB) + 131k q8_0 KV cache
+# (~4.6 GB; only 16 of the 64 layers are full-attention) come to ~23 GB: a
+# comfortable fit on a 32 GB card (e.g. the RTX 5090 group) and a tight one on
+# an idle 24 GB card, so offload all layers by default. Lower this (e.g. 24) if
+# you share the GPU with other jobs.
 ENV N_GPU_LAYERS=99
 
 ENV THREADS=8 \
@@ -251,7 +274,7 @@ WORKDIR ${LLAMA_CPP_DIR}
 
 CMD ["/bin/bash", "-lc", "\
 set -euo pipefail; \
-mkdir -p \"${MODEL_DIR}\" \"${API_STATE_DIR}\"; \
+mkdir -p \"${MODEL_DIR}\" \"${DRAFT_MODEL_DIR}\" \"${API_STATE_DIR}\"; \
 nohup python3 run_api.py >>\"${API_STATE_DIR}/api.log\" 2>&1 & \
 # Forward all IPv6 TCP :8888 -> 127.0.0.1:8080 (llama-server). TCP6-LISTEN binds \
 # [::]:8888, i.e. every IPv6 interface; fork handles concurrent connections. \
@@ -269,6 +292,14 @@ else \
   # Model already present (container restart): nothing to wait for, mark started. \
   touch \"${API_STATE_DIR}/download_started\"; \
 fi; \
+# Optional MTP draft model for speculative decoding (DRAFT_MODEL_FILE; empty -> skip). \
+if [ -n \"${DRAFT_MODEL_FILE}\" ] && [ ! -f \"${DRAFT_MODEL_DIR}/${DRAFT_MODEL_FILE}\" ]; then \
+  hf download \
+    \"${DRAFT_MODEL_REPO:-${MODEL_REPO}}\" \
+    \"${DRAFT_MODEL_FILE}\" \
+    --local-dir \"${DRAFT_MODEL_DIR}\" \
+    ${HF_TOKEN:+--token \"$HF_TOKEN\"}; \
+fi; \
 exec ${LLAMA_CPP_DIR}/build/bin/llama-server \
   --model \"${MODEL_DIR}/${MODEL_FILE}\" \
   --alias \"${MODEL_ALIAS}\" \
@@ -276,12 +307,14 @@ exec ${LLAMA_CPP_DIR}/build/bin/llama-server \
   --port \"${PORT}\" \
   --ctx-size \"${CTX_SIZE}\" \
   --jinja \
-  --chat-template \"${CHAT_TEMPLATE}\" \
+  # Custom chat template only when CHAT_TEMPLATE is set; empty -> the template \
+  # embedded in the GGUF is used (see the env comment above). \
+  ${CHAT_TEMPLATE:+--chat-template \"${CHAT_TEMPLATE}\"} \
   --cache-prompt \
-  --spec-type ngram-mod \
-  --spec-ngram-mod-n-match 24 \
-  --spec-ngram-mod-n-min 48 \
-  --spec-ngram-mod-n-max 64 \
+  # Speculative decoding: a separate MTP draft model when DRAFT_MODEL_FILE is \
+  # set (see cloq4.sh), otherwise n-gram self-speculation as before. \
+  ${DRAFT_MODEL_FILE:+--spec-type draft-mtp --spec-draft-n-max \"${SPEC_DRAFT_N_MAX}\" --model-draft \"${DRAFT_MODEL_DIR}/${DRAFT_MODEL_FILE}\"} \
+  ${DRAFT_MODEL_FILE:---spec-type ngram-mod --spec-ngram-mod-n-match 24 --spec-ngram-mod-n-min 48 --spec-ngram-mod-n-max 64} \
   --parallel 1 \
   --cont-batching \
   --metrics \
@@ -291,8 +324,8 @@ exec ${LLAMA_CPP_DIR}/build/bin/llama-server \
   --repeat-penalty 1.0 \
   --flash-attn on \
   ${API_KEY:+--api-key \"$API_KEY\"} \
-  --cache-type-k q4_0 \
-  --cache-type-v q4_0 \
+  --cache-type-k q8_0 \
+  --cache-type-v q8_0 \
   --main-gpu \"${GPU_ID}\" \
   --n-gpu-layers \"${N_GPU_LAYERS}\" \
   --threads \"${THREADS}\" \
