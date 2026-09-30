@@ -17,6 +17,14 @@ Implemented strictly from the local OpenAPI spec
       restart_policy); priority lives INSIDE container; networking requires auth/port/protocol
     - 201 Created -> ContainerGroup JSON + Location header; 400/403/429/default -> ProblemDetails
 
+  PATCH .../containers/{container_group_name}        (operationId: update_container_group)
+    - body: ContainerGroupPatch as application/merge-patch+json
+    - live behavior (observed 2026-10-01): top-level and container-level keys are
+      merged (image, command, replicas, ... are kept when omitted), but
+      container.environment_variables is REPLACED wholesale, not merged — to change
+      a subset, send the full desired set (GET the group first)
+    - 200 OK -> ContainerGroup JSON; 400/403/404/429/default -> ProblemDetails
+
   GET /organizations/{organization_name}/gpu-classes (operationId: list_gpu_classes)
     - 200 OK -> GpuClassesList {items: [GpuClass{id, name, prices, ...}]}
 
@@ -203,14 +211,21 @@ def load_api_key(path: str = API_KEY_FILE) -> str:
     return key
 
 
-def _http(method: str, path: str, api_key: str, body: dict | None = None, timeout: float = 30.0):
+def _http(
+    method: str,
+    path: str,
+    api_key: str,
+    body: dict | None = None,
+    timeout: float = 30.0,
+    content_type: str = "application/json",
+):
     url = BASE_URL + path
     data = json.dumps(body).encode("utf-8") if body is not None else None
     req = urllib.request.Request(url, data=data, method=method)
     req.add_header("Salad-Api-Key", api_key)
     req.add_header("User-Agent", USER_AGENT)
     if data is not None:
-        req.add_header("Content-Type", "application/json")
+        req.add_header("Content-Type", content_type)
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             return resp.status, resp.reason, dict(resp.headers), resp.read()
@@ -483,6 +498,105 @@ def create_container_group(
             location=_header_ci(headers, "Location"),
             name=str(payload.get("name", "")),
             id=str(payload.get("id", "")),
+            current_status=state.get("status"),
+            raw=payload,
+        )
+    raise SaladApiError(status, _parse_problem(raw), raw.decode("utf-8", "replace"))
+
+
+# ---------------------------------------------------------------------------
+# update_container_group (PATCH .../containers/{name})
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class UpdateContainerGroupRequest:
+    """Typed ContainerGroupPatch fragment (spec components/schemas/ContainerGroupPatch).
+
+    The PATCH body is served as application/merge-patch+json. Live behavior
+    (observed 2026-10-01): keys present in the body are merged at the top
+    level and inside `container` (image, command, replicas, ... are kept when
+    omitted), but `container.environment_variables` is REPLACED wholesale
+    rather than merged — to change a subset of variables, GET the group first
+    and pass the full desired set here. `to_body()` omits unset fields.
+    """
+
+    environment_variables: dict[str, str] | None = None
+    image: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.environment_variables is not None:
+            for name, value in self.environment_variables.items():
+                if not value:
+                    raise ValueError(
+                        f"environment variable {name!r} has an empty value; the spec "
+                        "requires minLength 1 (a merge patch removes a variable via "
+                        "an explicit null, not an empty string)"
+                    )
+
+    def to_body(self) -> dict:
+        container: dict = {}
+        if self.image is not None:
+            container["image"] = self.image
+        if self.environment_variables is not None:
+            container["environment_variables"] = dict(self.environment_variables)
+        return {"container": container} if container else {}
+
+
+@dataclass(frozen=True)
+class UpdateContainerGroupResult:
+    """200 OK response for update_container_group (spec: ContainerGroup body)."""
+
+    status_code: int  # always 200 on success
+    reason_phrase: str
+    name: str
+    current_status: str | None
+    raw: dict = field(repr=False)
+
+
+def update_container_group(
+    organization_name: str,
+    project_name: str,
+    container_group_name: str,
+    request: UpdateContainerGroupRequest,
+    api_key: str | None = None,
+    timeout: float = 30.0,
+) -> UpdateContainerGroupResult:
+    """Update a container group (PATCH .../containers/{name}, operationId: update_container_group).
+
+    Merge-patch semantics as observed live: only the keys present in the
+    request body change; fields omitted from the body (replicas, resources,
+    networking, ...) are left as-is on the server. Exception:
+    `container.environment_variables` is replaced wholesale rather than merged
+    — pass the full desired set of variables (GET the group first). Returns an
+    UpdateContainerGroupResult on 200 OK; raises SaladApiError for
+    400/403/404/429/default per the spec.
+    """
+    _validate_group_names(organization_name, project_name, container_group_name)
+    body = request.to_body()
+    if not body:
+        raise ValueError("nothing to update: set environment_variables and/or image")
+    key = api_key if api_key is not None else load_api_key()
+    path = (
+        f"/organizations/{organization_name}"
+        f"/projects/{project_name}"
+        f"/containers/{container_group_name}"
+    )
+    status, reason, _headers, raw = _http(
+        "PATCH",
+        path,
+        key,
+        body=body,
+        content_type="application/merge-patch+json",
+        timeout=timeout,
+    )
+    if status == 200:
+        payload = json.loads(raw.decode("utf-8"))
+        state = payload.get("current_state") or {}
+        return UpdateContainerGroupResult(
+            status_code=status,
+            reason_phrase=reason,
+            name=str(payload.get("name", "")),
             current_status=state.get("status"),
             raw=payload,
         )
