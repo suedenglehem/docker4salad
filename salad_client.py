@@ -526,6 +526,11 @@ class UpdateContainerGroupRequest:
     # GPU class UUIDs (spec UpdateContainerResources.gpu_classes, UUID array).
     # Changing the class reschedules the group onto a worker of that class.
     gpu_classes: tuple[str, ...] | None = None
+    # Spec ContainerGroupPatch.readiness_probe (ContainerGroupReadinessProbe):
+    # failure_threshold 1..20, initial_delay_seconds 0..1200, period_seconds 1..120,
+    # success_threshold 1..10, timeout_seconds 1..60 — all timing fields required.
+    # Top-level key, merged like the other patch keys (no env interaction).
+    readiness_probe: dict[str, object] | None = None
 
     def __post_init__(self) -> None:
         if self.environment_variables is not None:
@@ -538,6 +543,9 @@ class UpdateContainerGroupRequest:
                     )
 
     def to_body(self) -> dict:
+        body: dict = {}
+        if self.readiness_probe is not None:
+            body["readiness_probe"] = dict(self.readiness_probe)
         container: dict = {}
         if self.image is not None:
             container["image"] = self.image
@@ -545,7 +553,9 @@ class UpdateContainerGroupRequest:
             container["environment_variables"] = dict(self.environment_variables)
         if self.gpu_classes is not None:
             container["resources"] = {"gpu_classes": list(self.gpu_classes)}
-        return {"container": container} if container else {}
+        if container:
+            body["container"] = container
+        return body
 
 
 @dataclass(frozen=True)
