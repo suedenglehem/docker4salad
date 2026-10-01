@@ -14,7 +14,7 @@ Dockerized [llama.cpp](https://github.com/ggml-org/llama.cpp) server for Qwen3.8
 
 ## Run it
 
-Full command with every overridable argument spelled out (defaults shown = production setup: Qwen3.8-27B on an idle RTX 3090):
+Full command with every overridable argument spelled out (defaults shown = the SaladCloud production setup: Qwen3.8-27B on an RTX 5090 — see [SaladCloud](#saladcloud-27b-production-group)). The 27B does NOT fit this box's 16 GB cards; locally, use the 9B service.
 
 ```bash
 cd /dd2/andrei/docker/on_salad/docker/docker_tests && \
@@ -35,7 +35,7 @@ timeout 30 docker compose up -d
 
 | Arg | Change it if… |
 |---|---|
-| `GPU_ID` (script arg) | First argument of `run_27b.sh` / `run_9b.sh` (or export it before a raw `docker compose up`): selects the physical card by nvidia-smi index via `device_ids`. Defaults: 27B → `0`, 9B → `1`. Exposing a single card also stops llama.cpp spreading layers across all visible GPUs. On this box: `0`/`2` = RTX 3090 (24 GB), `1` = RTX 3080 Ti (12 GB). Check free VRAM first with `nvidia-smi` — the 27B needs ~23 GB free on one card |
+| `GPU_ID` (script arg) | First argument of `run_27b.sh` / `run_9b.sh` (or export it before a raw `docker compose up`): selects the physical card by nvidia-smi index via `device_ids`. Defaults: 27B → `0`, 9B → `1`. Exposing a single card also stops llama.cpp spreading layers across all visible GPUs. On this box (verified 2026-10-01): `0` = RTX 4080 SUPER (16 GB), `1` = RTX 4060 Ti (16 GB) — the 27B needs ~23 GB free on one card, so it does not fit locally (use the [SaladCloud](#saladcloud-27b-production-group) group); the 9B fits either. Check free VRAM first with `nvidia-smi` |
 | `HOST_PORT` | :8080 is taken by another server → use e.g. `8090` until you free it |
 | `MODEL_REPO` / `MODEL_FILE` | Different quant or model. Default (verified in `JonathanColetti/Qwen3.8-27B-Uncensored-GGUF`): the noMTP `Q4_K_M` build — its MTP draft module is not embedded, it comes from `DRAFT_MODEL_FILE`. The repo's other variants (`Q4_K_M`, `Q5_K_M`, `Q6_K`, `Q8_0`, `IQ2_M`, `IQ4_XS`) embed the draft — run them with `DRAFT_MODEL_FILE=""`. Other 27B repos (unsloth, bartowski) have no draft file: also `DRAFT_MODEL_FILE=""`. For the 9B smoke test: repo `empero-ai/Qwen3.8-9B-Distill-GGUF`, file `Qwen3.8-9B-Q4_K_M.gguf` (the compose file already disables the draft there) |
 | `DRAFT_MODEL_FILE` | MTP draft for `--spec-type draft-mtp` speculative decoding. Default `Qwen3.8-27B-Uncensored-draft-Q8_0.gguf` (~3 GB, same repo as the default model). Set to `""` to disable — the server falls back to n-gram self-speculation (needed for models whose draft isn't in `MODEL_REPO`, or on VRAM-tight cards) |
@@ -51,16 +51,29 @@ Notes:
 - If you edit the Dockerfile later, run `docker compose build` first (or add `--build`). Compose reuses the existing `boris271142/llama-server-on-salad:cuda128` image otherwise.
 - First start downloads the model file into the container's `/models`; restarting a stopped container loads it from disk in seconds, but `docker compose down` removes it (the next `up` re-downloads).
 
-### Smoke test variant — permanent 9B service on the RTX 3080 Ti
+### Smoke test variant — permanent 9B service on the RTX 4060 Ti
 
-The 9B server is a second compose service (`qwen38-9b`, host port **8081**), pinned to the 3080 Ti via `device_ids: ["1"]`. Same image as the 27B; only env vars differ.
+The 9B server is a second compose service (`qwen38-9b`, host port **8081**), pinned to the RTX 4060 Ti via `device_ids: ["1"]`. Same image as the 27B; only env vars differ.
 
 ```bash
-cd /dd2/andrei/docker && ./run_9b.sh        # default: RTX 3080 Ti (nvidia-smi index 1)
-./run_9b.sh 0                               # run it on a different card instead
+cd /dd2/andrei/docker/on_salad/docker/docker_tests && ./run_9b.sh   # default: RTX 4060 Ti (nvidia-smi index 1)
+./run_9b.sh 0                                                       # run it on a different card instead
 ```
 
-Measured on this box: model + KV ≈ 5.8 GiB VRAM, ~100 tok/s generation (verified with the multi-stage image 2026-08-23). `crl.sh` / `crl2.sh` target it on :8081.
+Model + KV ≈ 5.8 GiB VRAM, ~100 tok/s generation (measured 2026-08-23 on the previous box's RTX 3080 Ti; the 9B fits either 16 GB card on this box). `crl.sh` / `crl2.sh` target it on :8081.
+
+## SaladCloud (27B production group)
+
+The 27B at full 131k ctx lives in SaladCloud, not on this box: group `qwen38-27b-rtx5090` (org `ma-casa-in-paris`, project `qwen38-27b`), one RTX 5090 (32 GB). It runs image `boris271142/llama-server-on-salad:cuda128-v2` — the same Dockerfile as here (the `docker_tests/` copy is a symlink), extended with first-start `wget` downloads of `DRAFT_MODEL_URL` / `VISION_MODEL_URL`, q8_0 KV cache, and the permissive `qwen3.8.q6.jinja` template. The local compose keeps the plain `cuda128` tag.
+
+- Deploy: `python3 deploy_qwen38_27b_rtx5090.py` (repo root); re-apply after image bumps: `python3 update_qwen38_27b_rtx5090.py`.
+- Switch cards / re-apply env: `python3 update_qwen38_27b_rtx5090.py --gpu rtx3090|rtx5090` (stop → PATCH → start; `--no-restart` for PATCH only). The **3090 (24 GB)** env omits `DRAFT_*` / `VISION_*` — the 3 GB draft + ~1 GB mmproj don't fit next to the 15.4 GB weights — so the image CMD falls back to n-gram self-speculation and text-only serving. Same weights, same 132768 ctx (~21 GB live: the documented 24 GB config). The 5090 keeps the full set.
+- HF token: `hft.txt` next to the deploy scripts (gitignored, chmod 600). If the token validates against the Hub, `update_*.py` adds `HF_TOKEN` to the group env; the image CMD forwards it to `hf download` as `--token` (authenticated, faster pulls). Missing/invalid → skipped with a warning, `hf` downloads anonymously (fine for public repos). The scripts never print it.
+- Gateway (port **443**, `Salad-Api-Key` header): `raisin-bean-gy0v5oyd2bt9wfvy.salad.cloud`.
+- Smoke test: `./docker/docker_tests/curl2_salad.sh -url raisin-bean-gy0v5oyd2bt9wfvy.salad.cloud -m qwen38-27b` (from repo root).
+- Claude Code against it: `./docker/docker_tests/clov_salad raisin-bean-gy0v5oyd2bt9wfvy.salad.cloud` (routes the claude CLI through the local `salad_proxy.py`).
+
+Note: never overwrite a tag that a Salad worker already cached (`image_caching` serves the stale digest) — push a new tag (hence `-v2`) and PATCH the group to it.
 
 ## Verify
 

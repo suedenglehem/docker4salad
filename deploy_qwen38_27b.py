@@ -14,10 +14,12 @@ Four things are parameterized:
     group, given in GB on the CLI (defaults: 25 GB disk, 16 GB memory); sent as
     storage_amount bytes / memory MB per the OpenAPI spec
   * the seven container environment variables, overridable via CLI flags
-    (defaults = Qwen3.8-27B values). DRAFT_MODEL_FILE defaults to empty — no
-    draft: a 24 GB card has no room for the ~3 GB draft, and the image's
-    default draft file lives in a different repo than the bartowski
-    MODEL_REPO, so inheriting it would break the first-start download.
+    (defaults = Qwen3.8-27B values). DRAFT_MODEL_FILE defaults to empty and,
+    when empty, is omitted from the env (the API rejects empty values): a
+    24 GB card has no room for the ~3 GB draft. The default cuda128 image
+    predates draft support (ngram-mod spec, no DRAFT_* handling in its CMD),
+    so no draft runs on it regardless of env; pass a draft file only when
+    --image is switched to a draft-capable tag (e.g. cuda128-v2).
 
 Project creation note: no create-project operation exists in the OpenAPI spec
 (v0.9.0-alpha.17). The script tries POST /organizations/{org}/projects (probed,
@@ -75,7 +77,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--model-repo", default="bartowski/Qwen3.8-27B-GGUF", help="env MODEL_REPO")
     parser.add_argument("--model-file", default="Qwen3.8-27B-Q4_K_M.gguf", help="env MODEL_FILE")
     parser.add_argument("--draft-model-file", default="",
-                        help="env DRAFT_MODEL_FILE (default empty: no draft; the image default draft is in a different repo)")
+                        help="env DRAFT_MODEL_FILE (default empty: omitted; the default cuda128 image has no draft support anyway)")
     parser.add_argument("--ctx-size", default="132768", help="env CTX_SIZE")
     parser.add_argument("--n-gpu-layers", default="99", help="env N_GPU_LAYERS")
     parser.add_argument("--server-name", default="qwen38-27b", help='env NAME')
@@ -162,11 +164,14 @@ def main() -> int:
         "GPU_ID": args.gpu_id,
         "MODEL_REPO": args.model_repo,
         "MODEL_FILE": args.model_file,
-        "DRAFT_MODEL_FILE": args.draft_model_file,
         "CTX_SIZE": args.ctx_size,
         "N_GPU_LAYERS": args.n_gpu_layers,
         "NAME": args.server_name,
     }
+    # Empty env values are rejected (spec minLength 1, and the client enforces
+    # it), so an empty flag leaves the variable unset (image default applies).
+    if args.draft_model_file:
+        env["DRAFT_MODEL_FILE"] = args.draft_model_file
 
     print(f"[3/5] ensuring project {NEW_PROJECT!r}")
     try:

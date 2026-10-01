@@ -523,6 +523,9 @@ class UpdateContainerGroupRequest:
 
     environment_variables: dict[str, str] | None = None
     image: str | None = None
+    # GPU class UUIDs (spec UpdateContainerResources.gpu_classes, UUID array).
+    # Changing the class reschedules the group onto a worker of that class.
+    gpu_classes: tuple[str, ...] | None = None
 
     def __post_init__(self) -> None:
         if self.environment_variables is not None:
@@ -540,6 +543,8 @@ class UpdateContainerGroupRequest:
             container["image"] = self.image
         if self.environment_variables is not None:
             container["environment_variables"] = dict(self.environment_variables)
+        if self.gpu_classes is not None:
+            container["resources"] = {"gpu_classes": list(self.gpu_classes)}
         return {"container": container} if container else {}
 
 
@@ -575,7 +580,7 @@ def update_container_group(
     _validate_group_names(organization_name, project_name, container_group_name)
     body = request.to_body()
     if not body:
-        raise ValueError("nothing to update: set environment_variables and/or image")
+        raise ValueError("nothing to update: set environment_variables, image and/or gpu_classes")
     key = api_key if api_key is not None else load_api_key()
     path = (
         f"/organizations/{organization_name}"

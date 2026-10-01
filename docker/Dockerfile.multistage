@@ -107,7 +107,7 @@ RUN git clone --quiet --depth 1 --branch ${NVTOP_TAG} https://github.com/Syllo/n
 
 ###############################################################################
 # Stage 2: runtime — CUDA runtime libs + just enough to run llama-server and
-# download the model with `hf` on first start
+# download the model with `hf` (draft/vision from full URLs with `wget`) on first start
 ###############################################################################
 FROM nvidia/cuda:12.8.2-runtime-ubuntu22.04
 
@@ -123,6 +123,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
 #   libstdc++6  - C++ runtime for the ggml-cuda code
 #   python3/pip - provides the `hf` CLI used to download the model on first start
 #   curl        - quick API checks from inside the container (e.g. curl localhost:8080/health)
+#   wget        - first-start downloads of DRAFT_MODEL_URL / VISION_MODEL_URL (full URLs; `hf` takes repo ids only)
 #   openssh-client - ssh/scp/sftp out of the container
 #   vim-tiny    - minimal vi editor; jammy's package ships only /usr/bin/vim.tiny, so a
 #                 `vi` symlink is added explicitly below (swap for full `vim` if needed)
@@ -139,6 +140,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libgomp1 \
     libstdc++6 \
     curl \
+    wget \
     openssh-client \
     vim-tiny \
     htop \
@@ -200,24 +202,37 @@ RUN chmod +x /usr/local/bin/llm.sh /usr/local/bin/question.sh \
     && printf '#!/bin/sh\nexec ps -p 1 -o etime=\n' > /usr/local/bin/uptime \
     && chmod +x /usr/local/bin/uptime
 
-# Model to serve; both files are downloaded on first start if missing (CMD).
-#   MODEL_*       - main model. The default is the noMTP build: its MTP draft
-#                   module is NOT embedded, it comes from DRAFT_MODEL_FILE.
-#                   (The non-noMTP variants, e.g. Q6_K, embed the draft and
-#                   should run with DRAFT_MODEL_FILE= empty.)
-#   DRAFT_MODEL_* - separate MTP draft model for --spec-type draft-mtp
-#                   speculative decoding (see /dd2/llama-server/cloq4.sh).
-#                   Empty DRAFT_MODEL_FILE -> no draft, llama-server falls
-#                   back to n-gram self-speculation. Empty DRAFT_MODEL_REPO
-#                   -> the draft is fetched from MODEL_REPO.
+# Model to serve; all files are downloaded on first start if missing (CMD).
+#   MODEL_*       - main model, downloaded with `hf` from the repo id (hf
+#                   download takes repo ids, not full URLs). The default is
+#                   the noMTP build: its MTP draft module is NOT embedded.
+#                   (The non-noMTP variants, e.g. Q6_K, embed the draft.)
+#   DRAFT_MODEL_URL - full URL of the MTP draft model for --spec-type
+#                   draft-mtp speculative decoding; downloaded with wget on
+#                   first start, filename taken from the URL's basename. Takes
+#                   precedence over DRAFT_MODEL_FILE when both are set (the
+#                   defaults point at the same file).
+#   DRAFT_MODEL_FILE / DRAFT_MODEL_REPO - repo+file fallback, downloaded with
+#                   `hf`, used when DRAFT_MODEL_URL is empty. Both empty -> no
+#                   draft, llama-server falls back to n-gram
+#                   self-speculation. Empty DRAFT_MODEL_REPO -> the draft is
+#                   fetched from MODEL_REPO.
+#   VISION_MODEL_URL - full URL of the multimodal projector (mmproj) GGUF,
+#                   downloaded with wget on first start and passed to
+#                   llama-server as --mmproj (enables image input). Empty
+#                   (the default) -> no vision; the projector costs ~1 GB of
+#                   VRAM, so it stays off unless the card has the headroom.
 #   SPEC_DRAFT_N_MAX - max speculative tokens per draft step (cloq4.sh: 5).
 ENV MODEL_REPO=JonathanColetti/Qwen3.8-27B-Uncensored-GGUF \
     MODEL_FILE=Qwen3.8-27B-Uncensored-noMTP-Q4_K_M.gguf \
     MODEL_DIR=/models \
     MODEL_ALIAS=qwen38-27b \
+    DRAFT_MODEL_URL=https://huggingface.co/JonathanColetti/Qwen3.8-27B-Uncensored-GGUF/resolve/main/Qwen3.8-27B-Uncensored-draft-Q8_0.gguf \
     DRAFT_MODEL_REPO= \
     DRAFT_MODEL_FILE=Qwen3.8-27B-Uncensored-draft-Q8_0.gguf \
     DRAFT_MODEL_DIR=/models \
+    VISION_MODEL_URL= \
+    VISION_MODEL_DIR=/models \
     SPEC_DRAFT_N_MAX=5
 
 # Chat template passed to llama-server as --chat-template (see CMD).
@@ -274,7 +289,7 @@ WORKDIR ${LLAMA_CPP_DIR}
 
 CMD ["/bin/bash", "-lc", "\
 set -euo pipefail; \
-mkdir -p \"${MODEL_DIR}\" \"${DRAFT_MODEL_DIR}\" \"${API_STATE_DIR}\"; \
+mkdir -p \"${MODEL_DIR}\" \"${DRAFT_MODEL_DIR}\" \"${VISION_MODEL_DIR}\" \"${API_STATE_DIR}\"; \
 nohup python3 run_api.py >>\"${API_STATE_DIR}/api.log\" 2>&1 & \
 # Forward all IPv6 TCP :8888 -> 127.0.0.1:8080 (llama-server). TCP6-LISTEN binds \
 # [::]:8888, i.e. every IPv6 interface; fork handles concurrent connections. \
@@ -292,13 +307,29 @@ else \
   # Model already present (container restart): nothing to wait for, mark started. \
   touch \"${API_STATE_DIR}/download_started\"; \
 fi; \
-# Optional MTP draft model for speculative decoding (DRAFT_MODEL_FILE; empty -> skip). \
-if [ -n \"${DRAFT_MODEL_FILE}\" ] && [ ! -f \"${DRAFT_MODEL_DIR}/${DRAFT_MODEL_FILE}\" ]; then \
-  hf download \
-    \"${DRAFT_MODEL_REPO:-${MODEL_REPO}}\" \
-    \"${DRAFT_MODEL_FILE}\" \
-    --local-dir \"${DRAFT_MODEL_DIR}\" \
-    ${HF_TOKEN:+--token \"$HF_TOKEN\"}; \
+# Optional MTP draft model for speculative decoding: DRAFT_MODEL_URL (full \
+# URL, wget) takes precedence; DRAFT_MODEL_FILE (repo+file, hf) is the \
+# fallback. Neither set -> no draft, n-gram self-speculation below. \
+DRAFT_PATH=; \
+if [ -n \"${DRAFT_MODEL_URL}\" ]; then \
+  DRAFT_PATH=\"${DRAFT_MODEL_DIR}/${DRAFT_MODEL_URL##*/}\"; \
+elif [ -n \"${DRAFT_MODEL_FILE}\" ]; then \
+  DRAFT_PATH=\"${DRAFT_MODEL_DIR}/${DRAFT_MODEL_FILE}\"; \
+fi; \
+if [ -n \"${DRAFT_PATH}\" ] && [ ! -f \"${DRAFT_PATH}\" ]; then \
+  if [ -n \"${DRAFT_MODEL_URL}\" ]; then \
+    wget -c -O \"${DRAFT_PATH}\" \"${DRAFT_MODEL_URL}\"; \
+  else \
+    hf download \
+      \"${DRAFT_MODEL_REPO:-${MODEL_REPO}}\" \
+      \"${DRAFT_MODEL_FILE}\" \
+      --local-dir \"${DRAFT_MODEL_DIR}\" \
+      ${HF_TOKEN:+--token \"$HF_TOKEN\"}; \
+  fi; \
+fi; \
+# Optional multimodal projector (VISION_MODEL_URL, full URL, wget) for vision. \
+if [ -n \"${VISION_MODEL_URL}\" ] && [ ! -f \"${VISION_MODEL_DIR}/${VISION_MODEL_URL##*/}\" ]; then \
+  wget -c -O \"${VISION_MODEL_DIR}/${VISION_MODEL_URL##*/}\" \"${VISION_MODEL_URL}\"; \
 fi; \
 exec ${LLAMA_CPP_DIR}/build/bin/llama-server \
   --model \"${MODEL_DIR}/${MODEL_FILE}\" \
@@ -311,10 +342,12 @@ exec ${LLAMA_CPP_DIR}/build/bin/llama-server \
   # embedded in the GGUF is used (see the env comment above). \
   ${CHAT_TEMPLATE:+--chat-template \"${CHAT_TEMPLATE}\"} \
   --cache-prompt \
-  # Speculative decoding: a separate MTP draft model when DRAFT_MODEL_FILE is \
-  # set (see cloq4.sh), otherwise n-gram self-speculation as before. \
-  ${DRAFT_MODEL_FILE:+--spec-type draft-mtp --spec-draft-n-max \"${SPEC_DRAFT_N_MAX}\" --model-draft \"${DRAFT_MODEL_DIR}/${DRAFT_MODEL_FILE}\"} \
-  ${DRAFT_MODEL_FILE:---spec-type ngram-mod --spec-ngram-mod-n-match 24 --spec-ngram-mod-n-min 48 --spec-ngram-mod-n-max 64} \
+  # Speculative decoding: a separate MTP draft model when a draft was \
+  # resolved (see DRAFT_PATH above), otherwise n-gram self-speculation. \
+  ${DRAFT_PATH:+--spec-type draft-mtp --spec-draft-n-max \"${SPEC_DRAFT_N_MAX}\" --model-draft \"${DRAFT_PATH}\"} \
+  ${DRAFT_PATH:---spec-type ngram-mod --spec-ngram-mod-n-match 24 --spec-ngram-mod-n-min 48 --spec-ngram-mod-n-max 64} \
+  # Multimodal projector (vision) only when VISION_MODEL_URL is set. \
+  ${VISION_MODEL_URL:+--mmproj \"${VISION_MODEL_DIR}/${VISION_MODEL_URL##*/}\"} \
   --parallel 1 \
   --cont-batching \
   --metrics \

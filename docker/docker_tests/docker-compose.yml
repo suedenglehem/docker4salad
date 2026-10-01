@@ -25,8 +25,9 @@ services:
     # stops llama.cpp from spreading layers across every visible GPU — with
     # several cards exposed it does that by default, and --main-gpu alone does
     # NOT hide the others. The card is chosen via $GPU_ID (first argument of
-    # run_27b.sh, default 0). On this box: 0/2 = RTX 3090 (24 GB),
-    # 1 = RTX 3080 Ti (12 GB).
+    # run_27b.sh, default 0). On this box (verified 2026-10-01):
+    # 0 = RTX 4080 SUPER (16 GB), 1 = RTX 4060 Ti (16 GB). The 27B does NOT
+    # fit either card — for it use the SaladCloud group (see run_27b.sh).
     deploy:
       resources:
         reservations:
@@ -44,8 +45,9 @@ services:
       - "${STATUS_API_HOST_PORT:-9999}:9999"
 
     environment:
-      # Defaults target the production setup (Qwen3.8-27B on an idle RTX 3090).
-      # For the 9B smoke-test server use the dedicated `qwen38-9b` service below.
+      # Defaults match the SaladCloud production group (Qwen3.8-27B on an
+      # RTX 5090). Locally the 27B does not fit either 16 GB card — use the
+      # dedicated `qwen38-9b` service below for local runs.
       MODEL_REPO: "${MODEL_REPO:-JonathanColetti/Qwen3.8-27B-Uncensored-GGUF}"
 
       # The noMTP build (16.55 GB): its MTP draft module is NOT embedded — it
@@ -78,12 +80,14 @@ services:
 
       # Qwen3.8-27B is a hybrid model (only every 4th layer is full attention),
       # so even 131k context costs only ~4.6 GB of q8_0 KV cache. With the
-      # noMTP weights (~15.4 GB) + MTP draft (~3 GB) that's ~23 GB: fits an
-      # idle 24 GB card, but lower CTX_SIZE if the GPU is shared.
+      # noMTP weights (~15.4 GB) + MTP draft (~3 GB) that's ~23 GB: fits a
+      # 32 GB card (RTX 5090) with headroom, or a 24 GB card (RTX 3090)
+      # tightly — NOT the 16 GB cards on this box, but lower CTX_SIZE if
+      # the GPU is shared.
       CTX_SIZE: "${CTX_SIZE:-131072}"
 
-      # Full offload on an idle 24 GB card. Lower (e.g. "24") if the GPU is
-      # shared with other workloads; expect slower generation.
+      # Full offload. Lower (e.g. "24") if the GPU is shared with other
+      # workloads; expect slower generation.
       N_GPU_LAYERS: "${N_GPU_LAYERS:-99}"
 
       THREADS: "${THREADS:-8}"
@@ -96,7 +100,7 @@ services:
     # `- ./models:/models` if you want to cache the download across recreates
     # (then clean up manually with `rm -rf ./models`).
 
-  # Qwen3.8-9B smoke-test server, on the RTX 3080 Ti by default
+  # Qwen3.8-9B smoke-test server, on the RTX 4060 Ti by default
   # (nvidia-smi index 1; override with ./run_9b.sh <GPU_ID>).
   # Same image as above; only env vars and port differ. Bring up alone with:
   #   docker compose up -d qwen38-9b     (or ./run_9b.sh)
@@ -112,7 +116,7 @@ services:
         reservations:
           devices:
             - driver: nvidia
-              # RTX 3080 Ti by default; override with ./run_9b.sh <GPU_ID>
+              # RTX 4060 Ti by default; override with ./run_9b.sh <GPU_ID>
               device_ids: ["${GPU_ID:-1}"]
               capabilities: [gpu]
 

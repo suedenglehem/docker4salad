@@ -2,8 +2,11 @@
 # Qwen3.8-27B production server (see README.md "Run it").
 # Usage: ./run_27b.sh [GPU_ID]
 #   GPU_ID: nvidia-smi index of the card to run on (default: 0).
-#           On this box: 0/2 = RTX 3090 (24 GB), 1 = RTX 3080 Ti (12 GB).
-#           Check free VRAM first with nvidia-smi — the 27B needs ~23 GB free.
+#           On this box (verified 2026-10-01): 0 = RTX 4080 SUPER (16 GB),
+#           1 = RTX 4060 Ti (16 GB). NOTE: the 27B does NOT fit either card —
+#           Q4_K_M weights alone are ~15.4 GB, the live config ~24 GB — so this
+#           script is for smaller models or a partial CPU offload only. For the
+#           27B use the SaladCloud group: ./curl2_salad.sh or clov_salad.
 # Note: switching cards recreates the container, which re-downloads the model
 #       (no host bind mount by design — see docker-compose.yml).
 cd /dd2/andrei/docker/on_salad/docker/docker_tests || exit 1
