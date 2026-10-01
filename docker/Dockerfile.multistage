@@ -223,26 +223,37 @@ RUN chmod +x /usr/local/bin/llm.sh /usr/local/bin/question.sh \
 #                   (the default) -> no vision; the projector costs ~1 GB of
 #                   VRAM, so it stays off unless the card has the headroom.
 #   SPEC_DRAFT_N_MAX - max speculative tokens per draft step (cloq4.sh: 5).
+#
+# Optional-feature values use the sentinel "none": empty or "none" means the
+# feature is OFF (the CMD does nothing with that variable); any other value
+# enables it. "none" (instead of just empty) exists because the SaladCloud
+# API rejects empty env values (minLength 1) — a group cannot blank a
+# baked-in default, but it CAN set e.g. DRAFT_MODEL_URL=none to disable the
+# feature. All defaults below are "none": the image is plain out of the box,
+# and a group opts in per feature — the 27B group sets DRAFT_MODEL_URL /
+# DRAFT_MODEL_FILE to the Qwen3.8-27B-Uncensored-draft-Q8_0.gguf from the
+# MODEL_REPO repo.
 ENV MODEL_REPO=JonathanColetti/Qwen3.8-27B-Uncensored-GGUF \
     MODEL_FILE=Qwen3.8-27B-Uncensored-noMTP-Q4_K_M.gguf \
     MODEL_DIR=/models \
     MODEL_ALIAS=qwen38-27b \
-    DRAFT_MODEL_URL=https://huggingface.co/JonathanColetti/Qwen3.8-27B-Uncensored-GGUF/resolve/main/Qwen3.8-27B-Uncensored-draft-Q8_0.gguf \
+    DRAFT_MODEL_URL=none \
     DRAFT_MODEL_REPO= \
-    DRAFT_MODEL_FILE=Qwen3.8-27B-Uncensored-draft-Q8_0.gguf \
+    DRAFT_MODEL_FILE=none \
     DRAFT_MODEL_DIR=/models \
-    VISION_MODEL_URL= \
+    VISION_MODEL_URL=none \
     VISION_MODEL_DIR=/models \
     SPEC_DRAFT_N_MAX=5
 
 # Chat template passed to llama-server as --chat-template (see CMD).
-# Empty (the default) -> the template embedded in the GGUF is used. The default
-# model (JonathanColetti/Qwen3.8-27B-Uncensored) already embeds the permissive
-# template that accepts system messages anywhere in the conversation, so it
-# needs no override — the custom template stays off unless explicitly enabled,
-# e.g. for Claude Code against a model whose embedded template is strict:
+# "none"/empty (the default) -> the template embedded in the GGUF is used.
+# The default model (JonathanColetti/Qwen3.8-27B-Uncensored) already embeds
+# the permissive template that accepts system messages anywhere in the
+# conversation, so it needs no override — the custom template stays off
+# unless explicitly enabled, e.g. for Claude Code against a model whose
+# embedded template is strict:
 #   CHAT_TEMPLATE=/opt/llama.cpp/qwen3.8.q6.jinja   (shipped by the COPY above)
-ENV CHAT_TEMPLATE=
+ENV CHAT_TEMPLATE=none
 
 # High-performance transfer for large model downloads (hf 1.x name; the old
 # HF_HUB_ENABLE_HF_TRANSFER variable is deprecated in huggingface_hub >= 1.x).
@@ -307,17 +318,25 @@ else \
   # Model already present (container restart): nothing to wait for, mark started. \
   touch \"${API_STATE_DIR}/download_started\"; \
 fi; \
+# Optional features use the \"none\" sentinel (see the env comments above): \
+# empty or \"none\" -> the feature stays off and the CMD does nothing with it; \
+# any other value enables it. \
+# Custom chat template: CT holds the effective path (empty when disabled). \
+CT=; \
+if [ -n \"${CHAT_TEMPLATE}\" ] && [ \"${CHAT_TEMPLATE}\" != \"none\" ]; then \
+  CT=\"${CHAT_TEMPLATE}\"; \
+fi; \
 # Optional MTP draft model for speculative decoding: DRAFT_MODEL_URL (full \
 # URL, wget) takes precedence; DRAFT_MODEL_FILE (repo+file, hf) is the \
-# fallback. Neither set -> no draft, n-gram self-speculation below. \
+# fallback. Neither enabled -> no draft, n-gram self-speculation below. \
 DRAFT_PATH=; \
-if [ -n \"${DRAFT_MODEL_URL}\" ]; then \
+if [ -n \"${DRAFT_MODEL_URL}\" ] && [ \"${DRAFT_MODEL_URL}\" != \"none\" ]; then \
   DRAFT_PATH=\"${DRAFT_MODEL_DIR}/${DRAFT_MODEL_URL##*/}\"; \
-elif [ -n \"${DRAFT_MODEL_FILE}\" ]; then \
+elif [ -n \"${DRAFT_MODEL_FILE}\" ] && [ \"${DRAFT_MODEL_FILE}\" != \"none\" ]; then \
   DRAFT_PATH=\"${DRAFT_MODEL_DIR}/${DRAFT_MODEL_FILE}\"; \
 fi; \
 if [ -n \"${DRAFT_PATH}\" ] && [ ! -f \"${DRAFT_PATH}\" ]; then \
-  if [ -n \"${DRAFT_MODEL_URL}\" ]; then \
+  if [ -n \"${DRAFT_MODEL_URL}\" ] && [ \"${DRAFT_MODEL_URL}\" != \"none\" ]; then \
     wget -c -O \"${DRAFT_PATH}\" \"${DRAFT_MODEL_URL}\"; \
   else \
     hf download \
@@ -328,8 +347,12 @@ if [ -n \"${DRAFT_PATH}\" ] && [ ! -f \"${DRAFT_PATH}\" ]; then \
   fi; \
 fi; \
 # Optional multimodal projector (VISION_MODEL_URL, full URL, wget) for vision. \
-if [ -n \"${VISION_MODEL_URL}\" ] && [ ! -f \"${VISION_MODEL_DIR}/${VISION_MODEL_URL##*/}\" ]; then \
-  wget -c -O \"${VISION_MODEL_DIR}/${VISION_MODEL_URL##*/}\" \"${VISION_MODEL_URL}\"; \
+VISION_PATH=; \
+if [ -n \"${VISION_MODEL_URL}\" ] && [ \"${VISION_MODEL_URL}\" != \"none\" ]; then \
+  VISION_PATH=\"${VISION_MODEL_DIR}/${VISION_MODEL_URL##*/}\"; \
+  if [ ! -f \"${VISION_PATH}\" ]; then \
+    wget -c -O \"${VISION_PATH}\" \"${VISION_MODEL_URL}\"; \
+  fi; \
 fi; \
 exec ${LLAMA_CPP_DIR}/build/bin/llama-server \
   --model \"${MODEL_DIR}/${MODEL_FILE}\" \
@@ -338,16 +361,16 @@ exec ${LLAMA_CPP_DIR}/build/bin/llama-server \
   --port \"${PORT}\" \
   --ctx-size \"${CTX_SIZE}\" \
   --jinja \
-  # Custom chat template only when CHAT_TEMPLATE is set; empty -> the template \
-  # embedded in the GGUF is used (see the env comment above). \
-  ${CHAT_TEMPLATE:+--chat-template \"${CHAT_TEMPLATE}\"} \
+  # Custom chat template only when enabled (CT non-empty); otherwise the \
+  # template embedded in the GGUF is used (see the env comment above). \
+  ${CT:+--chat-template \"${CT}\"} \
   --cache-prompt \
   # Speculative decoding: a separate MTP draft model when a draft was \
   # resolved (see DRAFT_PATH above), otherwise n-gram self-speculation. \
   ${DRAFT_PATH:+--spec-type draft-mtp --spec-draft-n-max \"${SPEC_DRAFT_N_MAX}\" --model-draft \"${DRAFT_PATH}\"} \
   ${DRAFT_PATH:---spec-type ngram-mod --spec-ngram-mod-n-match 24 --spec-ngram-mod-n-min 48 --spec-ngram-mod-n-max 64} \
-  # Multimodal projector (vision) only when VISION_MODEL_URL is set. \
-  ${VISION_MODEL_URL:+--mmproj \"${VISION_MODEL_DIR}/${VISION_MODEL_URL##*/}\"} \
+  # Multimodal projector (vision) only when enabled (see VISION_PATH above). \
+  ${VISION_PATH:+--mmproj \"${VISION_PATH}\"} \
   --parallel 1 \
   --cont-batching \
   --metrics \

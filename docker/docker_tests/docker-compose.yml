@@ -12,7 +12,7 @@ services:
     # Explicit name so `docker build -t qwen38-llama .` and compose share one
     # image; with it present, `compose up` reuses it without rebuilding.
     # Shared by both services below (27B + 9B); only env vars differ.
-    image: boris271142/llama-server-on-salad:cuda128
+    image: boris271142/llama-server-on-salad:cuda128-v3
 
     container_name: qwen38-llama-fa-api
     restart: unless-stopped
@@ -51,12 +51,17 @@ services:
       MODEL_REPO: "${MODEL_REPO:-JonathanColetti/Qwen3.8-27B-Uncensored-GGUF}"
 
       # The noMTP build (16.55 GB): its MTP draft module is NOT embedded — it
-      # comes from the image's DRAFT_MODEL_FILE (same repo, ~3 GB,
+      # comes from DRAFT_MODEL_FILE below (same repo, ~3 GB,
       # --spec-type draft-mtp). The repo's other variants (Q4_K_M, Q5_K_M,
       # Q6_K, Q8_0, IQ2_M, IQ4_XS) EMBED the draft: run those with
-      # DRAFT_MODEL_FILE="" so the server doesn't load a double draft.
-      # Other 27B repos (unsloth, bartowski) have no draft: DRAFT_MODEL_FILE="" too.
+      # DRAFT_MODEL_FILE=none so the server doesn't load a double draft.
+      # Other 27B repos (unsloth, bartowski) have no draft: DRAFT_MODEL_FILE=none too.
       MODEL_FILE: "${MODEL_FILE:-Qwen3.8-27B-Uncensored-noMTP-Q4_K_M.gguf}"
+
+      # The image default is `none` (plain server, n-gram self-speculation),
+      # so the noMTP build names its draft explicitly. DRAFT_MODEL_REPO is
+      # unset -> `hf` falls back to MODEL_REPO (same repo).
+      DRAFT_MODEL_FILE: "${DRAFT_MODEL_FILE:-Qwen3.8-27B-Uncensored-draft-Q8_0.gguf}"
 
       # Optional if the repo is gated or you hit rate limits:
       HF_TOKEN: "${HF_TOKEN:-}"
@@ -105,7 +110,7 @@ services:
   # Same image as above; only env vars and port differ. Bring up alone with:
   #   docker compose up -d qwen38-9b     (or ./run_9b.sh)
   qwen38-9b:
-    image: boris271142/llama-server-on-salad:cuda128
+    image: boris271142/llama-server-on-salad:cuda128-v3
 
     container_name: qwen38-9b
     restart: unless-stopped
@@ -129,9 +134,8 @@ services:
     environment:
       MODEL_REPO: "empero-ai/Qwen3.8-9B-Distill-GGUF"
       MODEL_FILE: "Qwen3.8-9B-Q4_K_M.gguf"
-      # No MTP draft for the 9B: the image default draft is a 27B file in a
-      # different repo, so disable it explicitly (n-gram self-speculation).
-      DRAFT_MODEL_FILE: ""
+      # No MTP draft for the 9B: the image default is `none`, so the server
+      # uses n-gram self-speculation.
       CTX_SIZE: "32768"
       GPU_ID: "0"                 # single card exposed -> always index 0 inside
       N_GPU_LAYERS: "99"
