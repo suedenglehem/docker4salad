@@ -250,7 +250,7 @@ ENV MODEL_REPO=JonathanColetti/Qwen3.8-27B-Uncensored-GGUF \
     VISION_MODEL_DIR=/models \
     SPEC_DRAFT_N_MAX=5
 
-# Chat template passed to llama-server as --chat-template (see CMD).
+# Chat template passed to llama-server as --chat-template-file (see CMD).
 # "none"/empty (the default) -> the template embedded in the GGUF is used.
 # The default model (JonathanColetti/Qwen3.8-27B-Uncensored) already embeds
 # the permissive template that accepts system messages anywhere in the
@@ -359,7 +359,9 @@ exec ${LLAMA_CPP_DIR}/build/bin/llama-server \
   --jinja \
   # Custom chat template only when enabled (CT non-empty); otherwise the \
   # template embedded in the GGUF is used (see the env comment above). \
-  ${CT:+--chat-template \"${CT}\"} \
+  # CT is a FILE PATH -> --chat-template-file (the inline --chat-template \
+  # flag would treat the path as the literal template text). \
+  ${CT:+--chat-template-file \"${CT}\"} \
   --cache-prompt \
   # Speculative decoding: a separate MTP draft model when a draft was \
   # resolved (see DRAFT_PATH above), otherwise n-gram self-speculation. \

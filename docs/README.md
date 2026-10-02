@@ -35,7 +35,6 @@ The two keys to the whole setup:
 | `deploy_qwen38_9b.py` / `deploy_qwen9b.py` | repo root | 9B deployers (`qwen38-9b`, `qwen9b`) — plain, no draft/vision/template. |
 | `deploy_qwen38_27b_rtx5090.py` | repo root | Earlier 27B deployer (`qwen38-27b-rtx5090`, `lmss:cuda128-v2`). |
 | `patch_qwen38_9b_rescue.py` | repo root | One-off: digest-pinned PATCH to force a fresh image onto `qwen38-9b`. |
-| `clov_salad` | `docker/docker_tests/` | **Legacy** wrapper, superseded by `cl_salad` (see note below). |
 
 Everything runs against org **`ma-casa-in-paris`**, project **`qwen38-27b`**.
 
@@ -50,15 +49,26 @@ the `claude` CLI at a local model), except it speaks to a Salad public gateway,
 so it first stands up the local `salad_proxy.py` and lets the proxy carry the
 `Salad-Api-Key`.
 
+The **gateway URL is the first argument** — it's the one thing that changes when
+the group is recreated, so you point `cl_salad` at a new group by passing the new
+DNS, not by editing the script:
+
 ```bash
-cl_salad                       # open Claude Code against the model
-cl_salad -p "Say hello"        # pass any claude flag straight through
+cl_salad                                        # built-in default gateway (below)
+cl_salad https://corn-cabbage-2yk4e98r3rx752n0.salad.cloud   # point at a group
+cl_salad https://<new-group-dns> -p "Say hello"  # + pass claude flags through
 ```
+
+A bare host (no `https://`) works too. Omit the URL to use the built-in default
+(or the `SALAD_GATEWAY_HOST` override). Everything after the URL is passed
+straight to `claude`.
 
 What it does, in order:
 
-1. Resolves its own **real** directory (follows the `/usr/local/bin` symlink) so
-   it finds `salad_proxy.py` and `salad_api.txt` next to the real file.
+1. Resolves the **gateway URL** — first argument if given, else
+   `SALAD_GATEWAY_HOST`, else the built-in default — and its own **real**
+   directory (follows the `/usr/local/bin` symlink) so it finds `salad_proxy.py`
+   and `salad_api.txt` next to the real file.
 2. Reads the Salad key from `salad_api.txt` — **never printed**; exits if empty.
 3. **Auto-starts the group if it's stopped** (this is an on-demand group — a
    fresh start re-downloads the model and **incurs cost**). Then waits until the
@@ -74,7 +84,7 @@ What it does, in order:
 
 | Var | Default | Meaning |
 |---|---|---|
-| `SALAD_GATEWAY_HOST` | `corn-cabbage-2yk4e98r3rx752n0.salad.cloud` | The group's public gateway. **Changes when the group is recreated** — set this to the current DNS if the default is stale. |
+| `SALAD_GATEWAY_HOST` | `corn-cabbage-2yk4e98r3rx752n0.salad.cloud` | The group's public gateway. A `GATEWAY_URL` first argument beats this. **Changes when the group is recreated.** |
 | `SALAD_MODEL_ALIAS` | `qwen38-27b` | Model name sent upstream (the served `--alias`). |
 | `SALAD_KEYFILE` | `<script dir>/salad_api.txt` | Where the `Salad-Api-Key` is read from. |
 | `SALAD_PROXY_PORT` | `8093` | Local proxy port. |
@@ -184,13 +194,6 @@ All read the Salad key from `salad_api.txt` and (optionally) a HF token from
   digest-pinned image (the airtight lever against the stale repo-name cache),
   falling back to the tag if the API rejects digests, then start.
 
-### `clov_salad` — legacy, superseded by `cl_salad`
-
-The older wrapper. It started `salad_proxy.py` with **positional** args
-(`URL:PORT`, `PORT`) and polled a `/__upstream` endpoint — neither exists in the
-rewritten proxy (now argparse flags + `/healthz`). **Use `cl_salad` instead.**
-It's kept for reference; treat it as broken until re-pointed at the new proxy.
-
 ---
 
 ## Using it
@@ -267,11 +270,17 @@ curl -s https://<gateway>/v1/models -H "Salad-Api-Key: $(tr -d '[:space:]' < doc
   Use a fresh group name; keep `MODEL_ALIAS` stable so clients don't notice.
 - **On-demand groups cost money when they start.** `cl_salad` warns before
   auto-starting; `SALAD_NO_AUTOSTART=1` gives you the decision.
-- **The chat template is server-side.** It lives in the GGUF (or `--chat-template`
+- **The chat template is server-side.** It lives in the GGUF (or `--chat-template-file`
   on `llama-server`). A "template" error is an upstream problem, not a proxy one —
   the proxy only translates messages. The deployed image uses the permissive
   `qwen3.8.q6.jinja` so Claude Code's Anthropic-format requests (system messages
   anywhere) are accepted.
+- **`--chat-template` vs `--chat-template-file`.** The inline `--chat-template` flag
+  takes the template *text*; `--chat-template-file` takes a path. Passing the
+  `CHAT_TEMPLATE` path to the inline flag (a bug shipped in the first baked
+  image) makes the path string itself the entire prompt — the model then loops
+  on it (every "hello" answer was a wall of `/opt/llama.cpp/qwen3.8.q6.gguf`).
+  The template content was never the problem; it was never being applied.
 
 ---
 
@@ -299,7 +308,6 @@ on_salad/
 │       ├── salad_proxy.py          # Anthropic↔OpenAI bridge
 │       ├── version.sh              # in-container build/download inspector
 │       ├── curl2_salad.sh          # gateway smoke test
-│       ├── clov_salad              # legacy wrapper (see note above)
 │       ├── docker-compose.yml      # local 27B + 9B services
 │       ├── run_27b.sh / run_9b*.sh # local run helpers
 │       └── salad_api.txt           # gateway key (gitignored)

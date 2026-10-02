@@ -128,8 +128,11 @@ exec ${LLAMA_CPP_DIR}/build/bin/llama-server \
   --port \"${PORT}\" \
   --ctx-size \"${CTX_SIZE}\" \
   --jinja \
-  # Custom chat template only when enabled (CT non-empty). \
-  ${CT:+--chat-template \"${CT}\"} \
+  # Custom chat template only when enabled (CT non-empty). CT is a FILE \
+  # PATH -> --chat-template-file (the inline --chat-template flag would \
+  # treat the path as the literal template text: prompt degenerates to the \
+  # path string and the model loops on it). \
+  ${CT:+--chat-template-file \"${CT}\"} \
   --cache-prompt \
   # MTP speculative decoding is always on in this image: --spec-type draft-mtp \
   # (sets load_mtp) + the separate baked draft via --model-draft ONLY when \

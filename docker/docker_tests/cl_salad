@@ -1,6 +1,16 @@
 #!/bin/sh
-# cl_salad — point Claude Code at the Qwen3.8-27B served on the corn-cabbage
-# Salad gateway, through a local proxy that injects the Salad-Api-Key.
+# cl_salad — point Claude Code at the Qwen3.8-27B served on a Salad public
+# gateway, through a local proxy that injects the Salad-Api-Key.
+#
+# Usage:
+#   cl_salad [GATEWAY_URL] [claude args...]
+#
+# GATEWAY_URL is the group's public access domain — the one thing that changes
+# when the group is recreated. Pass it explicitly to point at a (new) group:
+#   cl_salad https://corn-cabbage-2yk4e98r3rx752n0.salad.cloud
+#   cl_salad https://<new-group-dns> -p "Say hi"
+# A bare host (no https://) works too. Omit it to use the built-in default
+# below (or SALAD_GATEWAY_HOST). Everything after the URL goes straight to claude.
 #
 # Mirrors /usr/local/bin/clov (cl_tr4v), but:
 #   * the upstream is a Salad public gateway (llama.cpp, OpenAI-only), so a local
@@ -10,7 +20,7 @@
 #     (opt out with SALAD_NO_AUTOSTART=1)
 #
 # Env overrides (all optional):
-#   SALAD_GATEWAY_HOST   default corn-cabbage-2yk4e98r3rx752n0.salad.cloud
+#   SALAD_GATEWAY_HOST   gateway override (a GATEWAY_URL argument beats this)
 #   SALAD_MODEL_ALIAS    default qwen38-27b
 #   SALAD_KEYFILE        default <script dir>/salad_api.txt
 #   SALAD_PROXY_PORT     default 8093
@@ -34,9 +44,27 @@ HERE="$(cd "$(dirname "$_SELF")" && pwd)"
 PY="$(command -v python3 || echo python3)"
 CLAUDE="${CLAUDE_BIN:-$HOME/.local/bin/claude}"
 
-# ---- configuration -------------------------------------------------------
-GATEWAY_HOST="${SALAD_GATEWAY_HOST:-corn-cabbage-2yk4e98r3rx752n0.salad.cloud}"
+# ---- gateway URL (first positional arg) ----------------------------------
+# The gateway URL is the one thing that changes when the group is recreated, so
+# it's a first-class argument: `cl_salad https://<dns> [claude args...]`. It
+# beats SALAD_GATEWAY_HOST and the built-in default. Accepts a bare host or a
+# full URL (scheme optional, any path stripped). A first arg starting with '-'
+# is a claude flag, not a URL — it's left alone and passed through to claude.
+GATEWAY_HOST=""
+case "${1:-}" in
+    -*)                      : ;;                    # claude flag → pass through
+    http://*|https://*)      GATEWAY_HOST="$1"; shift ;;
+    *.*)                     GATEWAY_HOST="$1"; shift ;;  # bare host[:port]
+    *)                       : ;;                    # plain word → claude arg
+esac
+[ -n "$GATEWAY_HOST" ] || GATEWAY_HOST="${SALAD_GATEWAY_HOST:-corn-cabbage-2yk4e98r3rx752n0.salad.cloud}"
+# normalise to host[:port]: drop the scheme, then drop any trailing path
+GATEWAY_HOST="${GATEWAY_HOST#http://}"
+GATEWAY_HOST="${GATEWAY_HOST#https://}"
+GATEWAY_HOST="${GATEWAY_HOST%%/*}"
 GATEWAY_BASE="https://${GATEWAY_HOST}"
+
+# ---- configuration -------------------------------------------------------
 MODEL_ALIAS="${SALAD_MODEL_ALIAS:-qwen38-27b}"
 KEYFILE="${SALAD_KEYFILE:-${HERE}/salad_api.txt}"
 PROXY_PORT="${SALAD_PROXY_PORT:-8093}"
