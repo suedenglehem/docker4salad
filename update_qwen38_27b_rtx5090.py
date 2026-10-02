@@ -12,8 +12,8 @@ restarts it. Used for:
 
 Per-card env:
 
-  * rtx5090 (32 GB): full set — noMTP Q4_K_M weights + MTP draft (wget URL)
-    + mmproj (wget URL) + 132768 ctx.
+  * rtx5090 (32 GB): full set — noMTP Q4_K_M weights + MTP draft (wget2 URL)
+    + mmproj (wget2 URL) + 132768 ctx.
   * rtx3090 (24 GB): the 3 GB draft and ~1 GB mmproj do not fit on top of
     the 15.4 GB weights, so DRAFT_* / VISION_* are omitted — the image CMD
     then falls back to n-gram self-speculation and text-only serving.
@@ -62,9 +62,13 @@ from salad_client import (
 ORGANIZATION_NAME = "ma-casa-in-paris"
 PROJECT_NAME = "qwen38-27b"
 GROUP_NAME = "qwen38-27b-rtx5090"
-# cuda128-v2: CMD supports DRAFT_MODEL_URL / VISION_MODEL_URL (wget), q8_0 KV
-# cache, and forwards HF_TOKEN to `hf download` as --token when set.
-IMAGE = "boris271142/llama-server-on-salad:cuda128-v2"
+# lmss:cuda128-v2 (canonical repo; llama-server-on-salad is frozen): CMD
+# supports DRAFT_MODEL_URL / VISION_MODEL_URL (wget2), the `none` sentinel
+# (empty or `none` disables each optional feature), q8_0 KV cache, and
+# forwards HF_TOKEN to `hf download` as --token when set. The Salad worker
+# image cache is keyed by repo name, not tag/digest — verify live builds
+# with version.sh in the container.
+IMAGE = "boris271142/lmss:cuda128-v2"
 
 HF = "https://huggingface.co/JonathanColetti/Qwen3.8-27B-Uncensored-GGUF/resolve/main"
 HF_TOKEN_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "hft.txt")

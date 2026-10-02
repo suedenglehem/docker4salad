@@ -1,7 +1,7 @@
 """Deploy container group 'qwen38-9b' into project 'qwen38-27b' (org ma-casa-in-paris).
 
 Replacement for the broken 'qwen9b' group. Serves Qwen3.8-9B (Distill Q4_K_M)
-on a single GPU from image boris271142/llama-server-on-salad:cuda128-v3, placed
+on a single GPU from image boris271142/lmss:cuda128-v3, placed
 on ANY of the 7 card classes the old 'qwen9b' group used:
 
     RTX 3090 (24 GB), RTX 3090 Ti (24 GB), RTX 4090 (24 GB), RTX 4080 (16 GB),
@@ -11,11 +11,14 @@ gpu_classes semantics: the instance is placed on ANY ONE of these classes
 (one card per instance; the allocated card is index 0 inside the container,
 hence env GPU_ID=0).
 
-Plain 9B deployment — no MTP draft, no vision mmproj, no custom chat template.
-cuda128-v3 implements the `none` sentinel: its baked-in defaults for
-DRAFT_MODEL_URL / DRAFT_MODEL_FILE / VISION_MODEL_URL / CHAT_TEMPLATE are all
-`none`, so each feature is skipped (no download, no flag) unless a group
-explicitly opts in. The env therefore stays the 7-key plain set.
+Plain 9B deployment — no MTP draft, no vision mmproj, no custom chat
+template. The image implements the `none` sentinel, and per the user's
+preference the group env sets it EXPLICITLY rather than relying on the
+baked-in defaults (the group env replaces the image env wholesale, so the
+explicit `none` also future-proofs against an older image whose defaults
+were real URLs): DRAFT_MODEL_URL=none, VISION_MODEL_URL=none,
+CHAT_TEMPLATE=none. The env is the 10-key set. (v3 has no DRAFT_MODEL_FILE
+— DRAFT_MODEL_URL is the sole draft source in that image.)
 
 Everything else mirrors the live 'qwen9b' group as it was last read
 (GET 2026-10-01): cpu 4 (user lowered it from 8 in the UI), memory 16 GB,
@@ -54,7 +57,17 @@ from salad_client import (
 ORGANIZATION_NAME = "ma-casa-in-paris"
 PROJECT_NAME = "qwen38-27b"
 GROUP_NAME = "qwen38-9b"
-IMAGE = "boris271142/llama-server-on-salad:cuda128-v3"
+# Canonical repo: `lmss`. Do NOT deploy from the old `llama-server-on-salad`
+# repo. cuda128-v3 = wget2 first-start downloads + version.sh + build id +
+# the `none` sentinel, and URL-only draft handling (DRAFT_MODEL_URL is the
+# sole draft source; the old DRAFT_MODEL_FILE/REPO env vars are gone). Caveat: the Salad worker image cache is keyed by
+# REPO NAME, not tag or digest — even a renamed repo can serve a stale
+# pre-sentinel build on workers that had cached the old one (observed live
+# on lmss:cuda128 on 2026-10-01). The only airtight lever is a digest-pinned
+# image ref to a digest no worker has seen (this group was PATCHed to
+# lmss@sha256:... for exactly that reason); with a plain tag, verify the
+# live build with version.sh in the container.
+IMAGE = "boris271142/lmss:cuda128-v3"
 
 # The 7 card classes the old 'qwen9b' group ran on, by normalized base name
 # (parenthesized VRAM suffix stripped, lowercased, spaces removed).
@@ -184,9 +197,11 @@ def main() -> int:
               file=sys.stderr)
         return 1
 
-    # Plain 9B deployment: model + sizing only. No DRAFT_*/VISION_*/CHAT_TEMPLATE
-    # — the 9B has none, and the image's baked-in defaults are the `none`
-    # sentinel, so a plain deployment needs no env at all.
+    # Plain 9B deployment: model + sizing, and the three optional features
+    # EXPLICITLY disabled with the `none` sentinel (user's way — don't rely
+    # on the image's baked-in defaults; the group env replaces the image env
+    # wholesale, so this also protects against an older image with real
+    # default URLs).
     env: dict[str, str] = {
         "GPU_ID": args.gpu_id,
         "MODEL_REPO": args.model_repo,
@@ -195,6 +210,9 @@ def main() -> int:
         "CTX_SIZE": args.ctx_size,
         "N_GPU_LAYERS": args.n_gpu_layers,
         "NAME": GROUP_NAME,
+        "DRAFT_MODEL_URL": "none",
+        "VISION_MODEL_URL": "none",
+        "CHAT_TEMPLATE": "none",
     }
     memory_mb = int(round(args.memory_size * 1024))
     storage_amount = int(round(args.disk_size * 1024**3))

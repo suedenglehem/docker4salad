@@ -1,21 +1,26 @@
 """Deploy container group 'qwen9b' into project 'qwen38-27b' (org ma-casa-in-paris).
 
 Serves Qwen3.8-9B (Distill Q4_K_M) on a single RTX 3090 (24 GB) from image
-boris271142/llama-server-on-salad:cuda128-v3.
+boris271142/lmss:cuda128-v3 (canonical repo; the old llama-server-on-salad
+repo is frozen — the Salad worker cache serves a stale digest there by repo
+name).
 
 The 9B is deliberately a *plain* deployment — no MTP draft, no vision mmproj,
 no custom chat template — and the image's own defaults make that the default
 behavior. cuda128-v3 implements the `none` sentinel: its baked-in defaults for
-DRAFT_MODEL_URL / DRAFT_MODEL_FILE / VISION_MODEL_URL / CHAT_TEMPLATE are all
-`none`, so the CMD skips each feature (no download, no flag) unless a group
-explicitly opts in. A plain deployment therefore needs no env vars at all.
+DRAFT_MODEL_URL / VISION_MODEL_URL / CHAT_TEMPLATE are all `none`, so the CMD
+skips each feature (no download, no flag) unless a group explicitly opts in.
+A plain deployment therefore needs no env vars at all.
 
-Why not the other tags: cuda128-v2 bakes the 27B's MTP draft in as the DEFAULT
-DRAFT_MODEL_URL / DRAFT_MODEL_FILE, and there was no way to switch that off
-from a container group — the Salad API (and this client) reject empty env
-values (spec minLength 1, see salad_client.CreateContainerGroupRequest), so
-the draft default could not be blanked. (cuda128 predates draft/vision/
-template handling entirely — it was the plain tag before v3 landed.)
+(Tag history: the OLD repo's llama-server-on-salad:cuda128-v2 baked the 27B's
+MTP draft in as the DEFAULT DRAFT_MODEL_URL / DRAFT_MODEL_FILE with no way to
+switch it off from a container group — the Salad API (and this client) reject
+empty env values (spec minLength 1, see salad_client.CreateContainerGroupRequest).
+Its cuda128 predates draft/vision/template handling entirely. The canonical
+lmss repo's cuda128-v3 is the sentinel build: wget2 first-start downloads,
+the `none` sentinel, URL-only draft handling (DRAFT_MODEL_URL is the sole
+draft source — DRAFT_MODEL_FILE/REPO are gone), and
+/usr/local/bin/version.sh for live verification.)
 
   Every other value below mirrors the live 'qwen38-27b-rtx5090' group in
   project 'qwen38-27b' (GET 2026-09-30): gateway port 8888 (http, auth true,
@@ -61,7 +66,7 @@ ORGANIZATION_NAME = "ma-casa-in-paris"
 # the web UI. The group itself stays named 'qwen9b'.
 PROJECT_NAME = "qwen38-27b"
 GROUP_NAME = "qwen9b"
-IMAGE = "boris271142/llama-server-on-salad:cuda128-v3"
+IMAGE = "boris271142/lmss:cuda128-v3"
 GPU_CLASS_BASE = "rtx3090"  # must match 'RTX 3090 (24 GB)', not a Laptop/variant class
 
 # Mirrored from the live 'qwen38-27b-rtx5090' group (GET, 2026-09-30) — response-only

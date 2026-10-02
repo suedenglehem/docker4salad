@@ -160,6 +160,29 @@ class StopContainerGroupRequest:
 
 
 @dataclass(frozen=True)
+class DeleteContainerGroupRequest:
+    """Typed path parameters for delete_container_group (all required by the spec).
+
+    DELETE has no action suffix: the path is .../containers/{name} itself.
+    """
+
+    organization_name: str
+    project_name: str
+    container_group_name: str
+
+    def __post_init__(self) -> None:
+        _validate_group_names(self.organization_name, self.project_name, self.container_group_name)
+
+    @property
+    def path(self) -> str:
+        return (
+            f"/organizations/{self.organization_name}"
+            f"/projects/{self.project_name}"
+            f"/containers/{self.container_group_name}"
+        )
+
+
+@dataclass(frozen=True)
 class StartContainerGroupResult:
     """Spec defines 202 Accepted with no response content; headers kept generically."""
 
@@ -270,6 +293,26 @@ def stop_container_group(
     """
     key = api_key if api_key is not None else load_api_key()
     status, reason, headers, raw = _http("POST", request.path, key, timeout=timeout)
+    if status == 202:
+        return StopContainerGroupResult(status_code=status, reason_phrase=reason, headers=headers)
+    raise SaladApiError(status, _parse_problem(raw), raw.decode("utf-8", "replace"))
+
+
+def delete_container_group(
+    request: DeleteContainerGroupRequest,
+    api_key: str | None = None,
+    timeout: float = 30.0,
+) -> StopContainerGroupResult:
+    """Delete a container group (DELETE .../containers/{name}).
+
+    Irreversible: removes the group and all associated information. Returns
+    a result on 202 Accepted; raises SaladApiError for 403/404/429/default
+    per the spec. NOTE: the deleted NAME can be stuck in a name_conflict
+    tombstone for 10+ minutes (observed 2026-10-01) — do not expect an
+    immediate create with the same name to succeed.
+    """
+    key = api_key if api_key is not None else load_api_key()
+    status, reason, headers, raw = _http("DELETE", request.path, key, timeout=timeout)
     if status == 202:
         return StopContainerGroupResult(status_code=status, reason_phrase=reason, headers=headers)
     raise SaladApiError(status, _parse_problem(raw), raw.decode("utf-8", "replace"))

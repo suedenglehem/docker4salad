@@ -1,7 +1,7 @@
 #!/bin/bash
 # Qwen3.8-9B smoke-test server — Docker Hub variant of run_9b_pure.sh.
 # Same as run_9b_pure.sh, but the image is PULLED from Docker Hub first
-# (boris271142/llama-server-on-salad:cuda128) instead of using a locally built
+# (boris271142/lmss:cuda128-v3) instead of using a locally built
 # one. The pushed image is the same build as qwen38-llama-fa-api (only the tag
 # differs), so the same env vars and flags apply.
 # Useful on machines without the Dockerfile/build cache — see README.md
@@ -15,8 +15,8 @@
 #       background; `docker stop qwen38-9b` is the full stop.
 cd /dd2/andrei/docker/on_salad/docker/docker_tests || exit 1
 
-IMAGE="boris271142/llama-server-on-salad"
-TAG="cuda128"
+IMAGE="boris271142/lmss"
+TAG="cuda128-v3"
 NAME="qwen38-9b"
 
 GPU_ID="${1:-1}"

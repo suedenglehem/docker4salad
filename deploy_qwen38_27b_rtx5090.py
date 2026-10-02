@@ -2,11 +2,14 @@
 
 Serves Qwen3.8-27B (Uncensored noMTP Q4_K_M + MTP draft speculative decoding +
 vision mmproj) on a single RTX 5090 (32 GB) from image
-boris271142/llama-server-on-salad:cuda128-v2 — the CUDA 12.8 build, required
-for Blackwell (RTX 5090, sm_120). cuda128-v2 = cuda128 + wget first-start
-downloads for DRAFT_MODEL_URL / VISION_MODEL_URL + q8_0 KV cache. The bare
-cuda128 tag is STALE on Salad workers (image_caching serves the old digest:
-ngram spec, q4_0 KV, no draft download) — always pin -v2 or newer.
+boris271142/lmss:cuda128-v2 — the canonical image repo (the old
+boris271142/llama-server-on-salad repo is frozen), CUDA 12.8 build, required
+for Blackwell (RTX 5090, sm_120). cuda128-v2 = wget2 first-start downloads
+for DRAFT_MODEL_URL / VISION_MODEL_URL + q8_0 KV cache + the `none` sentinel
+(empty or `none` disables each optional feature). Caveat: the Salad worker
+image cache is keyed by REPO NAME, not tag or digest — a new tag on a
+cached repo can still serve the old image, so verify live builds with
+version.sh in the container.
 
 Every value below was verified before deployment:
 
@@ -24,13 +27,15 @@ Every value below was verified before deployment:
     draft Q8_0 ~3 GB + mmproj F16 ~1 GB + ~132k q8_0 KV cache ~4.6 GB (only
     16 of 64 layers are full-attention; see Dockerfile.multistage) -> ~24 GB,
     comfortable headroom. N_GPU_LAYERS=99 (full offload). The MTP draft is
-    fetched on first start from DRAFT_MODEL_URL (full URL, wget) or, when
-    that is empty, DRAFT_MODEL_FILE + MODEL_REPO (hf, repo+file); both empty
-    disables the draft (server falls back to n-gram self-speculation).
-    VISION_MODEL_URL (full URL, wget) adds the mmproj projector for vision;
-    empty disables it. CHAT_TEMPLATE points at the permissive jinja the image
-    ships at /opt/llama.cpp/qwen3.8.q6.jinja (empty -> the model's embedded
-    template); the permissive one is required for Claude Code /v1/messages.
+    fetched on first start from DRAFT_MODEL_URL (full URL, wget2) or, when
+    that is empty/none, DRAFT_MODEL_FILE + MODEL_REPO (hf, repo+file); both
+    disabled (empty or the `none` sentinel) falls back to n-gram
+    self-speculation. VISION_MODEL_URL (full URL, wget2) adds the mmproj
+    projector for vision; empty/none disables it. CHAT_TEMPLATE points at the
+    permissive jinja the image
+    ships at /opt/llama.cpp/qwen3.8.q6.jinja (empty/none -> the model's
+    embedded template); the permissive one is required for Claude Code
+    /v1/messages.
   * GPU_ID=0: SaladCloud supports one GPU per container
     (container-engine/docker-run.mdx), so the allocated card is index 0
     inside the container. (The old 'qwen38-27b' group's GPU_ID=1 was a
@@ -63,7 +68,7 @@ from salad_client import (
 ORGANIZATION_NAME = "ma-casa-in-paris"
 PROJECT_NAME = "qwen38-27b"
 GROUP_NAME = "qwen38-27b-rtx5090"
-IMAGE = "boris271142/llama-server-on-salad:cuda128-v2"
+IMAGE = "boris271142/lmss:cuda128-v2"
 GPU_CLASS_BASE = "rtx5090"  # must match 'RTX 5090 (32 GB)', not the Laptop class
 
 # Mirrored from the live 'qwen38-27b' group (GET, 2026-09-30) — response-only
@@ -103,12 +108,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--model-file", default="Qwen3.8-27B-Uncensored-noMTP-Q4_K_M.gguf", help="env MODEL_FILE")
     parser.add_argument("--draft-model-url",
                         default="https://huggingface.co/JonathanColetti/Qwen3.8-27B-Uncensored-GGUF/resolve/main/Qwen3.8-27B-Uncensored-draft-Q8_0.gguf",
-                        help="env DRAFT_MODEL_URL (full URL, wget; takes precedence over --draft-model-file)")
+                        help="env DRAFT_MODEL_URL (full URL, wget2; takes precedence over --draft-model-file)")
     parser.add_argument("--draft-model-file", default="Qwen3.8-27B-Uncensored-draft-Q8_0.gguf",
                         help="env DRAFT_MODEL_FILE (repo+file fallback when DRAFT_MODEL_URL is empty)")
     parser.add_argument("--vision-model-url",
                         default="https://huggingface.co/JonathanColetti/Qwen3.8-27B-Uncensored-GGUF/resolve/main/mmproj-Qwen3.8-27B-Uncensored-F16.gguf",
-                        help="env VISION_MODEL_URL (full URL of the mmproj projector, wget; empty disables vision)")
+                        help="env VISION_MODEL_URL (full URL of the mmproj projector, wget2; empty/none disables vision)")
     parser.add_argument("--chat-template", default="/opt/llama.cpp/qwen3.8.q6.jinja",
                         help="env CHAT_TEMPLATE (permissive jinja the image ships; empty uses the model's embedded template)")
     parser.add_argument("--ctx-size", default="132768", help="env CTX_SIZE")

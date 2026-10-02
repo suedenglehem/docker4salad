@@ -107,7 +107,7 @@ RUN git clone --quiet --depth 1 --branch ${NVTOP_TAG} https://github.com/Syllo/n
 
 ###############################################################################
 # Stage 2: runtime — CUDA runtime libs + just enough to run llama-server and
-# download the model with `hf` (draft/vision from full URLs with `wget`) on first start
+# download the model with `hf` (draft/vision from full URLs with `wget2`) on first start
 ###############################################################################
 FROM nvidia/cuda:12.8.2-runtime-ubuntu22.04
 
@@ -123,7 +123,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
 #   libstdc++6  - C++ runtime for the ggml-cuda code
 #   python3/pip - provides the `hf` CLI used to download the model on first start
 #   curl        - quick API checks from inside the container (e.g. curl localhost:8080/health)
-#   wget        - first-start downloads of DRAFT_MODEL_URL / VISION_MODEL_URL (full URLs; `hf` takes repo ids only)
+#   wget2       - first-start downloads of DRAFT_MODEL_URL / VISION_MODEL_URL (full URLs; `hf` takes repo ids only)
 #   openssh-client - ssh/scp/sftp out of the container
 #   vim-tiny    - minimal vi editor; jammy's package ships only /usr/bin/vim.tiny, so a
 #                 `vi` symlink is added explicitly below (swap for full `vim` if needed)
@@ -140,7 +140,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libgomp1 \
     libstdc++6 \
     curl \
-    wget \
+    wget2 \
     openssh-client \
     vim-tiny \
     htop \
@@ -196,11 +196,24 @@ COPY qwen3.8.q6.jinja ${LLAMA_CPP_DIR}/qwen3.8.q6.jinja
 #   uptime      - prints how long PID 1 (the container's main process) has been
 #                 running, not the host kernel's uptime. `ps -p 1 -o etime=` is
 #                 the elapsed time of PID 1; the trailing `=` suppresses the header.
+#   version.sh  - image/build identity for a running instance: the baked-in
+#                 build id (/etc/llama-image-build), the effective feature env,
+#                 the sentinel-guard verdict from PID 1's cmdline, and the
+#                 active downloads. Run it from an SSH session to verify which
+#                 build a Salad worker is actually serving (the worker image
+#                 cache can serve an older image under the same repo name).
 COPY docker_tests/llm.sh /usr/local/bin/llm.sh
 COPY docker_tests/question.sh /usr/local/bin/question.sh
-RUN chmod +x /usr/local/bin/llm.sh /usr/local/bin/question.sh \
+COPY docker_tests/version.sh /usr/local/bin/version.sh
+RUN chmod +x /usr/local/bin/llm.sh /usr/local/bin/question.sh /usr/local/bin/version.sh \
     && printf '#!/bin/sh\nexec ps -p 1 -o etime=\n' > /usr/local/bin/uptime \
     && chmod +x /usr/local/bin/uptime
+
+# Build id baked into the image at build time (read by /usr/local/bin/version.sh).
+# Pass --build-arg LMSS_BUILD_ID="..." for a descriptive id; without it a UTC
+# build timestamp is written, so even untagged local builds are distinguishable.
+ARG LMSS_BUILD_ID
+RUN { [ -n "${LMSS_BUILD_ID}" ] && printf '%s\n' "${LMSS_BUILD_ID}" || date -u +%Y-%m-%dT%H:%M:%SZ; } > /etc/llama-image-build
 
 # Model to serve; all files are downloaded on first start if missing (CMD).
 #   MODEL_*       - main model, downloaded with `hf` from the repo id (hf
@@ -208,17 +221,12 @@ RUN chmod +x /usr/local/bin/llm.sh /usr/local/bin/question.sh \
 #                   the noMTP build: its MTP draft module is NOT embedded.
 #                   (The non-noMTP variants, e.g. Q6_K, embed the draft.)
 #   DRAFT_MODEL_URL - full URL of the MTP draft model for --spec-type
-#                   draft-mtp speculative decoding; downloaded with wget on
-#                   first start, filename taken from the URL's basename. Takes
-#                   precedence over DRAFT_MODEL_FILE when both are set (the
-#                   defaults point at the same file).
-#   DRAFT_MODEL_FILE / DRAFT_MODEL_REPO - repo+file fallback, downloaded with
-#                   `hf`, used when DRAFT_MODEL_URL is empty. Both empty -> no
-#                   draft, llama-server falls back to n-gram
-#                   self-speculation. Empty DRAFT_MODEL_REPO -> the draft is
-#                   fetched from MODEL_REPO.
+#                   draft-mtp speculative decoding; downloaded with wget2 on
+#                   first start, filename taken from the URL's basename. This
+#                   is the only draft source. Empty or "none" -> no draft,
+#                   llama-server falls back to n-gram self-speculation.
 #   VISION_MODEL_URL - full URL of the multimodal projector (mmproj) GGUF,
-#                   downloaded with wget on first start and passed to
+#                   downloaded with wget2 on first start and passed to
 #                   llama-server as --mmproj (enables image input). Empty
 #                   (the default) -> no vision; the projector costs ~1 GB of
 #                   VRAM, so it stays off unless the card has the headroom.
@@ -230,16 +238,13 @@ RUN chmod +x /usr/local/bin/llm.sh /usr/local/bin/question.sh \
 # API rejects empty env values (minLength 1) — a group cannot blank a
 # baked-in default, but it CAN set e.g. DRAFT_MODEL_URL=none to disable the
 # feature. All defaults below are "none": the image is plain out of the box,
-# and a group opts in per feature — the 27B group sets DRAFT_MODEL_URL /
-# DRAFT_MODEL_FILE to the Qwen3.8-27B-Uncensored-draft-Q8_0.gguf from the
-# MODEL_REPO repo.
+# and a group opts in per feature — the 27B group sets DRAFT_MODEL_URL to
+# the full HF URL of Qwen3.8-27B-Uncensored-draft-Q8_0.gguf.
 ENV MODEL_REPO=JonathanColetti/Qwen3.8-27B-Uncensored-GGUF \
     MODEL_FILE=Qwen3.8-27B-Uncensored-noMTP-Q4_K_M.gguf \
     MODEL_DIR=/models \
     MODEL_ALIAS=qwen38-27b \
     DRAFT_MODEL_URL=none \
-    DRAFT_MODEL_REPO= \
-    DRAFT_MODEL_FILE=none \
     DRAFT_MODEL_DIR=/models \
     VISION_MODEL_URL=none \
     VISION_MODEL_DIR=/models \
@@ -326,32 +331,23 @@ CT=; \
 if [ -n \"${CHAT_TEMPLATE}\" ] && [ \"${CHAT_TEMPLATE}\" != \"none\" ]; then \
   CT=\"${CHAT_TEMPLATE}\"; \
 fi; \
-# Optional MTP draft model for speculative decoding: DRAFT_MODEL_URL (full \
-# URL, wget) takes precedence; DRAFT_MODEL_FILE (repo+file, hf) is the \
-# fallback. Neither enabled -> no draft, n-gram self-speculation below. \
+# Optional MTP draft model for speculative decoding: DRAFT_MODEL_URL is the \
+# sole source — a full URL downloaded with wget2, whose last path segment is \
+# the local filename. Empty or "none" -> no draft, n-gram self-speculation \
+# below. \
 DRAFT_PATH=; \
 if [ -n \"${DRAFT_MODEL_URL}\" ] && [ \"${DRAFT_MODEL_URL}\" != \"none\" ]; then \
   DRAFT_PATH=\"${DRAFT_MODEL_DIR}/${DRAFT_MODEL_URL##*/}\"; \
-elif [ -n \"${DRAFT_MODEL_FILE}\" ] && [ \"${DRAFT_MODEL_FILE}\" != \"none\" ]; then \
-  DRAFT_PATH=\"${DRAFT_MODEL_DIR}/${DRAFT_MODEL_FILE}\"; \
-fi; \
-if [ -n \"${DRAFT_PATH}\" ] && [ ! -f \"${DRAFT_PATH}\" ]; then \
-  if [ -n \"${DRAFT_MODEL_URL}\" ] && [ \"${DRAFT_MODEL_URL}\" != \"none\" ]; then \
-    wget -c -O \"${DRAFT_PATH}\" \"${DRAFT_MODEL_URL}\"; \
-  else \
-    hf download \
-      \"${DRAFT_MODEL_REPO:-${MODEL_REPO}}\" \
-      \"${DRAFT_MODEL_FILE}\" \
-      --local-dir \"${DRAFT_MODEL_DIR}\" \
-      ${HF_TOKEN:+--token \"$HF_TOKEN\"}; \
+  if [ ! -f \"${DRAFT_PATH}\" ]; then \
+    wget2 -c -O \"${DRAFT_PATH}\" \"${DRAFT_MODEL_URL}\"; \
   fi; \
 fi; \
-# Optional multimodal projector (VISION_MODEL_URL, full URL, wget) for vision. \
+# Optional multimodal projector (VISION_MODEL_URL, full URL, wget2) for vision. \
 VISION_PATH=; \
 if [ -n \"${VISION_MODEL_URL}\" ] && [ \"${VISION_MODEL_URL}\" != \"none\" ]; then \
   VISION_PATH=\"${VISION_MODEL_DIR}/${VISION_MODEL_URL##*/}\"; \
   if [ ! -f \"${VISION_PATH}\" ]; then \
-    wget -c -O \"${VISION_PATH}\" \"${VISION_MODEL_URL}\"; \
+    wget2 -c -O \"${VISION_PATH}\" \"${VISION_MODEL_URL}\"; \
   fi; \
 fi; \
 exec ${LLAMA_CPP_DIR}/build/bin/llama-server \

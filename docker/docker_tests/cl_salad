@@ -1,0 +1,160 @@
+#!/bin/sh
+# cl_salad — point Claude Code at the Qwen3.8-27B served on the corn-cabbage
+# Salad gateway, through a local proxy that injects the Salad-Api-Key.
+#
+# Mirrors /usr/local/bin/clov (cl_tr4v), but:
+#   * the upstream is a Salad public gateway (llama.cpp, OpenAI-only), so a local
+#     Anthropic<->OpenAI proxy (salad_proxy.py) is started first
+#   * the proxy injects Salad-Api-Key on every request, so you never add it
+#   * the group is auto-started if stopped and we wait for it to be ready
+#     (opt out with SALAD_NO_AUTOSTART=1)
+#
+# Env overrides (all optional):
+#   SALAD_GATEWAY_HOST   default corn-cabbage-2yk4e98r3rx752n0.salad.cloud
+#   SALAD_MODEL_ALIAS    default qwen38-27b
+#   SALAD_KEYFILE        default <script dir>/salad_api.txt
+#   SALAD_PROXY_PORT     default 8093
+#   SALAD_ORG / SALAD_PROJECT / SALAD_GROUP   for auto-start (see defaults below)
+#   SALAD_ENABLE_THINKING  default 0 (1 to enable Qwen thinking)
+#   SALAD_NO_AUTOSTART   set to 1 to skip auto-start / readiness wait
+#   CLAUDE_CODE_MAX_CONTEXT_TOKENS / CLAUDE_CODE_MAX_OUTPUT_TOKENS  token caps
+#
+# NOTE on token caps: the served model has n_ctx = 30208. Claude Code's total
+# input + requested output must stay under that or the model errors with
+# "context length exceeded". Defaults below target input ~18000 + output 8000
+# = 26000, leaving headroom. Lower them if you hit that error.
+set -u
+
+# Resolve this script's real directory, following symlinks — so a
+# /usr/local/bin/cl_salad symlink still finds salad_proxy.py + salad_api.txt
+# next to the real file, not in /usr/local/bin. (readlink -f falls back to the
+# literal path if it's missing.)
+_SELF="$(readlink -f "$0" 2>/dev/null || echo "$0")"
+HERE="$(cd "$(dirname "$_SELF")" && pwd)"
+PY="$(command -v python3 || echo python3)"
+CLAUDE="${CLAUDE_BIN:-$HOME/.local/bin/claude}"
+
+# ---- configuration -------------------------------------------------------
+GATEWAY_HOST="${SALAD_GATEWAY_HOST:-corn-cabbage-2yk4e98r3rx752n0.salad.cloud}"
+GATEWAY_BASE="https://${GATEWAY_HOST}"
+MODEL_ALIAS="${SALAD_MODEL_ALIAS:-qwen38-27b}"
+KEYFILE="${SALAD_KEYFILE:-${HERE}/salad_api.txt}"
+PROXY_PORT="${SALAD_PROXY_PORT:-8093}"
+THINKING="${SALAD_ENABLE_THINKING:-0}"
+
+# Salad management API (only used for auto-start / status lookups)
+ORG="${SALAD_ORG:-ma-casa-in-paris}"
+PROJ="${SALAD_PROJECT:-qwen38-27b}"
+GROUP="${SALAD_GROUP:-qwen38-27b-q6k}"
+SALAD_API="https://api.salad.com/api/public"
+
+# ---- token caps (override by exporting before calling) --------------------
+export CLAUDE_CODE_MAX_CONTEXT_TOKENS="${CLAUDE_CODE_MAX_CONTEXT_TOKENS:-18000}"
+export CLAUDE_CODE_MAX_OUTPUT_TOKENS="${CLAUDE_CODE_MAX_OUTPUT_TOKENS:-8000}"
+
+# ---- read the key (never printed) ----------------------------------------
+SALAD_KEY="$(tr -d '[:space:]' < "$KEYFILE" 2>/dev/null || true)"
+if [ -z "$SALAD_KEY" ]; then
+    echo "cl_salad: cannot read Salad key from $KEYFILE" >&2
+    exit 1
+fi
+
+# ---- helpers -------------------------------------------------------------
+# print the group's current_state.status, or "unknown"
+group_status() {
+    curl -sS -H "Salad-Api-Key: $SALAD_KEY" \
+        "$SALAD_API/organizations/$ORG/projects/$PROJ/containers/$GROUP" 2>/dev/null \
+    | "$PY" -c 'import sys,json
+try:
+    d=json.load(sys.stdin)
+except Exception:
+    print("unknown"); raise SystemExit
+print((d.get("current_state") or {}).get("status") or "unknown")'
+}
+
+# HTTP status of the public /v1/models endpoint (200 == model loaded & serving)
+models_code() {
+    curl -s -o /dev/null -w '%{http_code}' -H "Salad-Api-Key: $SALAD_KEY" \
+        "$GATEWAY_BASE/v1/models" 2>/dev/null || echo 000
+}
+
+# poll /v1/models until it returns 200 (or timeout seconds elapse)
+wait_ready() {
+    timeout="${1:-900}"
+    elapsed=0
+    while [ "$elapsed" -lt "$timeout" ]; do
+        [ "$(models_code)" = "200" ] && return 0
+        sleep 5
+        elapsed=$((elapsed + 5))
+    done
+    return 1
+}
+
+# ---- auto-start / readiness ----------------------------------------------
+PROXY_PID=""
+cleanup() {
+    [ -n "$PROXY_PID" ] && kill "$PROXY_PID" 2>/dev/null
+}
+trap cleanup EXIT
+
+if [ "${SALAD_NO_AUTOSTART:-0}" != "1" ]; then
+    st="$(group_status)"
+    case "$st" in
+        running)
+            echo "cl_salad: group $GROUP running — waiting for model readiness..." >&2
+            ;;
+        stopped|"")
+            echo "cl_salad: group $GROUP is '${st:-stopped}' — starting it (this incurs cost)..." >&2
+            curl -sS -X POST -H "Salad-Api-Key: $SALAD_KEY" -o /dev/null \
+                "$SALAD_API/organizations/$ORG/projects/$PROJ/containers/$GROUP/start" 2>/dev/null
+            echo "cl_salad: start requested — waiting for the group to come up..." >&2
+            ;;
+        *)
+            echo "cl_salad: group $GROUP status '$st' — waiting for model readiness..." >&2
+            ;;
+    esac
+    if ! wait_ready 900; then
+        echo "cl_salad: timed out after 900s waiting for $GATEWAY_HOST/v1/models." >&2
+        echo "cl_salad: the group is on-demand and a fresh start re-downloads the model;" >&2
+        echo "cl_salad: it may still be starting. Re-run cl_salad in a few minutes." >&2
+        exit 2
+    fi
+else
+    code="$(models_code)"
+    if [ "$code" != "200" ]; then
+        echo "cl_salad: gateway not ready (HTTP $code) and SALAD_NO_AUTOSTART=1." >&2
+        echo "cl_salad: start the group manually (or unset SALAD_NO_AUTOSTART) and retry." >&2
+        exit 2
+    fi
+fi
+
+echo "cl_salad: model ready on $GATEWAY_HOST — starting proxy on 127.0.0.1:$PROXY_PORT" >&2
+
+# ---- launch the proxy ----------------------------------------------------
+"$PY" "$HERE/salad_proxy.py" \
+    --port "$PROXY_PORT" \
+    --upstream "$GATEWAY_BASE/v1/chat/completions" \
+    --model "$MODEL_ALIAS" \
+    --keyfile "$KEYFILE" \
+    --thinking "$THINKING" \
+    >/tmp/cl_salad_proxy.$$.log 2>&1 &
+PROXY_PID=$!
+
+# wait for the proxy to bind
+i=0
+while [ "$i" -lt 25 ]; do
+    if curl -s -o /dev/null "http://127.0.0.1:$PROXY_PORT/healthz" 2>/dev/null; then
+        break
+    fi
+    i=$((i + 1))
+    sleep 0.2
+done
+
+# ---- point Claude Code at the proxy and run ------------------------------
+export ANTHROPIC_BASE_URL="http://127.0.0.1:$PROXY_PORT"
+export ANTHROPIC_API_KEY="local"
+
+"$CLAUDE" --permission-mode bypassPermissions --model "$MODEL_ALIAS" "$@"
+
+kill "$PROXY_PID" 2>/dev/null
+wait "$PROXY_PID" 2>/dev/null

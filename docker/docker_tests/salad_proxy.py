@@ -1,174 +1,581 @@
 #!/usr/bin/env python3
-"""salad_proxy — local reverse proxy that injects the Salad-Api-Key header.
+"""salad_proxy.py — local Anthropic<->OpenAI bridge for a llama.cpp server behind a Salad public gateway.
 
-SaladCloud's container gateway authenticates ONLY via a `Salad-Api-Key`
-header — requests carrying `Authorization: Bearer <salad key>` get a 403.
-Most LLM clients (claude CLI, Simon Willison's `llm`, ...) cannot set
-arbitrary headers, so point them at this local proxy instead:
+Claude Code speaks the Anthropic Messages API; the Salad container runs
+llama-server, which is OpenAI-only. This stdlib-only proxy:
 
-    ./salad_proxy.py [UPSTREAM] [LISTEN_PORT]
+  * listens on 127.0.0.1 only (it holds a secret key — never exposed to the network)
+  * serves POST /v1/messages, GET /v1/models, GET /healthz
+  * translates an Anthropic request -> OpenAI /v1/chat/completions
+  * injects the Salad-Api-Key header on every upstream request (read from a file,
+    never printed)
+  * translates the OpenAI response back to Anthropic — streaming SSE or JSON
+  * maps tool_use / tool_result  <->  tool_calls / role:tool
+  * disables Qwen "thinking" by default so the model emits clean answers, not a
+    long reasoning preamble (set --thinking 1 to change)
 
-  UPSTREAM      access domain, e.g. raisin-bean-gy0v5oyd2bt9wfvy.salad.cloud
-                (scheme/port optional; default: the qwen38-27b-rtx5090 group,
-                https on 443). Do NOT pass the in-container gateway port
-                8888 here — salad.cloud is behind Cloudflare, which only
-                proxies standard ports; 8888 only exists inside the box.
-  LISTEN_PORT   local port (default 8931, bind 127.0.0.1 only).
-
-Every request is forwarded verbatim (any path: /v1/messages,
-/v1/chat/completions, /health, ...) with `Salad-Api-Key` added. Responses —
-including SSE streams — are passed through. Stdlib only, threaded.
-
-The key is read from $SALAD_API_KEY, else from salad_api.txt next to this
-script. GET /__upstream reports which upstream the proxy currently targets
-(so callers can detect a stale proxy and restart it). A pidfile lands in
-/tmp/salad_proxy.<port>.pid.
+Run by the cl_salad wrapper. No third-party dependencies.
 """
+import argparse
 import http.client
+import json
 import os
-import signal
-import ssl
 import sys
+import urllib.parse
+import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-HERE = os.path.dirname(os.path.abspath(__file__))
-DEFAULT_UPSTREAM = "raisin-bean-gy0v5oyd2bt9wfvy.salad.cloud"
-DEFAULT_PORT = 8931
 
-# ---- parse args / env -------------------------------------------------------
-upstream = sys.argv[1] if len(sys.argv) > 1 else os.environ.get("SALAD_UPSTREAM", DEFAULT_UPSTREAM)
-listen_port = int(sys.argv[2] if len(sys.argv) > 2 else os.environ.get("SALAD_PROXY_PORT", DEFAULT_PORT))
+# --------------------------------------------------------------------------- #
+# small helpers
+# --------------------------------------------------------------------------- #
+def _ev(name, obj):
+    """One Anthropic SSE frame: 'event: <name>\\ndata: <json>\\n\\n'."""
+    return "event: %s\ndata: %s\n\n" % (name, json.dumps(obj, separators=(",", ":")))
 
-https = not upstream.lower().startswith("http://")
-rest = upstream.split("://")[-1].rstrip("/")
-parts = rest.rsplit(":", 1)
-up_host = parts[0]
-if len(parts) > 1 and parts[1].isdigit():
-    up_port = int(parts[1])
-else:
-    up_port = 443 if https else 80
-UPSTREAM_LABEL = f"{'https' if https else 'http'}://{up_host}:{up_port}"
 
-# ---- key --------------------------------------------------------------------
-def load_key():
-    k = os.environ.get("SALAD_API_KEY", "").strip()
-    if k:
-        return k
+def _rand_id():
+    return uuid.uuid4().hex[:24]
+
+
+def _err_msg(status, raw):
+    text = raw.decode("utf-8", "replace") if isinstance(raw, (bytes, bytearray)) else str(raw)
+    if status == 404:
+        return ("upstream 404: Salad container not ready (group stopped or still starting). "
+                "If you set SALAD_NO_AUTOSTART=1, start the group first. Raw: %s" % text[:300])
     try:
-        with open(os.path.join(HERE, "salad_api.txt")) as f:
-            return f.read().strip()
-    except OSError:
-        return ""
+        d = json.loads(text)
+        e = d.get("error")
+        if isinstance(e, dict):
+            return "upstream error (HTTP %d): %s" % (status, e.get("message") or e)
+        if isinstance(e, str):
+            return "upstream error (HTTP %d): %s" % (status, e)
+        if "detail" in d:
+            return "upstream error (HTTP %d): %s" % (status, d["detail"])
+    except Exception:
+        pass
+    return "upstream error (HTTP %d): %s" % (status, text[:300])
 
-KEY = load_key()
-if not KEY:
-    sys.exit("salad_proxy: no key (set SALAD_API_KEY or drop salad_api.txt next to the script)")
+
+# --------------------------------------------------------------------------- #
+# upstream client (talks to the Salad gateway, injects the key)
+# --------------------------------------------------------------------------- #
+class Upstream:
+    def __init__(self, upstream_url, keyfile, model, thinking=False,
+                 max_tokens_cap=12000, timeout=600):
+        u = urllib.parse.urlsplit(upstream_url)
+        if u.scheme != "https":
+            raise SystemExit("upstream must be https for Salad gateways")
+        self.host = u.hostname
+        self.port = u.port or 443
+        self.path = u.path or "/v1/chat/completions"
+        self.model = model
+        self.thinking = thinking
+        self.max_tokens_cap = max_tokens_cap
+        self.timeout = timeout
+        try:
+            with open(keyfile) as fh:
+                self.key = fh.read().strip()
+        except OSError as e:
+            raise SystemExit("cannot read keyfile %s: %s" % (keyfile, e))
+        if not self.key:
+            raise SystemExit("keyfile %s is empty" % keyfile)
+
+    def request(self, payload, stream):
+        conn = http.client.HTTPSConnection(self.host, self.port, timeout=self.timeout)
+        headers = {
+            "Salad-Api-Key": self.key,
+            "Content-Type": "application/json",
+            "Accept": "text/event-stream" if stream else "application/json",
+        }
+        conn.request("POST", self.path, body=json.dumps(payload), headers=headers)
+        return conn, conn.getresponse()
 
 
+# --------------------------------------------------------------------------- #
+# Anthropic -> OpenAI (request)
+# --------------------------------------------------------------------------- #
+def _system_text(system):
+    if system is None:
+        return None
+    if isinstance(system, str):
+        return system or None
+    if isinstance(system, list):
+        parts = []
+        for b in system:
+            if isinstance(b, dict) and b.get("type") == "text":
+                parts.append(b.get("text", ""))
+            elif isinstance(b, str):
+                parts.append(b)
+        txt = "\n".join(p for p in parts if p)
+        return txt or None
+    return None
+
+
+def _image_to_openai(b):
+    src = b.get("source", {}) or {}
+    st = src.get("type")
+    if st == "base64":
+        mt = src.get("media_type", "image/png")
+        data = src.get("data", "")
+        return {"type": "image_url", "image_url": {"url": "data:%s;base64,%s" % (mt, data)}}
+    if st == "url":
+        return {"type": "image_url", "image_url": {"url": src.get("url", "")}}
+    return {"type": "text", "text": "[image]"}
+
+
+def _translate_messages(msgs):
+    out = []
+    for m in msgs:
+        role = m.get("role")
+        content = m.get("content")
+
+        if role == "system":
+            txt = _system_text(content)
+            if txt:
+                out.append({"role": "system", "content": txt})
+            continue
+
+        if role == "assistant":
+            text_parts, tool_calls = [], []
+            if isinstance(content, str):
+                text_parts.append(content)
+            elif isinstance(content, list):
+                for b in content:
+                    bt = b.get("type")
+                    if bt == "text":
+                        text_parts.append(b.get("text", ""))
+                    elif bt == "tool_use":
+                        text_parts  # noqa: B018 (kept for clarity of intent)
+                        tool_calls.append({
+                            "id": b.get("id"),
+                            "type": "function",
+                            "function": {
+                                "name": b.get("name"),
+                                "arguments": json.dumps(b.get("input", {}),
+                                                        separators=(",", ":")),
+                            },
+                        })
+                    # "thinking" blocks are dropped
+            txt = "\n".join(p for p in text_parts if p)
+            msg = {"role": "assistant", "content": txt}
+            if tool_calls:
+                msg["tool_calls"] = tool_calls
+            out.append(msg)
+            continue
+
+        if role == "user":
+            tool_msgs, user_blocks = [], []
+            if isinstance(content, str):
+                user_blocks.append({"type": "text", "text": content})
+            elif isinstance(content, list):
+                for b in content:
+                    bt = b.get("type")
+                    if bt == "tool_result":
+                        c = b.get("content")
+                        if isinstance(c, list):
+                            parts = []
+                            for cb in c:
+                                if isinstance(cb, dict):
+                                    if cb.get("type") == "text":
+                                        parts.append(cb.get("text", ""))
+                                    elif cb.get("type") == "image":
+                                        parts.append("[image]")
+                            tool_content = "\n".join(parts)
+                        else:
+                            tool_content = "" if c is None else str(c)
+                        tool_msgs.append({"role": "tool",
+                                          "tool_call_id": b.get("tool_use_id"),
+                                          "content": tool_content})
+                    elif bt == "text":
+                        user_blocks.append({"type": "text", "text": b.get("text", "")})
+                    elif bt == "image":
+                        user_blocks.append(_image_to_openai(b))
+            # tool results come first (they answer the previous assistant tool_calls),
+            # then any new user text/images
+            out.extend(tool_msgs)
+            if user_blocks:
+                out.append({"role": "user", "content": user_blocks})
+            continue
+
+        # unknown role: skip
+    return out
+
+
+def _translate_tools(tools):
+    if not tools:
+        return None
+    out = []
+    for t in tools:
+        out.append({
+            "type": "function",
+            "function": {
+                "name": t.get("name"),
+                "description": t.get("description", ""),
+                "parameters": t.get("input_schema") or {"type": "object", "properties": {}},
+            },
+        })
+    return out
+
+
+def _translate_tool_choice(tc):
+    if tc is None:
+        return None
+    t = tc.get("type") if isinstance(tc, dict) else tc
+    if t == "auto":
+        return "auto"
+    if t == "any":
+        return "required"
+    if t == "none":
+        return "none"
+    if t == "tool":
+        return {"type": "function", "function": {"name": tc.get("name")}}
+    return None
+
+
+def anthropic_to_openai(body, up):
+    om = []
+    sys_txt = _system_text(body.get("system"))
+    if sys_txt:
+        om.append({"role": "system", "content": sys_txt})
+    om.extend(_translate_messages(body.get("messages") or []))
+
+    payload = {"model": up.model, "messages": om}
+    try:
+        mt = int(body.get("max_tokens"))
+    except (TypeError, ValueError):
+        mt = 0
+    payload["max_tokens"] = max(1, min(mt or up.max_tokens_cap, up.max_tokens_cap))
+
+    for k in ("temperature", "top_p"):
+        if isinstance(body.get(k), (int, float)):
+            payload[k] = body[k]
+    stop = body.get("stop_sequences")
+    if isinstance(stop, list) and stop:
+        payload["stop"] = stop
+    elif isinstance(stop, str) and stop:
+        payload["stop"] = stop
+
+    tools = _translate_tools(body.get("tools"))
+    if tools:
+        payload["tools"] = tools
+    tc = _translate_tool_choice(body.get("tool_choice"))
+    if tc is not None:
+        payload["tool_choice"] = tc
+
+    if body.get("stream"):
+        payload["stream"] = True
+        payload["stream_options"] = {"include_usage": True}
+    if not up.thinking:
+        # keep the Qwen answer clean; the smoke test (curl2_salad.sh) used this too
+        payload["chat_template_kwargs"] = {"enable_thinking": False}
+    return payload
+
+
+# --------------------------------------------------------------------------- #
+# OpenAI -> Anthropic (non-streaming response)
+# --------------------------------------------------------------------------- #
+def openai_to_anthropic(resp, model):
+    choices = resp.get("choices") or [{}]
+    ch = choices[0]
+    msg = ch.get("message") or {}
+    content = []
+    txt = msg.get("content")
+    if txt:
+        content.append({"type": "text", "text": txt})
+    for tc in (msg.get("tool_calls") or []):
+        fn = tc.get("function") or {}
+        args = fn.get("arguments")
+        try:
+            inp = json.loads(args) if args else {}
+        except Exception:
+            inp = {"_raw": args}
+        content.append({"type": "tool_use",
+                        "id": tc.get("id") or ("toolu_%s" % _rand_id()),
+                        "name": fn.get("name"), "input": inp})
+    if not content:
+        content = [{"type": "text", "text": ""}]
+    fr = ch.get("finish_reason")
+    stop = {"stop": "end_turn", "tool_calls": "tool_use", "length": "max_tokens",
+            "content_filter": "end_turn"}.get(fr, "end_turn")
+    usage = resp.get("usage") or {}
+    return {
+        "id": "msg_" + (resp.get("id") or _rand_id()),
+        "type": "message", "role": "assistant", "model": model,
+        "content": content, "stop_reason": stop, "stop_sequence": None,
+        "usage": {"input_tokens": usage.get("prompt_tokens", 0),
+                  "output_tokens": usage.get("completion_tokens", 0)},
+    }
+
+
+# --------------------------------------------------------------------------- #
+# OpenAI streaming -> Anthropic streaming (incremental)
+# --------------------------------------------------------------------------- #
+def _iter_sse(resp):
+    """Yield parsed JSON objects from an upstream 'data: ...' SSE body until [DONE]."""
+    while True:
+        raw = resp.readline()
+        if not raw:
+            return
+        line = raw.decode("utf-8", "replace").strip()
+        if not line.startswith("data:"):
+            continue
+        data = line[len("data:"):].strip()
+        if data == "[DONE]":
+            return
+        try:
+            yield json.loads(data)
+        except Exception:
+            continue
+
+
+class StreamBuilder:
+    """Accumulates OpenAI chat-completion chunks and emits Anthropic SSE frames."""
+
+    def __init__(self, model, uid):
+        self.model = model
+        self.uid = uid
+        self.next_index = 0
+        self.text_open = False
+        self.text_index = None
+        self.tools = {}
+        self.finish_reason = None
+        self.usage_out = 0
+
+    def _aidx(self):
+        i = self.next_index
+        self.next_index += 1
+        return i
+
+    def message_start(self):
+        return _ev("message_start", {"type": "message_start", "message": {
+            "id": "msg_" + self.uid, "type": "message", "role": "assistant",
+            "model": self.model, "content": [], "stop_reason": None,
+            "stop_sequence": None, "usage": {"input_tokens": 0, "output_tokens": 0}}})
+
+    def handle(self, chunk):
+        out = []
+        if isinstance(chunk.get("usage"), dict):
+            self.usage_out = chunk["usage"].get("completion_tokens") or self.usage_out
+        choices = chunk.get("choices") or []
+        if not choices:
+            return out
+        delta = choices[0].get("delta") or {}
+        fr = choices[0].get("finish_reason")
+        if fr:
+            self.finish_reason = fr
+        if isinstance(delta.get("content"), str) and delta["content"]:
+            out.extend(self._text(delta["content"]))
+        tcs = delta.get("tool_calls")
+        if tcs:
+            for tc in tcs:
+                out.extend(self._tool(tc))
+        return out
+
+    def _text(self, t):
+        out = []
+        if not self.text_open:
+            self.text_open = True
+            self.text_index = self._aidx()
+            out.append(_ev("content_block_start", {"type": "content_block_start",
+                        "index": self.text_index,
+                        "content_block": {"type": "text", "text": ""}}))
+        out.append(_ev("content_block_delta", {"type": "content_block_delta",
+                   "index": self.text_index,
+                   "delta": {"type": "text_delta", "text": t}}))
+        return out
+
+    def _close_text(self):
+        if self.text_open:
+            self.text_open = False
+            return _ev("content_block_stop",
+                       {"type": "content_block_stop", "index": self.text_index})
+        return None
+
+    def _tool(self, tc):
+        out = []
+        i = tc.get("index", 0)
+        fn = tc.get("function") or {}
+        if i not in self.tools:
+            ct = self._close_text()
+            if ct:
+                out.append(ct)
+            aidx = self._aidx()
+            tid = tc.get("id") or ("toolu_%s_%d" % (self.uid, i))
+            self.tools[i] = {"aidx": aidx, "id": tid,
+                             "name": fn.get("name"), "args": ""}
+            out.append(_ev("content_block_start", {"type": "content_block_start",
+                "index": aidx,
+                "content_block": {"type": "tool_use", "id": tid,
+                                   "name": fn.get("name"), "input": {}}}))
+        args = fn.get("arguments") or ""
+        if args:
+            self.tools[i]["args"] += args
+        return out
+
+    def finish(self):
+        out = []
+        ct = self._close_text()
+        if ct:
+            out.append(ct)
+        for i in sorted(self.tools):
+            t = self.tools[i]
+            out.append(_ev("content_block_delta", {"type": "content_block_delta",
+                "index": t["aidx"],
+                "delta": {"type": "input_json_delta",
+                          "partial_json": t["args"] or "{}"}}))
+            out.append(_ev("content_block_stop",
+                           {"type": "content_block_stop", "index": t["aidx"]}))
+        stop = {"stop": "end_turn", "tool_calls": "tool_use", "length": "max_tokens",
+                "content_filter": "end_turn"}.get(self.finish_reason, "end_turn")
+        out.append(_ev("message_delta", {"type": "message_delta",
+            "delta": {"stop_reason": stop, "stop_sequence": None},
+            "usage": {"output_tokens": self.usage_out}}))
+        out.append(_ev("message_stop", {"type": "message_stop"}))
+        return out
+
+
+# --------------------------------------------------------------------------- #
+# HTTP handler
+# --------------------------------------------------------------------------- #
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
     server_version = "salad_proxy/1.0"
 
-    def log_message(self, fmt, *args):  # one compact line per request
-        sys.stderr.write("%s %s\n" % (self.address_string(), fmt % args))
+    def log_message(self, *a):
+        pass  # quiet; the wrapper captures stderr to a log file
 
-    # -- helpers --------------------------------------------------------------
-    def _read_body(self):
-        te = (self.headers.get("Transfer-Encoding") or "").lower()
-        if "chunked" in te:
-            body = b""
-            while True:
-                size = int(self.rfile.readline().split(b";")[0].strip() or b"0", 16)
-                if size == 0:
-                    self.rfile.readline()  # trailing CRLF
-                    return body
-                body += self.rfile.read(size)
-                self.rfile.readline()
-        n = int(self.headers.get("Content-Length") or 0)
-        return self.rfile.read(n) if n else None
-
-    def _open_upstream(self):
-        if https:
-            return http.client.HTTPSConnection(up_host, up_port, timeout=None,
-                                                context=ssl.create_default_context())
-        return http.client.HTTPConnection(up_host, up_port, timeout=None)
-
-    # -- forwarding -----------------------------------------------------------
-    def handle_any(self):
-        if self.path == "/__upstream":
-            self.send_response(200)
-            self.send_header("Content-Type", "text/plain")
-            self.send_header("Content-Length", str(len(UPSTREAM_LABEL)))
-            self.send_header("Connection", "close")
-            self.end_headers()
-            self.wfile.write(UPSTREAM_LABEL.encode())
-            return
-
-        body = self._read_body()
-        hop = {"host", "connection", "transfer-encoding", "keep-alive",
-               "proxy-authorization", "proxy-authenticate", "te", "upgrade",
-               "salad-api-key"}
-        headers = {k: v for k, v in self.headers.items() if k.lower() not in hop}
-        headers["Salad-Api-Key"] = KEY
-
-        try:
-            conn = self._open_upstream()
-            conn.request(self.command, self.path, body=body, headers=headers)
-            resp = conn.getresponse()
-        except Exception as e:  # upstream unreachable / refused / DNS
-            self.send_response(502)
-            self.send_header("Content-Type", "text/plain")
-            msg = f"salad_proxy: upstream error: {e}".encode()
-            self.send_header("Content-Length", str(len(msg)))
-            self.send_header("Connection", "close")
-            self.end_headers()
-            self.wfile.write(msg)
-            return
-
-        has_len = False
-        for k, v in resp.getheaders():
-            if k.lower() in {"connection", "transfer-encoding", "upgrade"}:
-                continue
-            if k.lower() == "content-length":
-                has_len = True
-        self.send_response(resp.status, resp.reason)
-        for k, v in resp.getheaders():
-            if k.lower() in {"connection", "transfer-encoding", "upgrade"}:
-                continue
-            self.send_header(k, v)
-        if not has_len:
-            self.send_header("Transfer-Encoding", "chunked")
-        self.send_header("Connection", "close")
+    # ---- helpers ----
+    def _json(self, status, obj):
+        body = json.dumps(obj).encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
         self.end_headers()
+        self.wfile.write(body)
+
+    def _upstream(self):
+        return self.server.upstream
+
+    def _write(self, s):
+        try:
+            self.wfile.write(s.encode("utf-8"))
+            self.wfile.flush()
+        except Exception:
+            pass
+
+    # ---- GET ----
+    def do_GET(self):
+        path = urllib.parse.urlsplit(self.path).path.rstrip("/") or "/"
+        if path in ("/healthz", "/health"):
+            self._json(200, {"ok": True})
+        elif path.endswith("/models"):
+            up = self._upstream()
+            self._json(200, {"data": [{"id": up.model, "type": "model",
+                                        "display_name": up.model, "created_at": 0}]})
+        else:
+            self._json(404, {"type": "error", "error": {"type": "not_found",
+                       "message": "unknown path %s" % path}})
+
+    # ---- POST ----
+    def do_POST(self):
+        path = urllib.parse.urlsplit(self.path).path.rstrip("/") or "/"
+        if not path.endswith("/messages"):
+            self._json(404, {"type": "error", "error": {"type": "not_found",
+                       "message": "unknown path %s" % path}})
+            return
+        try:
+            self._handle_messages()
+        except Exception as e:  # last-resort guard so a thread never dies silently
+            self._json(500, {"type": "error", "error": {"type": "api_error",
+                       "message": "proxy error: %s" % e}})
+
+    def _handle_messages(self):
+        length = int(self.headers.get("Content-Length") or 0)
+        raw = self.rfile.read(length) if length else b"{}"
+        try:
+            body = json.loads(raw or b"{}")
+        except Exception:
+            self._json(400, {"type": "error", "error": {"type": "invalid_request_error",
+                       "message": "request body is not valid JSON"}})
+            return
+        up = self._upstream()
+        payload = anthropic_to_openai(body, up)
+        stream = bool(body.get("stream"))
 
         try:
-            if has_len:
-                while True:
-                    chunk = resp.read(65536)
-                    if not chunk:
-                        break
-                    self.wfile.write(chunk)
-            else:
-                while True:
-                    chunk = resp.read(16384)
-                    if not chunk:
-                        break
-                    self.wfile.write(b"%x\r\n%s\r\n" % (len(chunk), chunk))
-                self.wfile.write(b"0\r\n\r\n")
-            self.wfile.flush()
-        except (BrokenPipeError, ConnectionResetError):
-            pass  # client went away mid-stream; nothing to do
+            conn, resp = up.request(payload, stream)
+        except Exception as e:
+            self._json(502, {"type": "error", "error": {"type": "api_error",
+                       "message": "upstream connect error: %s" % e}})
+            return
 
-    do_GET = do_POST = do_HEAD = do_PUT = do_DELETE = do_OPTIONS = do_PATCH = handle_any
+        if resp.status != 200:
+            err_raw = resp.read()
+            status = resp.status if resp.status >= 400 else 502
+            self._json(status, {"type": "error", "error": {"type": "api_error",
+                          "message": _err_msg(resp.status, err_raw)}})
+            conn.close()
+            return
+
+        if stream:
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Cache-Control", "no-cache")
+            self.send_header("Connection", "close")
+            self.end_headers()
+            self.close_connection = True
+            b = StreamBuilder(up.model, _rand_id())
+            self._write(b.message_start())
+            try:
+                for chunk in _iter_sse(resp):
+                    for frame in b.handle(chunk):
+                        self._write(frame)
+                for frame in b.finish():
+                    self._write(frame)
+            except Exception as e:
+                self._write(_ev("error", {"type": "error",
+                             "error": {"type": "api_error",
+                                       "message": "stream error: %s" % e}}))
+            finally:
+                try:
+                    resp.close()
+                except Exception:
+                    pass
+        else:
+            data = resp.read()
+            try:
+                obj = json.loads(data)
+            except Exception:
+                self._json(502, {"type": "error", "error": {"type": "api_error",
+                           "message": "upstream returned non-JSON"}})
+                conn.close()
+                return
+            self._json(200, openai_to_anthropic(obj, up.model))
+            conn.close()
 
 
 def main():
-    with open(f"/tmp/salad_proxy.{listen_port}.pid", "w") as f:
-        f.write(str(os.getpid()))
-    signal.signal(signal.SIGHUP, lambda *_: sys.exit(0))
-    srv = ThreadingHTTPServer(("127.0.0.1", listen_port), Handler)
-    srv.daemon_threads = True
-    sys.stderr.write(f"salad_proxy: 127.0.0.1:{listen_port} -> {UPSTREAM_LABEL}\n")
+    ap = argparse.ArgumentParser(description="Anthropic->OpenAI proxy for a Salad gateway")
+    ap.add_argument("--port", type=int, default=8093)
+    ap.add_argument("--host", default="127.0.0.1")
+    ap.add_argument("--upstream", required=True,
+                    help="full /v1/chat/completions URL, e.g. https://<host>/v1/chat/completions")
+    ap.add_argument("--model", required=True, help="served model alias sent upstream")
+    ap.add_argument("--keyfile", required=True, help="file containing the Salad-Api-Key")
+    ap.add_argument("--thinking", default="0", help="1 to enable Qwen thinking (default off)")
+    ap.add_argument("--max-tokens-cap", type=int, default=12000,
+                    help="hard ceiling on output tokens forwarded upstream")
+    ap.add_argument("--timeout", type=int, default=600, help="upstream read timeout (s)")
+    a = ap.parse_args()
+
+    up = Upstream(a.upstream, a.keyfile, a.model,
+                  thinking=a.thinking == "1",
+                  max_tokens_cap=a.max_tokens_cap, timeout=a.timeout)
+    srv = ThreadingHTTPServer((a.host, a.port), Handler)
+    srv.upstream = up
+    sys.stderr.write("salad_proxy: http://%s:%d -> %s (model=%s) pid=%d\n" %
+                     (a.host, a.port, a.upstream, a.model, os.getpid()))
     sys.stderr.flush()
     try:
         srv.serve_forever()
