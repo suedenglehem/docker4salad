@@ -29,10 +29,11 @@
 #   SALAD_NO_AUTOSTART   set to 1 to skip auto-start / readiness wait
 #   CLAUDE_CODE_MAX_CONTEXT_TOKENS / CLAUDE_CODE_MAX_OUTPUT_TOKENS  token caps
 #
-# NOTE on token caps: the served model has n_ctx = 30208. Claude Code's total
-# input + requested output must stay under that or the model errors with
-# "context length exceeded". Defaults below target input ~18000 + output 8000
-# = 26000, leaving headroom. Lower them if you hit that error.
+# NOTE on token caps: the served model has n_ctx = 90112 (CTX_SIZE=90000,
+# Q5_K_M weights). Claude Code's total input + requested output must stay
+# under that or the model errors with "context length exceeded". Defaults
+# below target input 64000 + output 16000 = 80000, leaving headroom.
+# Lower them if you hit that error.
 set -u
 
 # Resolve this script's real directory, following symlinks — so a
@@ -77,8 +78,8 @@ GROUP="${SALAD_GROUP:-qwen38-27b-q6k}"
 SALAD_API="https://api.salad.com/api/public"
 
 # ---- token caps (override by exporting before calling) --------------------
-export CLAUDE_CODE_MAX_CONTEXT_TOKENS="${CLAUDE_CODE_MAX_CONTEXT_TOKENS:-18000}"
-export CLAUDE_CODE_MAX_OUTPUT_TOKENS="${CLAUDE_CODE_MAX_OUTPUT_TOKENS:-8000}"
+export CLAUDE_CODE_MAX_CONTEXT_TOKENS="${CLAUDE_CODE_MAX_CONTEXT_TOKENS:-64000}"
+export CLAUDE_CODE_MAX_OUTPUT_TOKENS="${CLAUDE_CODE_MAX_OUTPUT_TOKENS:-16000}"
 
 # ---- read the key (never printed) ----------------------------------------
 SALAD_KEY="$(tr -d '[:space:]' < "$KEYFILE" 2>/dev/null || true)"
