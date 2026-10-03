@@ -1,5 +1,5 @@
 #!/bin/bash
-# Smoke-test the LLM running on SaladCloud (the qwen38-27b-rtx5090 container
+# Smoke-test the LLM running on SaladCloud (the qwen38-27b-q6k container
 # group) by asking 2-3 simple questions through its container gateway.
 #
 # Two INDEPENDENT keys, two different headers — do not mix them up:

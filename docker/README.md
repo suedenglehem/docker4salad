@@ -110,8 +110,6 @@ The 27B Claude Code backend lives in SaladCloud, not on this box: group `qwen38-
 - **Smoke test**: `./docker/docker_tests/curl2_salad.sh -url corn-cabbage-2yk4e98r3rx752n0.salad.cloud -m qwen38-27b` (from repo root).
 - **Claude Code against it**: `cl_salad [GATEWAY_URL]` (in `docker/docker_tests/`, installed at `/usr/local/bin/cl_salad`) — the gateway URL is its first argument, auto-starts the group if it's asleep, runs the local `salad_proxy.py` (Anthropic↔OpenAI, injects the key), then the claude CLI with 64000/16000 token caps matching the 90112 ctx.
 
-Superseded: `deploy_qwen38_27b_rtx5090.py` / `update_qwen38_27b_rtx5090.py` target the old `qwen38-27b-rtx5090` group (deleted 2026-10-01, ran `lmss:cuda128-v2`) — kept for reference only.
-
 Note: the Salad worker image cache is keyed by REPO NAME, not tag or digest — a new tag on a cached repo can still serve a stale image on workers that had cached the old one (observed live on `lmss:cuda128` on 2026-10-01). Never overwrite a tag a worker may hold; the airtight lever is a digest-pinned image ref to a digest no worker has seen. With a plain tag, verify the live build with `version.sh` in the container.
 
 ## Verify

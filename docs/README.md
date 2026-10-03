@@ -30,10 +30,8 @@ The two keys to the whole setup:
 | `version.sh` | `docker/docker_tests/` | Run **inside a running instance** (via SSH) to confirm *which build* is actually live and what it's downloading. |
 | `curl2_salad.sh` | `docker/docker_tests/` | Quick smoke test — asks the running model 2-3 simple questions through the gateway. |
 | `salad_client.py` | repo root | Stdlib-only SaladCloud OpenAPI client (create/start/stop/delete/patch groups, GPU classes, projects). |
-| `deploy_qwen38_27b.py` | repo root | **Canonical 27B deployer** — creates/updates the `qwen38-27b-q6k` group (baked Q6_K + MTP + vision image) and starts it. |
-| `update_qwen38_27b_rtx5090.py` | repo root | Re-point a live group at a new image / GPU class / env, then restart it. |
+| `deploy_qwen38_27b.py` | repo root | **Canonical 27B deployer** — creates/updates the `qwen38-27b-q6k` group (baked MTP + vision image, main model fetched at runtime) and starts it. |
 | `deploy_qwen38_9b.py` / `deploy_qwen9b.py` | repo root | 9B deployers (`qwen38-9b`, `qwen9b`) — plain, no draft/vision/template. |
-| `deploy_qwen38_27b_rtx5090.py` | repo root | Earlier 27B deployer (`qwen38-27b-rtx5090`, `lmss:cuda128-v2`). |
 | `patch_qwen38_9b_rescue.py` | repo root | One-off: digest-pinned PATCH to force a fresh image onto `qwen38-9b`. |
 
 Everything runs against org **`ma-casa-in-paris`**, project **`qwen38-27b`**.
@@ -91,8 +89,8 @@ What it does, in order:
 | `SALAD_ORG` / `SALAD_PROJECT` / `SALAD_GROUP` | `ma-casa-in-paris` / `qwen38-27b` / `qwen38-27b-q6k` | Used for the auto-start / status lookups. |
 | `SALAD_ENABLE_THINKING` | `0` | `1` to enable Qwen thinking (off by default → clean answers). |
 | `SALAD_NO_AUTOSTART` | unset | `1` = don't auto-start / wait; just check readiness. |
-| `CLAUDE_CODE_MAX_CONTEXT_TOKENS` | `18000` | Input token cap (see [token caps](#token-caps-vs-context-length)). |
-| `CLAUDE_CODE_MAX_OUTPUT_TOKENS` | `8000` | Output token cap. |
+| `CLAUDE_CODE_MAX_CONTEXT_TOKENS` | `64000` | Input token cap (see [token caps](#token-caps-vs-context-length)). |
+| `CLAUDE_CODE_MAX_OUTPUT_TOKENS` | `16000` | Output token cap. |
 
 ### `salad_proxy.py` — the Anthropic↔OpenAI bridge
 
@@ -175,21 +173,18 @@ All read the Salad key from `salad_api.txt` and (optionally) a HF token from
 `hft.txt` (validated against the Hub, added to the group env, never printed).
 
 - **`deploy_qwen38_27b.py`** — the **canonical** 27B deployer. Create-or-update the
-  `qwen38-27b-q6k` group on the baked **q6-mtp-vision** image: only the main model
-  (`Qwen3.8-27B-Uncensored-Q6_K.gguf`, 20.9 GiB) downloads at runtime; the MTP
-  draft and mmproj vision projector are baked into the image. RTX 5090. Starts it.
-  Flags: `--gpu rtx5090|rtx3090`, `--ctx-size` (default `30000`, `132768` = full),
-  `--use-draft-model` (`none` = use the gguf's embedded MTP head),
+  `qwen38-27b-q6k` group on the baked **q6-mtp-vision** image (digest-pinned v4):
+  only the main model downloads at runtime (default
+  `Qwen3.8-27B-Uncensored-Q5_K_M.gguf`, 18.19 GiB — the MTP head is embedded in
+  the gguf); the MTP draft and mmproj vision projector are baked into the image.
+  Starts it. Built-in defaults = the live production profile (RTX 3090, 24 GB,
+  `CTX_SIZE` 90000 — served n_ctx 90112). Flags: `--gpu rtx3090|rtx5090`,
+  `--model-file`, `--ctx-size` (`132768` = full 128K-class with a matching quant),
+  `--image`, `--use-draft-model` (`none` = use the gguf's embedded MTP head),
   `--no-start` (apply config only), `--disk-size` / `--memory-size` (create path).
-- **`update_qwen38_27b_rtx5090.py`** — re-point a **live** group at a new image /
-  GPU class / env, then restart (stop → PATCH → start). `--gpu rtx3090|rtx5090`
-  switches the card (the 3090 env drops draft+vision — they don't fit in 24 GB);
-  `--no-restart` = PATCH only.
 - **`deploy_qwen38_9b.py`** / **`deploy_qwen9b.py`** — 9B (`qwen38-9b` / `qwen9b`),
   plain: no draft, no vision, no template (the image's `none` sentinel makes that
   the default). `--ctx-size`, `--disk-size`.
-- **`deploy_qwen38_27b_rtx5090.py`** — the earlier 27B group
-  (`qwen38-27b-rtx5090`, `lmss:cuda128-v2`, noMTP Q4_K_M + MTP draft + vision).
 - **`patch_qwen38_9b_rescue.py`** — one-off rescue: PATCH `qwen38-9b` to a
   digest-pinned image (the airtight lever against the stale repo-name cache),
   falling back to the tag if the API rejects digests, then start.
@@ -227,9 +222,9 @@ think (run `version.sh`).
 ### 3. Deploy / re-deploy the Salad group
 
 ```bash
-python3 deploy_qwen38_27b.py            # create-or-update qwen38-27b-q6k + start
-python3 deploy_qwen38_27b.py --ctx-size 132768      # full context
-python3 update_qwen38_27b_rtx5090.py --gpu rtx5090  # re-point + restart a live group
+python3 deploy_qwen38_27b.py                  # create-or-update qwen38-27b-q6k + start
+python3 deploy_qwen38_27b.py --ctx-size 132768      # full context (with a matching quant)
+python3 deploy_qwen38_27b.py --gpu rtx5090      # switch card (re-point + restart)
 ```
 
 After a deploy, "running" only means the **container process** is up — the model
@@ -257,10 +252,11 @@ curl -s https://<gateway>/v1/models -H "Salad-Api-Key: $(tr -d '[:space:]' < doc
   *inside* the container. The public `*.salad.cloud` domain is Cloudflare-fronted
   and only proxies standard ports — connections to `https://<dns>:8888` time out.
   Always use `443`.
-- **Token caps vs context length.** The deployed group runs ~30k context. Claude
-  Code's *input + requested output* must stay under it or the model errors with
-  "context length exceeded". `cl_salad` defaults to 18000 + 8000 = 26000 for
-  headroom — lower them if you hit the error.
+- **Token caps vs context length.** The deployed group serves n_ctx 90112
+  (CTX_SIZE 90000, Q5_K_M). Claude Code's *input + requested output* must stay
+  under it or the model errors with "context length exceeded". `cl_salad`
+  defaults to 64000 + 16000 = 80000 for headroom — lower them if you hit the
+  error.
 - **The worker image cache is keyed by repo *name*, not tag or digest.** A new tag
   on a cached repo can still serve a **stale** image on workers that already had
   the old one. Never overwrite a tag a worker may hold; to force a known build use
@@ -290,15 +286,13 @@ curl -s https://<gateway>/v1/models -H "Salad-Api-Key: $(tr -d '[:space:]' < doc
 on_salad/
 ├── salad_client.py                 # SaladCloud OpenAPI client (stdlib)
 ├── deploy_qwen38_27b.py            # canonical 27B deployer (qwen38-27b-q6k)
-├── deploy_qwen38_27b_rtx5090.py    # earlier 27B deployer
-├── update_qwen38_27b_rtx5090.py    # re-point + restart a live 27B group
 ├── deploy_qwen38_9b.py / deploy_qwen9b.py   # 9B deployers
 ├── patch_qwen38_9b_rescue.py       # one-off digest-pinned rescue
 ├── repo.txt                        # image repo name (boris271142/lmss)
 ├── salad_api.txt  hft.txt  api.txt # KEYS — gitignored, chmod 600, never printed
 ├── docker/
 │   ├── Dockerfile.multistage       # llama.cpp (CUDA + FA + NCCL) image build
-│   ├── Dockerfile.lmss_q6_mtp_vision # baked Q6_K + MTP + vision extension
+│   ├── Dockerfile.lmss_q6_mtp_vision # baked MTP draft + mmproj vision extension
 │   ├── qwen3.8.q6.jinja            # permissive chat template (shipped in image)
 │   ├── api_app.py                  # status API on :9999 (/startup /live /ready)
 │   ├── run_api.py
