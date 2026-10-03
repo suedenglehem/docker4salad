@@ -49,7 +49,7 @@ Notes:
 
 ## Run it
 
-Full command with every overridable argument spelled out (defaults shown = the SaladCloud production setup: Qwen3.8-27B on an RTX 5090 — see [SaladCloud](#saladcloud-27b-production-group)). The 27B does NOT fit this box's 16 GB cards; locally, use the 9B service.
+Full command with every overridable argument spelled out (defaults shown = the local compose profile: noMTP-Q4_K_M + draft-Q8_0 @ 131072). The 27B does NOT fit this box's 16 GB cards; locally, use the 9B service. The live SaladCloud production setup (Q5_K_M @ 90K on a 3090) is described in [SaladCloud](#saladcloud-27b-production-group).
 
 ```bash
 cd /dd2/andrei/docker/on_salad/docker/docker_tests && \
@@ -99,14 +99,18 @@ Model + KV ≈ 5.8 GiB VRAM, ~100 tok/s generation (measured 2026-08-23 on the p
 
 ## SaladCloud (27B production group)
 
-The 27B at full 131k ctx lives in SaladCloud, not on this box: group `qwen38-27b-rtx5090` (org `ma-casa-in-paris`, project `qwen38-27b`), one RTX 5090 (32 GB). It runs image `boris271142/lmss:cuda128-v3` — the same Dockerfile as here (the `docker_tests/` copy is a symlink), extended with first-start `wget2` downloads of `DRAFT_MODEL_URL` / `VISION_MODEL_URL`, q8_0 KV cache, the `none` sentinel for optional features, and the permissive `qwen3.8.q6.jinja` template. The local compose uses the same `cuda128-v3` tag.
+The 27B Claude Code backend lives in SaladCloud, not on this box: group `qwen38-27b-q6k` (org `ma-casa-in-paris`, project `qwen38-27b`), one **RTX 3090 (24 GB)**, on-demand (no autostart — `cl_salad` wakes it).
 
-- Deploy: `python3 deploy_qwen38_27b_rtx5090.py` (repo root); re-apply after image bumps: `python3 update_qwen38_27b_rtx5090.py`.
-- Switch cards / re-apply env: `python3 update_qwen38_27b_rtx5090.py --gpu rtx3090|rtx5090` (stop → PATCH → start; `--no-restart` for PATCH only). The **3090 (24 GB)** env omits `DRAFT_*` / `VISION_*` — the 3 GB draft + ~1 GB mmproj don't fit next to the 15.4 GB weights — so the image CMD falls back to n-gram self-speculation and text-only serving. Same weights, same 132768 ctx (~21 GB live: the documented 24 GB config). The 5090 keeps the full set.
-- HF token: `hft.txt` next to the deploy scripts (gitignored, chmod 600). If the token validates against the Hub, `update_*.py` adds `HF_TOKEN` to the group env; the image CMD forwards it to `hf download` as `--token` (authenticated, faster pulls). Missing/invalid → skipped with a warning, `hf` downloads anonymously (fine for public repos). The scripts never print it.
-- Gateway (port **443**, `Salad-Api-Key` header): `raisin-bean-gy0v5oyd2bt9wfvy.salad.cloud`.
-- Smoke test: `./docker/docker_tests/curl2_salad.sh -url raisin-bean-gy0v5oyd2bt9wfvy.salad.cloud -m qwen38-27b` (from repo root).
-- Claude Code against it: `cl_salad [GATEWAY_URL]` (in `docker/docker_tests/`, installed at `/usr/local/bin/cl_salad`) — the gateway URL is its first argument, auto-starts the group if it's asleep, runs the local `salad_proxy.py`, then the claude CLI.
+- **Image**: baked `boris271142/lmss_jonathancoletti_qwen38_q6_mtp_vision:cuda128-v4`, digest-pinned live (`sha256:789ff2b3…3a4a`). A `FROM boris271142/lmss:cuda128-v3` extension (`Dockerfile.lmss_q6_mtp_vision`): the MTP draft (Q8_0, 2.95 GiB) and mmproj (F16, 0.86 GiB) are baked into the image, so at runtime **only the main model** is downloaded from HF via `hf` (v3's `wget2` `DRAFT_MODEL_URL` / `VISION_MODEL_URL` mechanism is gone — those env vars are no longer read). The local compose still uses the plain `cuda128-v3` multistage image.
+- **Live config (2026-10-03)**: `MODEL_FILE=Qwen3.8-27B-Uncensored-Q5_K_M.gguf` (18.19 GiB, MTP head embedded in the gguf), `CTX_SIZE=90000` (served n_ctx 90112), `MODEL_ALIAS=qwen38-27b` (stable — clients reference the alias, not the group name), `CHAT_TEMPLATE=/opt/llama.cpp/qwen3.8.q6.jinja` (the patched Claude template — the GGUF-embedded one rejects mid-conversation system messages), `USE_DRAFT_MODEL=none` (self-speculation from the embedded MTP head; the baked draft is only used for noMTP quants), q8_0 KV, flash-attn, vision on. See [Choosing quant + context length by VRAM](#choosing-quant--context-length-by-vram). The group name `q6k` is a leftover from the original Q6_K deploy and is kept — renaming means delete + recreate = new DNS + the DELETE name-tombstone dance.
+- **Deploy**: `python3 deploy_qwen38_27b.py` (repo root) — create-or-update in place (stop when running → PATCH image + full env → start), which keeps the group's DNS stable. Flags: `--gpu rtx5090|rtx3090`, `--ctx-size`, `--image`, `--use-draft-model`, `--no-start`. Its built-in defaults (Q6_K, CTX 30000, rtx5090, tag `cuda128-v3`) predate the live Q5_K_M @ 90K config above — a plain run would reset the group to that profile. For env-only changes (quant/ctx switches) PATCH via `salad_client.update_container_group` instead; `environment_variables` is replaced **wholesale**, so GET the current env first and send the full set.
+- **Cold start**: every stop→start re-downloads the main model (~10 min observed for Q5_K_M, ~26 min for Q6_K). The readiness probe (30 s delay + 20 × 120 s ≈ 40.5 min failure window, `GET /ready` on 8889) is sized to tolerate that; the early 30 s first probe (not the 1200 s cap) makes the gateway open the moment the model is actually ready.
+- **HF token**: `hft.txt` next to the deploy scripts (gitignored, chmod 600). If it validates against the Hub, the deployer adds `HF_TOKEN` to the group env; the image CMD forwards it to `hf download` as `--token` (authenticated, faster pulls). Missing/invalid → skipped with a warning, `hf` downloads anonymously (fine for public repos). Never printed.
+- **Gateway** (port **443**, `Salad-Api-Key` header): `corn-cabbage-2yk4e98r3rx752n0.salad.cloud`.
+- **Smoke test**: `./docker/docker_tests/curl2_salad.sh -url corn-cabbage-2yk4e98r3rx752n0.salad.cloud -m qwen38-27b` (from repo root).
+- **Claude Code against it**: `cl_salad [GATEWAY_URL]` (in `docker/docker_tests/`, installed at `/usr/local/bin/cl_salad`) — the gateway URL is its first argument, auto-starts the group if it's asleep, runs the local `salad_proxy.py` (Anthropic↔OpenAI, injects the key), then the claude CLI with 64000/16000 token caps matching the 90112 ctx.
+
+Superseded: `deploy_qwen38_27b_rtx5090.py` / `update_qwen38_27b_rtx5090.py` target the old `qwen38-27b-rtx5090` group (deleted 2026-10-01, ran `lmss:cuda128-v2`) — kept for reference only.
 
 Note: the Salad worker image cache is keyed by REPO NAME, not tag or digest — a new tag on a cached repo can still serve a stale image on workers that had cached the old one (observed live on `lmss:cuda128` on 2026-10-01). Never overwrite a tag a worker may hold; the airtight lever is a digest-pinned image ref to a digest no worker has seen. With a plain tag, verify the live build with `version.sh` in the container.
 
