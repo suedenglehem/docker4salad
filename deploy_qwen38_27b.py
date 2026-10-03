@@ -15,31 +15,37 @@ image layers, so at runtime ONLY the main model is downloaded from
 HuggingFace via the fast `hf` xet path. The v3 wget2 DRAFT_MODEL_URL /
 VISION_MODEL_URL mechanism is GONE — those env vars are no longer read.
 
-Model: Qwen3.8-27B-Uncensored-Q6_K.gguf (20.9 GiB). This quant has the MTP
-head EMBEDDED in the gguf (nextn_predict_layers metadata), so it runs on the
-in-gguf head: USE_DRAFT_MODEL=none, --spec-type draft-mtp, NO --model-draft.
-For a quant WITHOUT an embedded head (e.g. the noMTP-Q4_K_M build), pass
+Model: default Qwen3.8-27B-Uncensored-Q5_K_M.gguf (18.19 GiB) — the live
+production quant since 2026-10-03. Like the other plain Q/IQ quants in the
+repo, this build has the MTP head EMBEDDED in the gguf (nextn_predict_layers
+metadata, verified via the GGUF header), so it runs on the in-gguf head:
+USE_DRAFT_MODEL=none, --spec-type draft-mtp, NO --model-draft. For a quant
+WITHOUT an embedded head (e.g. the noMTP-Q4_K_M build), pass
 --use-draft-model 1 and the image passes the baked draft via --model-draft.
-Vision (--mmproj) is ALWAYS on in this _vision image.
+Other quants via --model-file (Q6_K, Q4_K_M, ...). Vision (--mmproj) is
+ALWAYS on in this _vision image.
 
 Create-or-update semantics: if the group already exists it is updated in
 place (stop when running -> PATCH image + full env -> start), which keeps
 the group's DNS stable for clients. A missing group is created. The
 readiness probe is the ~40-minute failure window that tolerates a cold
-20.9 GiB download on a new worker: 30 s delay + 20 x 120 s = 2430 s max
-(the spec caps: delay 1200, period 120, failure_threshold 20). The 30 s
-delay (not 1200) keeps the FIRST probe early, so the gateway — and
-cloudflare in front of it — open as soon as the model is actually ready
-instead of a fixed 20 min after the container starts.
+main-model download on a new worker (~18.2 GiB Q5_K_M, ~20.9 GiB Q6_K):
+30 s delay + 20 x 120 s = 2430 s max (the spec caps: delay 1200, period
+120, failure_threshold 20). The 30 s delay (not 1200) keeps the FIRST
+probe early, so the gateway — and cloudflare in front of it — open as soon
+as the model is actually ready instead of a fixed 20 min after the
+container starts.
 
-GPU: RTX 5090 (32 GB) — 20.9 GiB Q6_K + mmproj (0.86 GiB) + q8_0 KV
-(~4.6 GiB at the full 132768 ctx, ~1 GiB at the 30000 test ctx) — fits
-with wide headroom. A 24 GB card (--gpu rtx3090) does NOT fit this config
-(vision is unconditional in this image); the choice is kept as an explicit
-escape hatch for reduced-ctx experiments.
+GPU: default RTX 3090 (24 GB) — the live production card: 18.19 GiB Q5_K_M
++ mmproj (0.86 GiB) + q8_0 KV (~3.0 GiB at the 90000 default ctx) ≈ 22 GiB,
+fits with ~2 GiB headroom (verified live 2026-10-03: served n_ctx 90112).
+An RTX 5090 (32 GB, --gpu rtx5090) fits Q6_K at 128K+ with wide headroom —
+see docker/README.md "Choosing quant + context length by VRAM" for the
+full quant/ctx matrix.
 
-Ctx: the default is 30000 — the simple-test setting requested 2026-10-02.
-Pass --ctx-size 132768 for the full production context.
+Ctx: the default is 90000 — the live production setting (served n_ctx
+90112; the 27B's trained context is 262144). Pass --ctx-size 132768 for
+the full context (fits on Q5_K_M/5090 or Q4_K_M/3090).
 
 Disk: 50 GiB (create path; resources are NOT patchable, an existing group
 keeps its resources). The main-model `hf download` can transiently hold ~2x
@@ -52,10 +58,16 @@ Anthropic-format requests need system messages accepted anywhere).
 SALAD_API_KEY is read from salad_api.txt by salad_client; HF_TOKEN from
 hft.txt (validated via whoami-v2; neither is ever printed).
 
+The built-in defaults ARE the live production profile (2026-10-03):
+Q5_K_M @ CTX_SIZE 90000 on an RTX 3090, digest-pinned cuda128-v4 image —
+a bare run re-applies exactly that (idempotent against the live group).
+
 Usage:
-    python3 deploy_qwen38_27b.py                     # create-or-update, start
+    python3 deploy_qwen38_27b.py                     # create-or-update, start (live prod profile)
     python3 deploy_qwen38_27b.py --no-start          # apply config only
     python3 deploy_qwen38_27b.py --use-draft-model 1 # gguf without MTP head
+    python3 deploy_qwen38_27b.py --model-file Qwen3.8-27B-Uncensored-Q6_K.gguf \
+        --gpu rtx5090 --ctx-size 132768              # other quant/card/ctx combos
 """
 
 import argparse
@@ -91,17 +103,23 @@ GROUP_NAME = "qwen38-27b-q6k"
 # name; curl2_salad.sh -m and the Claude Code client reference it.
 MODEL_ALIAS = "qwen38-27b"
 
-# Plain tag: the repo NAME is the Salad worker cache key, and this repo is
-# fresh (no worker has cached it), so the tag is safe. Manifest-list digest
-# of the 2026-10-02 push, for reference / the airtight pin:
-#   boris271142/lmss_jonathancoletti_qwen38_q6_mtp_vision@sha256:a1ab8bd22b9f
-#   d7aef5c00e902744cb3161d4a204c92e6265fe266a332bec51fa
-IMAGE = "boris271142/lmss_jonathancoletti_qwen38_q6_mtp_vision:cuda128-v3"
+# Digest-pinned, exactly what the live group runs: the API accepts the
+# @sha256 ref verbatim, and it is the airtight lever against the worker
+# image cache (keyed by repo NAME — a tag re-push can serve stale layers on
+# workers that cached the old one). This is the cuda128-v4 push
+# (2026-10-03, build id 'lmss q6-mtp-vision-v2 (--chat-template-file fix)
+# 2026-10-03'); the tag form, for humans:
+#   boris271142/lmss_jonathancoletti_qwen38_q6_mtp_vision:cuda128-v4
+# v3 manifest-list digest (previous image), for reference:
+#   sha256:a1ab8bd22b9fd7aef5c00e902744cb3161d4a204c92e6265fe266a332bec51fa
+IMAGE = ("boris271142/lmss_jonathancoletti_qwen38_q6_mtp_vision"
+         "@sha256:789ff2b34000409d13d76c2f51d607502f65d96c739fa3adfc5d04ae6f353a4a")
 
 MODEL_REPO = "JonathanColetti/Qwen3.8-27B-Uncensored-GGUF"
-# MTP head embedded in the gguf (qwen35.nextn_predict_layers) — no separate
-# draft needed. For a noMTP build use that filename + --use-draft-model 1.
-MODEL_FILE = "Qwen3.8-27B-Uncensored-Q6_K.gguf"
+# Default = live production quant (2026-10-03): Q5_K_M, MTP head embedded in
+# the gguf — no separate draft needed. For a noMTP build use that filename
+# + --use-draft-model 1.
+MODEL_FILE = "Qwen3.8-27B-Uncensored-Q5_K_M.gguf"
 
 HF_TOKEN_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "hft.txt")
 
@@ -127,15 +145,22 @@ def parse_args() -> argparse.Namespace:
         description="Create-or-update the canonical qwen38-27b group on the baked q6-mtp-vision image.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    parser.add_argument("--gpu", choices=GPU_CHOICES, default="rtx5090",
-                        help="GPU class (rtx5090 is the supported card for this config)")
-    parser.add_argument("--image", default=IMAGE, help="Docker image (baked q6-mtp-vision image, tag)")
+    parser.add_argument("--gpu", choices=GPU_CHOICES, default="rtx3090",
+                        help="GPU class (rtx3090 = live production card, 24 GB; rtx5090 = 32 GB, "
+                             "fits more quant/ctx)")
+    parser.add_argument("--image", default=IMAGE,
+                        help="Docker image (baked q6-mtp-vision image; default is digest-pinned "
+                             "cuda128-v4, the live group's exact ref)")
+    parser.add_argument("--model-file", default=MODEL_FILE,
+                        help="env MODEL_FILE — the quant to serve (plain Q/IQ files embed the MTP "
+                             "head; noMTP builds pair with --use-draft-model 1)")
     parser.add_argument("--disk-size", type=float, default=50.0,
                         help="disk in GiB, CREATE path only (resources are not patchable)")
     parser.add_argument("--memory-size", type=float, default=16.0,
                         help="memory in GB, CREATE path only (resources are not patchable)")
-    parser.add_argument("--ctx-size", default="30000",
-                        help="env CTX_SIZE (30000 = simple-test default; 132768 = full)")
+    parser.add_argument("--ctx-size", default="90000",
+                        help="env CTX_SIZE (90000 = live production, served n_ctx 90112; "
+                             "132768 = full)")
     parser.add_argument("--use-draft-model", default="none",
                         help="'none' = gguf's embedded MTP head; any other value adds "
                              "--model-draft with the baked draft (noMTP quants)")
@@ -183,7 +208,8 @@ def load_hf_token(path: str = HF_TOKEN_FILE) -> str | None:
         return None
 
 
-def build_env(ctx_size: str, use_draft_model: str, hf_token: str | None) -> dict[str, str]:
+def build_env(ctx_size: str, use_draft_model: str, hf_token: str | None,
+              model_file: str | None = None) -> dict[str, str]:
     """Full env for the group (create sets it, PATCH replaces it wholesale).
 
     The baked image drops v3's DRAFT_MODEL_URL / VISION_MODEL_URL: the draft +
@@ -194,10 +220,13 @@ def build_env(ctx_size: str, use_draft_model: str, hf_token: str | None) -> dict
     env = {
         "GPU_ID": "0",
         "MODEL_REPO": MODEL_REPO,
-        "MODEL_FILE": MODEL_FILE,
-        # Hybrid model (1 in 4 layers is full attention): q8_0 KV is ~4.6 GB
-        # at 132768 ctx, ~1 GB at 30000 — fits the 32 GB card on top of the
-        # Q6_K weights either way.
+        # Default = MODEL_FILE (Q5_K_M, live production quant); --model-file
+        # overrides it (Q6_K, Q4_K_M, ...).
+        "MODEL_FILE": model_file or MODEL_FILE,
+        # Hybrid model (1 in 4 layers is full attention): q8_0 KV ≈ 35 KiB/token
+        # — ~3.0 GiB at the 90000 default, ~4.6 GiB at 132768. On the 24 GB
+        # 3090 that fits on top of Q5_K_M (~2 GiB headroom at 90K, verified
+        # live) but not Q6_K; the 32 GB 5090 fits Q6_K at 128K+.
         "CTX_SIZE": ctx_size,
         "N_GPU_LAYERS": "99",
         "NAME": GROUP_NAME,
@@ -207,8 +236,9 @@ def build_env(ctx_size: str, use_draft_model: str, hf_token: str | None) -> dict
         # Permissive template the image ships: Claude Code's Anthropic-format
         # /v1/messages requests need system messages accepted anywhere.
         "CHAT_TEMPLATE": "/opt/llama.cpp/qwen3.8.q6.jinja",
-        # 'none' = embedded MTP head (this Q6_K build). Any other value ->
-        # the image passes --model-draft /models/...draft-Q8_0.gguf.
+        # 'none' = the quant's embedded MTP head (Q5_K_M/Q6_K/Q4_K_M builds).
+        # Any other value -> the image passes --model-draft
+        # /models/...draft-Q8_0.gguf (needed for noMTP quants).
         "USE_DRAFT_MODEL": use_draft_model,
     }
     if hf_token:
@@ -286,7 +316,7 @@ def main() -> int:
     print("[2/5] loading HF token (validated, never printed)")
     hf_token = load_hf_token()
     print(f"      token {'validated' if hf_token else 'UNAVAILABLE — model download will run unauthenticated'}")
-    env = build_env(args.ctx_size, args.use_draft_model, hf_token)
+    env = build_env(args.ctx_size, args.use_draft_model, hf_token, args.model_file)
 
     existing = get_group()
     if existing is not None:
@@ -376,12 +406,13 @@ def main() -> int:
     ))
     print(f"      start -> HTTP {started.status_code} {started.reason_phrase}; dns={dns!r}")
     print("      waiting for running (container up; the model may still be downloading — "
-          "a cold worker re-downloads the 20.9 GiB main model, draft + vision are baked)...")
+          "a cold worker re-downloads the main model, ~18 GiB for Q5_K_M / ~21 GiB for "
+          "Q6_K; draft + vision are baked)...")
     wait_for("running", 1800)
     print_group(get_group())
     print("OK: group running. 'running' means the container process is up —")
     print(f"      1. verify the LIVE build in-container: version.sh should print")
-    print(f"         'lmss q6-mtp-vision-v1 (baked draft+vision) 2026-10-02'; /models")
+    print(f"         'lmss q6-mtp-vision-v2 (--chat-template-file fix) 2026-10-03'; /models")
     print(f"         holds the baked draft + mmproj while the main model hf-downloads")
     print(f"      2. PID1 cmdline: --spec-type draft-mtp --spec-draft-n-max 5 --mmproj "
           f"{'(no --model-draft, USE_DRAFT_MODEL=none)' if args.use_draft_model == 'none' else '--model-draft ...draft-Q8_0.gguf'} "
