@@ -12,6 +12,41 @@ Dockerized [llama.cpp](https://github.com/ggml-org/llama.cpp) server for Qwen3.8
 - `nvidia-container-toolkit` installed (so `device_ids` GPU pinning works)
 - Free VRAM on the target card: ~23 GB for 27B at 131k ctx (noMTP Q4_K_M weights + MTP draft + q8_0 KV cache), ~6 GB for 9B at 32k ctx
 
+## Choosing quant + context length by VRAM
+
+**Target: min 90K ctx, 128K ideal** (Claude Code's working context). Weights + KV cache + ~2.1 GiB of CUDA/compute/vision overhead must fit on the card. With the image's q8_0 KV cache, KV costs ≈ 35 KiB/token (≈ 30K tokens per GiB free):
+
+**max_ctx ≈ (VRAM_GiB − 2.1 − weights_GiB) × 30K**
+
+Calibrated on the 3090 — all three live data points match within a few percent: Q6_K serves exactly 30208, Q5_K_M serves 90112, Q4_K_M ran 132768 at ~21 GB live.
+
+**Meeting the target:**
+
+| Card | ≥ 90K (floor) | ≥ 128K (ideal) |
+|---|---|---|
+| **32 GB (5090)** | Q6_K @ 90K (near-lossless) | **Q6_K @ 128K** (near-lossless, max ~270K) — the clean choice |
+| **24 GB (3090/4090)** | **Q5_K_M @ 90K** (current production, max ~110K) | **Q4_K_M @ 128K** (max ~185K) — Q5_K_M is ~0.6 GiB short of the KV budget, so 128K on 24GB costs a quant drop |
+| **16 GB (4060 Ti / 5060 Ti)** | IQ2_M @ 90K (steep quality cut, max ~120K) | doesn't fit — IQ2_M maxes ~120K |
+
+**Bottom line:** 128K at good quality only lands on a 32 GB card — **Q6_K @ 128K on a 5090** (the 2×16 GB local rig serves Q6_K at 122768, and a 5090 does it on one card). On the current 24 GB 3090, 90K = Q5_K_M with no quality drop, but 128K forces Q4_K_M. A 16 GB card reaches 90K only at IQ2_M, a heavy cut for a 27B.
+
+**Full max-ctx reference** (highest ctx each quant reaches per card, from the formula):
+
+| Quant | Size | 16 GB | 24 GB | 32 GB |
+|---|---|---|---|---|
+| Q8_0 | 27.05 GiB | — | — | ~85K |
+| Q6_K | 20.89 GiB | — | ~30K (verified ceiling 30208) | ~270K |
+| Q5_K_M | 18.19 GiB | — | ~110K (current prod: 90000 → served 90112) | 262144 (trained ceiling) |
+| Q4_K_M | 15.66 GiB | — | ~185K | 262144 |
+| IQ4_XS | 14.26 GiB | — | ~225K | 262144 |
+| IQ2_M | 9.90 GiB | ~120K | 262144 | 262144 |
+
+Notes:
+- Repo `JonathanColetti/Qwen3.8-27B-Uncensored-GGUF`. Use the plain `Q…` / `IQ…` files when running **without** a separate draft file (the Salad v4 image: `USE_DRAFT_MODEL=none` → self-speculation from the model's embedded MTP/nextn layers). The `noMTP-…` files have no embedded MTP layers and crash llama-server at load **unless** you feed them a separate `DRAFT_MODEL_FILE` (the local multistage default: noMTP-Q4_K_M + draft-Q8_0).
+- The 27B's trained context is **262144** — serving above it buys nothing; that's the table's ceiling.
+- The ~2.1 GiB overhead includes the ~1 GiB vision projector the baked v4 image always loads; a text-only profile gets it back. A separate `DRAFT_MODEL_FILE` (~3 GiB for draft-Q8_0) costs that much ctx budget.
+- Numbers assume `--cache-type-k/v q8_0` (the image default). f16 KV doubles the KV cost → halve the ctx.
+
 ## Run it
 
 Full command with every overridable argument spelled out (defaults shown = the SaladCloud production setup: Qwen3.8-27B on an RTX 5090 — see [SaladCloud](#saladcloud-27b-production-group)). The 27B does NOT fit this box's 16 GB cards; locally, use the 9B service.

@@ -1,7 +1,7 @@
 First pass at deploy of custom dockers on salad. You have everything prepared for cline (or other harness, cline is (IMHO) just faster for routine tasks) to proceed.
 I use this for deploying my llama-cpp on salad on demand, switching cards and quantities of cards. Today cline does all the work for me.
 
-Docker image is a git cloned llama-server compiled with cuda sdk 12.8 (runs on 3090 & 5090) serving Qwen3.8 (define quantisation & ctx-len per card: ~16 GB weights for 27B Q4_K_M → 24 GB card tightly, 32 GB with headroom).
+Docker image is a git cloned llama-server compiled with cuda sdk 12.8 (runs on 3090 & 5090) serving Qwen3.8 (quant + ctx-len per card — target matrix in `docker/README.md`: ≥90K → Q5_K_M on 24 GB / Q6_K on 32 GB; ≥128K → Q6_K on 32 GB, or Q4_K_M on 24 GB).
 
 ## Layout
 
