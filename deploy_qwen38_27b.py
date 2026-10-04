@@ -1,4 +1,6 @@
-"""Deploy the canonical 27B group 'qwen38-27b-q6k' (project 'qwen38-27b', org ma-casa-in-paris).
+"""Deploy the canonical 27B group 'qwen38-27b-q6k' (org/project/group via
+--org / --project / --group; defaults ma-casa-in-paris / qwen38-27b /
+qwen38-27b-q6k).
 
 2026-10-02: re-created under a FRESH name (replacing 'qwen38-27b-cuda128').
 The original name 'qwen38-27b' is stuck in the DELETE name-conflict
@@ -68,6 +70,8 @@ Usage:
     python3 deploy_qwen38_27b.py --use-draft-model 1 # gguf without MTP head
     python3 deploy_qwen38_27b.py --model-file Qwen3.8-27B-Uncensored-Q6_K.gguf \
         --gpu rtx5090 --ctx-size 132768              # other quant/card/ctx combos
+    python3 deploy_qwen38_27b.py --org akl-on-salad  # deploy into another org on the same account
+    python3 deploy_qwen38_27b.py --project llm --group qwen38-27b-q5 --no-start  # a copy elsewhere, not started
 """
 
 import argparse
@@ -93,6 +97,8 @@ from salad_client import (
     update_container_group,
 )
 
+# Default org (override with --org): an account can host several orgs, all
+# sharing the same Salad API key.
 ORGANIZATION_NAME = "ma-casa-in-paris"
 PROJECT_NAME = "qwen38-27b"
 # Fresh 2026-10-02 name (the user requested 'qwen38-27b-Q6K'; the API name
@@ -145,6 +151,14 @@ def parse_args() -> argparse.Namespace:
         description="Create-or-update the canonical qwen38-27b group on the baked q6-mtp-vision image.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
+    parser.add_argument("--org", default=ORGANIZATION_NAME,
+                        help="Salad organization to deploy into (an account can host several "
+                             "orgs sharing one API key)")
+    parser.add_argument("--project", default=PROJECT_NAME,
+                        help="Salad project to deploy into (projects must exist — the API has "
+                             "no project-create endpoint, create it in the web UI)")
+    parser.add_argument("--group", default=GROUP_NAME,
+                        help="container group name (also used as the NAME env)")
     parser.add_argument("--gpu", choices=GPU_CHOICES, default="rtx3090",
                         help="GPU class (rtx3090 = live production card, 24 GB; rtx5090 = 32 GB, "
                              "fits more quant/ctx)")
@@ -208,7 +222,7 @@ def load_hf_token(path: str = HF_TOKEN_FILE) -> str | None:
         return None
 
 
-def build_env(ctx_size: str, use_draft_model: str, hf_token: str | None,
+def build_env(name: str, ctx_size: str, use_draft_model: str, hf_token: str | None,
               model_file: str | None = None) -> dict[str, str]:
     """Full env for the group (create sets it, PATCH replaces it wholesale).
 
@@ -229,7 +243,7 @@ def build_env(ctx_size: str, use_draft_model: str, hf_token: str | None,
         # live) but not Q6_K; the 32 GB 5090 fits Q6_K at 128K+.
         "CTX_SIZE": ctx_size,
         "N_GPU_LAYERS": "99",
-        "NAME": GROUP_NAME,
+        "NAME": name,
         # Served alias stays 'qwen38-27b' (clients + curl2_salad.sh -m),
         # independent of the group name.
         "MODEL_ALIAS": MODEL_ALIAS,
@@ -251,19 +265,19 @@ def redact(env: dict[str, str]) -> dict[str, str]:
     return {k: "<REDACTED>" if k == "HF_TOKEN" else v for k, v in env.items()}
 
 
-def get_group():
+def get_group(org: str, project: str, group: str):
     try:
-        return get_container_group(ORGANIZATION_NAME, PROJECT_NAME, GROUP_NAME)
+        return get_container_group(org, project, group)
     except SaladApiError as e:
         if e.status_code == 404:
             return None
         raise
 
 
-def wait_for(status: str, timeout_s: int) -> None:
+def wait_for(status: str, timeout_s: int, org: str, project: str, group: str) -> None:
     deadline = time.time() + timeout_s
     while time.time() < deadline:
-        current = get_container_group(ORGANIZATION_NAME, PROJECT_NAME, GROUP_NAME)
+        current = get_container_group(org, project, group)
         if current.current_status == status:
             return
         print(f"      status={current.current_status!r} (waiting for {status!r}) ...", flush=True)
@@ -271,7 +285,7 @@ def wait_for(status: str, timeout_s: int) -> None:
     raise TimeoutError(f"group did not reach {status!r} within {timeout_s} s")
 
 
-def wait_until_not_pending(timeout_s: int) -> str:
+def wait_until_not_pending(timeout_s: int, org: str, project: str, group: str) -> str:
     """Wait out the create-path 'pending' window (start 400s while pending).
 
     A freshly created group is 'pending' and the API refuses START with
@@ -280,7 +294,7 @@ def wait_until_not_pending(timeout_s: int) -> str:
     """
     deadline = time.time() + timeout_s
     while time.time() < deadline:
-        current = get_container_group(ORGANIZATION_NAME, PROJECT_NAME, GROUP_NAME)
+        current = get_container_group(org, project, group)
         if current.current_status != "pending":
             return current.current_status
         print(f"      status={current.current_status!r} (waiting for the group to settle) ...", flush=True)
@@ -308,17 +322,20 @@ def print_group(after) -> str:
 
 def main() -> int:
     args = parse_args()
+    org = args.org
+    project = args.project
+    group = args.group
 
-    print(f"[1/5] resolving GPU class {args.gpu!r}")
-    gpu = resolve_gpu_class(args.gpu, list_gpu_classes(ORGANIZATION_NAME))
+    print(f"[1/5] resolving GPU class {args.gpu!r} in org {org!r}")
+    gpu = resolve_gpu_class(args.gpu, list_gpu_classes(org))
     print(f"      -> {gpu.name!r} ({gpu.id})")
 
     print("[2/5] loading HF token (validated, never printed)")
     hf_token = load_hf_token()
     print(f"      token {'validated' if hf_token else 'UNAVAILABLE — model download will run unauthenticated'}")
-    env = build_env(args.ctx_size, args.use_draft_model, hf_token, args.model_file)
+    env = build_env(group, args.ctx_size, args.use_draft_model, hf_token, args.model_file)
 
-    existing = get_group()
+    existing = get_group(org, project, group)
     if existing is not None:
         print(f"[3/5] group exists (status={existing.current_status!r}, "
               f"image={existing.raw['container']['image']!r}) — updating in place "
@@ -326,16 +343,16 @@ def main() -> int:
         if not args.no_start and existing.current_status in ("running", "scaling"):
             print("      stopping group before PATCH")
             stop_container_group(StopContainerGroupRequest(
-                organization_name=ORGANIZATION_NAME,
-                project_name=PROJECT_NAME,
-                container_group_name=GROUP_NAME,
+                organization_name=org,
+                project_name=project,
+                container_group_name=group,
             ))
-            wait_for("stopped", 120)
+            wait_for("stopped", 120, org, project, group)
             print("      stopped")
         if args.no_start and existing.current_status in ("running", "scaling"):
             print("      NOTE: --no-start while running — the PATCH takes effect on the next start")
         result = update_container_group(
-            ORGANIZATION_NAME, PROJECT_NAME, GROUP_NAME,
+            org, project, group,
             UpdateContainerGroupRequest(
                 image=args.image,
                 gpu_classes=(gpu.id,),
@@ -348,7 +365,7 @@ def main() -> int:
         print(f"[3/5] group absent — creating (memory={int(round(args.memory_size * 1024))} MB, "
               f"disk={int(round(args.disk_size * 1024**3))} bytes, gpu={gpu.name!r})")
         try:
-            proj = create_project(ORGANIZATION_NAME, PROJECT_NAME)
+            proj = create_project(org, project)
             print(f"      created project via POST -> HTTP {proj.status_code}")
         except SaladApiError as e:
             if e.status_code in (404, 409):
@@ -356,8 +373,8 @@ def main() -> int:
             else:
                 raise
         request = CreateContainerGroupRequest(
-            name=GROUP_NAME,
-            display_name=GROUP_NAME,
+            name=group,
+            display_name=group,
             autostart_policy=False,
             replicas=1,
             restart_policy="always",
@@ -383,12 +400,12 @@ def main() -> int:
             readiness_probe=dict(READINESS_PROBE),
             scheduled_scaling_enabled=True,
         )
-        created = create_container_group(ORGANIZATION_NAME, PROJECT_NAME, request)
+        created = create_container_group(org, project, request)
         print(f"      HTTP {created.status_code} {created.reason_phrase} "
               f"id={created.id!r} status={created.current_status!r}")
 
     print("[4/5] verifying group config")
-    dns = print_group(get_group())
+    dns = print_group(get_group(org, project, group))
 
     if args.no_start:
         print("OK: group config applied (NOT started, per --no-start)")
@@ -396,20 +413,20 @@ def main() -> int:
 
     print("[5/5] starting group")
     # Create path: a fresh group is 'pending' and START 400s until it settles.
-    if get_group().current_status == "pending":
-        settled = wait_until_not_pending(600)
+    if get_group(org, project, group).current_status == "pending":
+        settled = wait_until_not_pending(600, org, project, group)
         print(f"      settled to {settled!r}")
     started = start_container_group(StartContainerGroupRequest(
-        organization_name=ORGANIZATION_NAME,
-        project_name=PROJECT_NAME,
-        container_group_name=GROUP_NAME,
+        organization_name=org,
+        project_name=project,
+        container_group_name=group,
     ))
     print(f"      start -> HTTP {started.status_code} {started.reason_phrase}; dns={dns!r}")
     print("      waiting for running (container up; the model may still be downloading — "
           "a cold worker re-downloads the main model, ~18 GiB for Q5_K_M / ~21 GiB for "
           "Q6_K; draft + vision are baked)...")
-    wait_for("running", 1800)
-    print_group(get_group())
+    wait_for("running", 1800, org, project, group)
+    print_group(get_group(org, project, group))
     print("OK: group running. 'running' means the container process is up —")
     print(f"      1. verify the LIVE build in-container: version.sh should print")
     print(f"         'lmss q6-mtp-vision-v2 (--chat-template-file fix) 2026-10-03'; /models")

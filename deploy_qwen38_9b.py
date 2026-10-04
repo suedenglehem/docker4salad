@@ -1,4 +1,6 @@
-"""Deploy container group 'qwen38-9b' into project 'qwen38-27b' (org ma-casa-in-paris).
+"""Deploy container group 'qwen38-9b' into project 'qwen38-27b'
+(defaults ma-casa-in-paris / qwen38-27b / qwen38-9b; override with
+--org / --project / --group).
 
 Replacement for the broken 'qwen9b' group. Serves Qwen3.8-9B (Distill Q4_K_M)
 on a single GPU from image boris271142/lmss:cuda128-v3, placed
@@ -39,6 +41,8 @@ SALAD_API_KEY is read from salad_api.txt by salad_client (never printed).
 Usage:
     python3 deploy_qwen38_9b.py
     python3 deploy_qwen38_9b.py --ctx-size 65536 --disk-size 20
+    python3 deploy_qwen38_9b.py --org akl-on-salad
+    python3 deploy_qwen38_9b.py --project llm --group qwen38-9b-llm
 """
 
 import argparse
@@ -54,6 +58,8 @@ from salad_client import (
     list_gpu_classes,
 )
 
+# Default org (override with --org): an account can host several orgs, all
+# sharing the same Salad API key.
 ORGANIZATION_NAME = "ma-casa-in-paris"
 PROJECT_NAME = "qwen38-27b"
 GROUP_NAME = "qwen38-9b"
@@ -109,6 +115,14 @@ def parse_args() -> argparse.Namespace:
         description="Create container group qwen38-9b (Qwen3.8-9B, no draft/vision/template).",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
+    parser.add_argument("--org", default=ORGANIZATION_NAME,
+                        help="Salad organization to deploy into (an account can host several "
+                             "orgs sharing one API key)")
+    parser.add_argument("--project", default=PROJECT_NAME,
+                        help="Salad project to deploy into (projects must exist — the API has "
+                             "no project-create endpoint, create it in the web UI)")
+    parser.add_argument("--group", default=GROUP_NAME,
+                        help="container group name (also used as the NAME env)")
     parser.add_argument("--image", default=IMAGE, help="Docker image to deploy")
     parser.add_argument("--disk-size", type=float, default=25.0,
                         help="Disk space to allocate, in GB (sent as storage_amount bytes)")
@@ -126,9 +140,9 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def resolve_gpu_classes() -> list[str]:
+def resolve_gpu_classes(org: str) -> list[str]:
     """Return the UUIDs of all 7 GPU classes, matched by exact normalized base name."""
-    classes = list_gpu_classes(ORGANIZATION_NAME)
+    classes = list_gpu_classes(org)
     by_base = {}
     for gpu_class in classes:
         base = gpu_class.name.split("(")[0].strip().lower().replace(" ", "")
@@ -151,9 +165,9 @@ def resolve_gpu_classes() -> list[str]:
     return resolved
 
 
-def project_exists() -> bool:
+def project_exists(org: str, project: str) -> bool:
     status, _reason, _headers, _body = _http_get(
-        f"/organizations/{ORGANIZATION_NAME}/projects/{PROJECT_NAME}/containers"
+        f"/organizations/{org}/projects/{project}/containers"
     )
     return status == 200
 
@@ -166,16 +180,19 @@ def _http_get(path: str):
 
 def main() -> int:
     args = parse_args()
+    org = args.org
+    project = args.project
+    group = args.group
 
-    print(f"[1/5] resolving GPU classes {GPU_CLASS_BASES}")
-    gpu_uuids = resolve_gpu_classes()
+    print(f"[1/5] resolving GPU classes {GPU_CLASS_BASES} in org {org!r}")
+    gpu_uuids = resolve_gpu_classes(org)
 
-    print(f"[2/5] ensuring project {PROJECT_NAME!r}")
-    if project_exists():
+    print(f"[2/5] ensuring project {project!r}")
+    if project_exists(org, project):
         print("      project exists — nothing to create")
     else:
         try:
-            proj = create_project(ORGANIZATION_NAME, PROJECT_NAME)
+            proj = create_project(org, project)
             print(f"      created via POST /organizations/{{org}}/projects -> HTTP {proj.status_code}")
         except SaladApiError as e:
             if e.status_code == 404:
@@ -184,15 +201,15 @@ def main() -> int:
             else:
                 raise
 
-    print(f"[3/5] checking {GROUP_NAME!r} does not already exist")
+    print(f"[3/5] checking {group!r} does not already exist")
     try:
-        existing = get_container_group(ORGANIZATION_NAME, PROJECT_NAME, GROUP_NAME)
+        existing = get_container_group(org, project, group)
     except SaladApiError as e:
         if e.status_code != 404:
             raise
         print("      absent (HTTP 404 as expected)")
     else:
-        print(f"FAIL: group {GROUP_NAME!r} already exists in {PROJECT_NAME!r} "
+        print(f"FAIL: group {group!r} already exists in {project!r} "
               f"(status={existing.current_status!r}) — refusing to create a duplicate",
               file=sys.stderr)
         return 1
@@ -209,7 +226,7 @@ def main() -> int:
         "MODEL_ALIAS": args.model_alias,
         "CTX_SIZE": args.ctx_size,
         "N_GPU_LAYERS": args.n_gpu_layers,
-        "NAME": GROUP_NAME,
+        "NAME": group,
         "DRAFT_MODEL_URL": "none",
         "VISION_MODEL_URL": "none",
         "CHAT_TEMPLATE": "none",
@@ -217,8 +234,8 @@ def main() -> int:
     memory_mb = int(round(args.memory_size * 1024))
     storage_amount = int(round(args.disk_size * 1024**3))
     request = CreateContainerGroupRequest(
-        name=GROUP_NAME,
-        display_name=GROUP_NAME,
+        name=group,
+        display_name=group,
         autostart_policy=False,
         replicas=1,
         restart_policy="always",
@@ -235,17 +252,17 @@ def main() -> int:
         readiness_probe=READINESS_PROBE,
         scheduled_scaling_enabled=True,
     )
-    print(f"[4/5] creating container group {GROUP_NAME!r} in project {PROJECT_NAME!r}")
+    print(f"[4/5] creating container group {group!r} in project {project!r}")
     print(f"      image={args.image!r} replicas=1 cpu=4 memory={memory_mb} MB "
           f"disk={storage_amount} bytes shm=64 MB gpu_classes={len(gpu_uuids)}")
     print(f"      env={json.dumps(env)}")
     print(f"      readiness_probe={json.dumps(READINESS_PROBE)}")
-    result = create_container_group(ORGANIZATION_NAME, PROJECT_NAME, request)
+    result = create_container_group(org, project, request)
     print(f"      HTTP {result.status_code} {result.reason_phrase} "
           f"id={result.id!r} status={result.current_status!r} location={result.location!r}")
 
     print("[5/5] verifying created group")
-    after = get_container_group(ORGANIZATION_NAME, PROJECT_NAME, result.name)
+    after = get_container_group(org, project, result.name)
     c = after.raw["container"]
     net = after.raw.get("networking") or {}
     r = c["resources"]
@@ -263,12 +280,12 @@ def main() -> int:
     print(f"      networking port={net.get('port')} protocol={net.get('protocol')} "
           f"auth={net.get('auth')} dns={net.get('dns')!r}")
 
-    print(f"OK: created group {result.name!r} in {ORGANIZATION_NAME}/{PROJECT_NAME} "
+    print(f"OK: created group {result.name!r} in {org}/{project} "
           f"on {len(gpu_uuids)} gpu classes.")
     print(f"NOTE: it was created in the STOPPED state (autostart off + scheduled scaling),")
     print(f"      so it has 0 instances until started. To run it now:")
     print(f"        from salad_client import StartContainerGroupRequest, start_container_group")
-    print(f"        start_container_group(StartContainerGroupRequest('{ORGANIZATION_NAME}','{PROJECT_NAME}','{GROUP_NAME}'))")
+    print(f"        start_container_group(StartContainerGroupRequest('{org}','{project}','{group}'))")
     print(f"      Once it has a live instance, smoke-test with:")
     print(f"      docker/docker_tests/curl2_salad.sh -url https://{net.get('dns')} -m {args.model_alias}")
     return 0

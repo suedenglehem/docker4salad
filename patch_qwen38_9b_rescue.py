@@ -16,8 +16,11 @@ SALAD_API_KEY is read from salad_api.txt by salad_client (never printed).
 
 Usage:
     python3 patch_qwen38_9b_rescue.py
+    python3 patch_qwen38_9b_rescue.py --org akl-on-salad   # another org on the same account
+    python3 patch_qwen38_9b_rescue.py --project llm --group qwen38-9b-llm
 """
 
+import argparse
 import json
 import sys
 import time
@@ -31,6 +34,8 @@ from salad_client import (
     update_container_group,
 )
 
+# Default org (override with --org): an account can host several orgs, all
+# sharing the same Salad API key.
 ORGANIZATION_NAME = "ma-casa-in-paris"
 PROJECT_NAME = "qwen38-27b"
 GROUP_NAME = "qwen38-9b"
@@ -54,7 +59,7 @@ ENV = {
     "MODEL_ALIAS": "qwen9b",
     "CTX_SIZE": "32768",
     "N_GPU_LAYERS": "99",
-    "NAME": GROUP_NAME,
+    "NAME": GROUP_NAME,  # overridden in main() with the --group value
     "DRAFT_MODEL_URL": "none",
     "VISION_MODEL_URL": "none",
     "CHAT_TEMPLATE": "none",
@@ -62,8 +67,23 @@ ENV = {
 
 
 def main() -> int:
-    print(f"[1/3] reading current state of {GROUP_NAME!r}")
-    before = get_container_group(ORGANIZATION_NAME, PROJECT_NAME, GROUP_NAME)
+    parser = argparse.ArgumentParser(
+        description="Digest-pinned image rescue for the qwen38-9b group.")
+    parser.add_argument("--org", default=ORGANIZATION_NAME,
+                        help="Salad organization to patch (an account can host several "
+                             "orgs sharing one API key)")
+    parser.add_argument("--project", default=PROJECT_NAME,
+                        help="Salad project holding the group")
+    parser.add_argument("--group", default=GROUP_NAME,
+                        help="container group name to patch")
+    args = parser.parse_args()
+    org = args.org
+    project = args.project
+    group = args.group
+    env = {**ENV, "NAME": group}
+
+    print(f"[1/3] reading current state of {group!r} in org {org!r}")
+    before = get_container_group(org, project, group)
     print(f"      status={before.current_status!r} image={before.raw['container']['image']!r}")
     print(f"      env={json.dumps(before.raw['container'].get('environment_variables') or {})}")
 
@@ -71,8 +91,8 @@ def main() -> int:
     image = IMAGE_DIGEST
     try:
         result = update_container_group(
-            ORGANIZATION_NAME, PROJECT_NAME, GROUP_NAME,
-            UpdateContainerGroupRequest(image=image, environment_variables=dict(ENV)),
+            org, project, group,
+            UpdateContainerGroupRequest(image=image, environment_variables=dict(env)),
         )
     except SaladApiError as e:
         detail = (e.problem.detail if e.problem else "") or str(e)
@@ -81,14 +101,14 @@ def main() -> int:
                   f"— falling back to tag {IMAGE_TAG!r}")
             image = IMAGE_TAG
             result = update_container_group(
-                ORGANIZATION_NAME, PROJECT_NAME, GROUP_NAME,
-                UpdateContainerGroupRequest(image=image, environment_variables=dict(ENV)),
+                org, project, group,
+                UpdateContainerGroupRequest(image=image, environment_variables=dict(env)),
             )
         else:
             raise
     print(f"      HTTP {result.status_code} {result.reason_phrase} status={result.current_status!r}")
 
-    after = get_container_group(ORGANIZATION_NAME, PROJECT_NAME, GROUP_NAME)
+    after = get_container_group(org, project, group)
     c = after.raw["container"]
     print(f"      stored image={c['image']!r} (sent {image!r})")
     print(f"      stored env={json.dumps(c.get('environment_variables') or {})}")
@@ -96,16 +116,16 @@ def main() -> int:
     print("[3/3] starting group")
     start_container_group(
         StartContainerGroupRequest(
-            organization_name=ORGANIZATION_NAME,
-            project_name=PROJECT_NAME,
-            container_group_name=GROUP_NAME,
+            organization_name=org,
+            project_name=project,
+            container_group_name=group,
         )
     )
     print("      start accepted. First start on a new worker re-downloads the 9B "
           "(~5.8 GB) — no draft/vision this time, so nothing after that.")
     deadline = time.time() + 1800
     while time.time() < deadline:
-        current = get_container_group(ORGANIZATION_NAME, PROJECT_NAME, GROUP_NAME)
+        current = get_container_group(org, project, group)
         if current.current_status == "running":
             break
         print(f"      status={current.current_status!r} ...", flush=True)
@@ -114,7 +134,7 @@ def main() -> int:
         print("FAIL: group did not reach 'running' within 1800 s", file=sys.stderr)
         return 1
 
-    final = get_container_group(ORGANIZATION_NAME, PROJECT_NAME, GROUP_NAME)
+    final = get_container_group(org, project, group)
     net = final.raw.get("networking") or {}
     print(f"      status={final.current_status!r} image={final.raw['container']['image']!r}")
     print(f"      dns={net.get('dns')!r}")

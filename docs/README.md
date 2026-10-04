@@ -178,7 +178,10 @@ All read the Salad key from `salad_api.txt` and (optionally) a HF token from
   `Qwen3.8-27B-Uncensored-Q5_K_M.gguf`, 18.19 GiB — the MTP head is embedded in
   the gguf); the MTP draft and mmproj vision projector are baked into the image.
   Starts it. Built-in defaults = the live production profile (RTX 3090, 24 GB,
-  `CTX_SIZE` 90000 — served n_ctx 90112). Flags: `--gpu rtx3090|rtx5090`,
+  `CTX_SIZE` 90000 — served n_ctx 90112). Flags: `--org` (target org — an
+  account can host several sharing one API key), `--project` (target project —
+  must already exist, the API has no project-create endpoint), `--group`
+  (group name), `--gpu rtx3090|rtx5090`,
   `--model-file`, `--ctx-size` (`132768` = full 128K-class with a matching quant),
   `--image`, `--use-draft-model` (`none` = use the gguf's embedded MTP head),
   `--no-start` (apply config only), `--disk-size` / `--memory-size` (create path).
