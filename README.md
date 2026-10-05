@@ -1,5 +1,7 @@
 deploy llm dockers on salad (qwen, swift etc). Salad is limited to 1 gpu per container, so, you're maxed by 5090. You have everything prepared for claude / cline (cline is (IMHO) just faster for routine tasks, claude seems to be more capable). I use this for deploying my llama-cpp on salad on demand, switching cards and quantities of cards. Cline runs on default gguf's templates, template for claude is rectified in docker (1 line edit), so, you will need to tell script if you're using llm for claude or not. I started coding it with cline, switched to claude, so, initial export of promt for working with salad's api is left in .clinerules. 
 
+Salad uses it's own api key to secure acces to it's cloudflare gw, so, you have to run harness via proxy addiong salad's api to llama's requestest (if you're security maniac, you can set llama's api key also, it's coded/tested, but i don't use it, since i work 100% with local llms). Everything was coded with qwen3.8 27b q6k served by vllm on a couple of 3090.
+
 Docker image is a git cloned llama-server compiled with cuda sdk 12.8 (runs on 3090 & 5090) serving Qwen3.8 (quant + ctx-len per card — target matrix in `docker/README.md`: ≥90K → Q5_K_M on 24 GB / Q6_K on 32 GB; ≥128K → Q6_K on 32 GB, or Q4_K_M on 24 GB). latest dockerfile is  Dockerfile.lmss_generic
 
 ## Layout
