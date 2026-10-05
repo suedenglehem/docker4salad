@@ -210,6 +210,7 @@ class ContainerGroupInfo:
 
     name: str
     current_status: str | None  # pending|running|stopped|succeeded|failed|deploying
+    state_start_time: str | None  # ISO-8601; when the group entered its current state
     raw: dict = field(repr=False)
 
     @classmethod
@@ -218,6 +219,7 @@ class ContainerGroupInfo:
         return cls(
             name=str(payload.get("name", "")),
             current_status=state.get("status"),
+            state_start_time=state.get("start_time"),
             raw=payload,
         )
 
@@ -699,7 +701,9 @@ class ContainerGroupInstanceInfo:
     Only fields consumed by this client are surfaced; `raw` keeps the full
     ContainerGroupInstance payload so nothing is lost. The ssh_* fields let us
     build the web-UI-style SSH line for a live instance:
-    `ssh -p {ssh_port} root@{ssh_ip}` (containers run as root).
+    `ssh -p {ssh_port} root@{ssh_ip}` (containers run as root) — but the API
+    omits them entirely when the group has no SSH config, so all three are
+    optional and `ssh_line` is None in that case.
     """
 
     id: str
