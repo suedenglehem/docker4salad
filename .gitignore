@@ -7,3 +7,4 @@ docs/salad/
 tmp/
 __pycache__/
 .resume
+portal_vault.gpg

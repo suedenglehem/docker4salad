@@ -662,6 +662,105 @@ def update_container_group(
 
 
 # ---------------------------------------------------------------------------
+# list_container_groups (GET .../containers)
+# ---------------------------------------------------------------------------
+
+
+def list_container_groups(
+    organization_name: str,
+    project_name: str,
+    api_key: str | None = None,
+    timeout: float = 30.0,
+) -> tuple[ContainerGroupInfo, ...]:
+    """List all container groups in a project (GET .../containers).
+
+    operationId: list_container_groups; 200 OK -> ContainerGroupCollection
+    {items: [ContainerGroup]} (maxItems 100, no pagination fields in the spec).
+    The items are FULL ContainerGroup objects, so each `raw` includes
+    networking.dns (the gateway URL host) and current_state. Raises
+    SaladApiError for 404/429/default per the spec.
+    """
+    key = api_key if api_key is not None else load_api_key()
+    path = f"/organizations/{organization_name}/projects/{project_name}/containers"
+    status, _reason, _headers, raw = _http("GET", path, key, timeout=timeout)
+    if status == 200:
+        payload = json.loads(raw.decode("utf-8"))
+        items = payload.get("items") or []
+        return tuple(
+            ContainerGroupInfo.from_json(item) for item in items if isinstance(item, dict)
+        )
+    raise SaladApiError(status, _parse_problem(raw), raw.decode("utf-8", "replace"))
+
+
+@dataclass(frozen=True)
+class ContainerGroupInstanceInfo:
+    """Typed view of a running container group instance (GET .../instances).
+
+    Only fields consumed by this client are surfaced; `raw` keeps the full
+    ContainerGroupInstance payload so nothing is lost. The ssh_* fields let us
+    build the web-UI-style SSH line for a live instance:
+    `ssh -p {ssh_port} root@{ssh_ip}` (containers run as root).
+    """
+
+    id: str
+    state: str | None  # running|...
+    ready: bool | None
+    ssh_ip: str | None
+    ssh_port: int | None
+    ssh_host_key_fingerprint: str | None
+    raw: dict = field(repr=False)
+
+    @classmethod
+    def from_json(cls, payload: dict) -> "ContainerGroupInstanceInfo":
+        return cls(
+            id=str(payload.get("id", "")),
+            state=payload.get("state"),
+            ready=payload.get("ready"),
+            ssh_ip=payload.get("ssh_ip"),
+            ssh_port=payload.get("ssh_port"),
+            ssh_host_key_fingerprint=payload.get("ssh_host_key_fingerprint"),
+            raw=payload,
+        )
+
+    @property
+    def ssh_line(self) -> str | None:
+        """The copy-paste SSH line for this instance, or None if not exposed."""
+        if self.ssh_ip and self.ssh_port is not None:
+            return f"ssh -p {self.ssh_port} root@{self.ssh_ip}"
+        return None
+
+
+def list_container_group_instances(
+    organization_name: str,
+    project_name: str,
+    container_group_name: str,
+    api_key: str | None = None,
+    timeout: float = 30.0,
+) -> tuple[ContainerGroupInstanceInfo, ...]:
+    """List instances of a container group (GET .../containers/{name}/instances).
+
+    operationId: list_container_group_instances; 200 OK -> {instances:
+    [ContainerGroupInstance]}. Note the payload key is `instances`, not
+    `items` like the groups collection. Empty tuple when the group has no
+    live instances (e.g. stopped). Raises SaladApiError for 404/429/default.
+    """
+    _validate_group_names(organization_name, project_name, container_group_name)
+    key = api_key if api_key is not None else load_api_key()
+    path = (
+        f"/organizations/{organization_name}/projects/{project_name}"
+        f"/containers/{container_group_name}/instances"
+    )
+    status, _reason, _headers, raw = _http("GET", path, key, timeout=timeout)
+    if status == 200:
+        payload = json.loads(raw.decode("utf-8"))
+        items = payload.get("instances") or []
+        return tuple(
+            ContainerGroupInstanceInfo.from_json(item) for item in items if isinstance(item, dict)
+        )
+    raise SaladApiError(status, _parse_problem(raw), raw.decode("utf-8", "replace"))
+
+
+# ---------------------------------------------------------------------------
 # create_project (POST /organizations/{organization_name}/projects) — UNDOCUMENTED
 # ---------------------------------------------------------------------------
 
