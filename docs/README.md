@@ -25,7 +25,8 @@ The two keys to the whole setup:
 
 | Script | Where | What it does |
 |---|---|---|
-| **`cl_salad`** | `docker/docker_tests/` (also `/usr/local/bin/cl_salad`) | **Your main entry point.** Starts the proxy, auto-starts the Salad group if it's asleep, and runs Claude Code against the model. |
+| **`cl_salad`** | `docker/docker_tests/` (also `/usr/local/bin/cl_salad`) | **The Claude Code runner.** Checks the gateway once, **dies if it's dead**, then starts the proxy and runs Claude Code against the model. |
+| **`cl_salad_deploy`** | `docker/docker_tests/` | **The deploy half.** Looks up the group's status, starts it if stopped (costs), waits for the model, then hands off to `cl_salad`. |
 | **`salad_proxy.py`** | `docker/docker_tests/` | Stdlib Anthropic↔OpenAI bridge. Injects `Salad-Api-Key`, translates requests + streaming SSE + tool calls. Run by `cl_salad`. |
 | `version.sh` | `docker/docker_tests/` | Run **inside a running instance** (via SSH) to confirm *which build* is actually live and what it's downloading. |
 | `curl2_salad.sh` | `docker/docker_tests/` | Quick smoke test — asks the running model 2-3 simple questions through the gateway. |
@@ -46,6 +47,11 @@ The thing you'll type. It mirrors `/usr/local/bin/clov` (a wrapper that points
 the `claude` CLI at a local model), except it speaks to a Salad public gateway,
 so it first stands up the local `salad_proxy.py` and lets the proxy carry the
 `Salad-Api-Key`.
+
+It is a **dumb runner**: it does not start or manage the group. It checks the
+gateway **once** and **dies immediately if it is not serving** (exit 2) — that
+is the whole contract. To start a stopped group and wait for the model, use
+`cl_salad_deploy`.
 
 The **gateway URL is the first argument** — it's the one thing that changes when
 the group is recreated, so you point `cl_salad` at a new group by passing the new
@@ -68,10 +74,11 @@ What it does, in order:
    directory (follows the `/usr/local/bin` symlink) so it finds `salad_proxy.py`
    and `salad_api.txt` next to the real file.
 2. Reads the Salad key from `salad_api.txt` — **never printed**; exits if empty.
-3. **Auto-starts the group if it's stopped** (this is an on-demand group — a
-   fresh start re-downloads the model and **incurs cost**). Then waits until the
-   gateway's `/v1/models` returns `200` (up to 900 s). Opt out with
-   `SALAD_NO_AUTOSTART=1` (it will then just check readiness and bail if not up).
+3. **Liveness check, one shot:** `GET /v1/models` with the key. Only `200`
+   (group running **and** model loaded) continues; anything else exits 2 with a
+   per-code hint — `404` group stopped / model still loading → run
+   `cl_salad_deploy`; `403` gateway rejects the group (deleted / wrong URL or
+   key); `000` host unreachable (DNS / connection).
 4. Starts `salad_proxy.py` on `127.0.0.1:8093` (loopback only — it holds the key)
    pointing at `https://<gateway>/v1/chat/completions`, and waits for `/healthz`.
 5. Exports `ANTHROPIC_BASE_URL` / `ANTHROPIC_API_KEY` and the token caps, then
@@ -86,11 +93,51 @@ What it does, in order:
 | `SALAD_MODEL_ALIAS` | `qwen38-27b` | Model name sent upstream (the served `--alias`). |
 | `SALAD_KEYFILE` | `<script dir>/salad_api.txt` | Where the `Salad-Api-Key` is read from. |
 | `SALAD_PROXY_PORT` | `8093` | Local proxy port. |
-| `SALAD_ORG` / `SALAD_PROJECT` / `SALAD_GROUP` | `ma-casa-in-paris` / `qwen38-27b` / `qwen38-27b-q6k` | Used for the auto-start / status lookups. |
 | `SALAD_ENABLE_THINKING` | `0` | `1` to enable Qwen thinking (off by default → clean answers). |
-| `SALAD_NO_AUTOSTART` | unset | `1` = don't auto-start / wait; just check readiness. |
 | `CLAUDE_CODE_MAX_CONTEXT_TOKENS` | `64000` | Input token cap (see [token caps](#token-caps-vs-context-length)). |
 | `CLAUDE_CODE_MAX_OUTPUT_TOKENS` | `16000` | Output token cap. |
+
+### `cl_salad_deploy` — start the group, wait, then run
+
+The deploy half, split out of the old all-in-one `cl_salad`. It looks the group
+up via the management API, **starts it if it's stopped** (a fresh start
+re-downloads the model and **incurs cost** — it warns first), waits until the
+gateway serves the model, then hands off to `cl_salad` with the resolved
+configuration exported — so the proxy / claude logic lives in exactly one place.
+
+```bash
+cl_salad_deploy                                  # defaults = prod group
+cl_salad_deploy --group qwen38-27b-q5            # the v5 test group
+cl_salad_deploy --org akl-on-salad --project comfy --group qwen38-27b-q5
+cl_salad_deploy --url https://<dns>              # other gateway / new DNS
+cl_salad_deploy --status                         # print group status, exit
+cl_salad_deploy --no-run                         # start + wait, no claude
+cl_salad_deploy --group qwen38-27b-q5 -- -p "Say hi"
+```
+
+**Options** (an option beats the env var, the env var beats the default; options
+must come *before* any claude argument — the first non-option token ends option
+parsing and everything from there goes to claude; `--` ends options early):
+
+| Option | Env var | Default | Meaning |
+|---|---|---|---|
+| `--url URL` | `SALAD_GATEWAY_HOST` | looked up from the group (`networking.dns`) | Gateway URL or bare DNS. |
+| `--org ORG` | `SALAD_ORG` | `ma-casa-in-paris` | Salad org. |
+| `--project NAME` | `SALAD_PROJECT` | `qwen38-27b` | Salad project. |
+| `--group NAME` | `SALAD_GROUP` | `qwen38-27b-q6k` | Container group. |
+| `--model ALIAS` | `SALAD_MODEL_ALIAS` | `qwen38-27b` | Served model alias. |
+| `--keyfile PATH` | `SALAD_KEYFILE` | `<script dir>/salad_api.txt` | Salad key file. |
+| `--port PORT` | `SALAD_PROXY_PORT` | `8093` | Local proxy port. |
+| `--thinking 0\|1` | `SALAD_ENABLE_THINKING` | `0` | Enable Qwen thinking. |
+| `--context-tokens N` | `CLAUDE_CODE_MAX_CONTEXT_TOKENS` | `64000` | Input token cap. |
+| `--output-tokens N` | `CLAUDE_CODE_MAX_OUTPUT_TOKENS` | `16000` | Output token cap. |
+| `--timeout SECS` | — | `2700` | Readiness wait (covers a cold start: image pull + ~18 GiB model download). |
+| `--no-run` | — | off | Start + wait, then exit without launching claude. |
+| `--status` | — | off | Print the group's status and exit. |
+
+While waiting, it checks the group status every ~60 s and bails early if the
+group flips back to `stopped` (it is failing to start — check the Salad UI
+rather than burning the timeout).
 
 ### `salad_proxy.py` — the Anthropic↔OpenAI bridge
 
@@ -198,18 +245,19 @@ All read the Salad key from `salad_api.txt` and (optionally) a HF token from
 
 ### 1. Run Claude Code against the model
 
-Make sure the group is reachable (or let `cl_salad` start it), then:
-
 ```bash
-cl_salad
+cl_salad           # group is up → straight to claude
+cl_salad_deploy    # group might be asleep → start it, wait, then claude
 ```
 
-- If the group is **asleep**, `cl_salad` starts it and waits for `/v1/models`. A
-  fresh on-demand start re-downloads the main model — this can take a while and
-  **costs money**. If you'd rather control that, pass `SALAD_NO_AUTOSTART=1` and
-  start the group yourself when you're ready.
-- If the gateway DNS has changed (the group was recreated), override it:
-  `SALAD_GATEWAY_HOST=<new-dns> cl_salad`.
+- `cl_salad` checks the gateway **once** and dies if it's not serving (exit 2,
+  with a hint per failure code). It never starts anything.
+- `cl_salad_deploy` starts a stopped group (**this costs money** — a fresh start
+  re-downloads the model, ~30 min) and waits for readiness, then runs
+  `cl_salad`. `cl_salad_deploy --status` is the cheap way to peek first, and
+  `--no-run` starts + waits without launching claude.
+- If the gateway DNS has changed (the group was recreated), point either one at
+  it: `cl_salad https://<new-dns>` / `cl_salad_deploy --url https://<new-dns>`.
 
 ### 2. Smoke-test with curl
 
@@ -267,8 +315,9 @@ curl -s https://<gateway>/v1/models -H "Salad-Api-Key: $(tr -d '[:space:]' < doc
 - **Group DELETE leaves a name tombstone.** Recreating a just-deleted group name
   400s with `name_conflict` for a while (name-specific, not a create outage).
   Use a fresh group name; keep `MODEL_ALIAS` stable so clients don't notice.
-- **On-demand groups cost money when they start.** `cl_salad` warns before
-  auto-starting; `SALAD_NO_AUTOSTART=1` gives you the decision.
+- **On-demand groups cost money when they start.** `cl_salad_deploy` warns
+  before starting a stopped group; `--status` is the free way to peek first,
+  and `cl_salad` alone never starts anything.
 - **The chat template is server-side.** It lives in the GGUF (or `--chat-template-file`
   on `llama-server`). A "template" error is an upstream problem, not a proxy one —
   the proxy only translates messages. The deployed image uses the permissive
@@ -301,7 +350,8 @@ on_salad/
 │   ├── run_api.py
 │   ├── README.md                   # Docker / local-run details (image, compose, probes)
 │   └── docker_tests/
-│       ├── cl_salad                # ★ Claude Code entry point
+│       ├── cl_salad                # ★ Claude Code runner (dies if gateway dead)
+│       ├── cl_salad_deploy         # ★ deploy half: start + wait, then cl_salad
 │       ├── salad_proxy.py          # Anthropic↔OpenAI bridge
 │       ├── version.sh              # in-container build/download inspector
 │       ├── curl2_salad.sh          # gateway smoke test
@@ -326,7 +376,7 @@ Three key files, all **gitignored** and `chmod 600`, none ever printed:
 
 | File | What it is | Used by |
 |---|---|---|
-| `salad_api.txt` | SaladCloud API key → `Salad-Api-Key` header | `cl_salad`, `salad_proxy.py`, `curl2_salad.sh`, `salad_client.py`, deploy scripts |
+| `salad_api.txt` | SaladCloud API key → `Salad-Api-Key` header | `cl_salad`, `cl_salad_deploy`, `salad_proxy.py`, `curl2_salad.sh`, `salad_client.py`, deploy scripts |
 | `hft.txt` | HuggingFace token (validated, added to group env for authenticated downloads) | deploy/update scripts |
 | `api.txt` | llama-server Bearer key (only if the model needs one) | local run scripts |
 

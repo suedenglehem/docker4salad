@@ -2,6 +2,11 @@
 # cl_salad — point Claude Code at the Qwen3.8-27B served on a Salad public
 # gateway, through a local proxy that injects the Salad-Api-Key.
 #
+# Simple runner: it does NOT start or manage the group. It checks the
+# gateway ONCE and dies immediately if it is dead (group stopped, model
+# not loaded, host unreachable). To start a group and wait for the model
+# to load, use cl_salad_deploy.
+#
 # Usage:
 #   cl_salad [GATEWAY_URL] [claude args...]
 #
@@ -9,24 +14,20 @@
 # when the group is recreated. Pass it explicitly to point at a (new) group:
 #   cl_salad https://corn-cabbage-2yk4e98r3rx752n0.salad.cloud
 #   cl_salad https://<new-group-dns> -p "Say hi"
-# A bare host (no https://) works too. Omit it to use the built-in default
-# below (or SALAD_GATEWAY_HOST). Everything after the URL goes straight to claude.
+# A bare host (no https://) works too. Omit it to use SALAD_GATEWAY_HOST or
+# the built-in default below. Everything after the URL goes straight to claude.
 #
 # Mirrors /usr/local/bin/clov (cl_tr4v), but:
 #   * the upstream is a Salad public gateway (llama.cpp, OpenAI-only), so a local
 #     Anthropic<->OpenAI proxy (salad_proxy.py) is started first
 #   * the proxy injects Salad-Api-Key on every request, so you never add it
-#   * the group is auto-started if stopped and we wait for it to be ready
-#     (opt out with SALAD_NO_AUTOSTART=1)
 #
 # Env overrides (all optional):
-#   SALAD_GATEWAY_HOST   gateway override (a GATEWAY_URL argument beats this)
-#   SALAD_MODEL_ALIAS    default qwen38-27b
-#   SALAD_KEYFILE        default <script dir>/salad_api.txt
-#   SALAD_PROXY_PORT     default 8093
-#   SALAD_ORG / SALAD_PROJECT / SALAD_GROUP   for auto-start (see defaults below)
-#   SALAD_ENABLE_THINKING  default 0 (1 to enable Qwen thinking)
-#   SALAD_NO_AUTOSTART   set to 1 to skip auto-start / readiness wait
+#   SALAD_GATEWAY_HOST    gateway override (a GATEWAY_URL argument beats this)
+#   SALAD_MODEL_ALIAS     default qwen38-27b
+#   SALAD_KEYFILE         default <script dir>/salad_api.txt
+#   SALAD_PROXY_PORT      default 8093
+#   SALAD_ENABLE_THINKING default 0 (1 to enable Qwen thinking)
 #   CLAUDE_CODE_MAX_CONTEXT_TOKENS / CLAUDE_CODE_MAX_OUTPUT_TOKENS  token caps
 #
 # NOTE on token caps: the served model has n_ctx = 90112 (CTX_SIZE=90000,
@@ -71,12 +72,6 @@ KEYFILE="${SALAD_KEYFILE:-${HERE}/salad_api.txt}"
 PROXY_PORT="${SALAD_PROXY_PORT:-8093}"
 THINKING="${SALAD_ENABLE_THINKING:-0}"
 
-# Salad management API (only used for auto-start / status lookups)
-ORG="${SALAD_ORG:-ma-casa-in-paris}"
-PROJ="${SALAD_PROJECT:-qwen38-27b}"
-GROUP="${SALAD_GROUP:-qwen38-27b-q6k}"
-SALAD_API="https://api.salad.com/api/public"
-
 # ---- token caps (override by exporting before calling) --------------------
 export CLAUDE_CODE_MAX_CONTEXT_TOKENS="${CLAUDE_CODE_MAX_CONTEXT_TOKENS:-64000}"
 export CLAUDE_CODE_MAX_OUTPUT_TOKENS="${CLAUDE_CODE_MAX_OUTPUT_TOKENS:-16000}"
@@ -88,78 +83,40 @@ if [ -z "$SALAD_KEY" ]; then
     exit 1
 fi
 
-# ---- helpers -------------------------------------------------------------
-# print the group's current_state.status, or "unknown"
-group_status() {
-    curl -sS -H "Salad-Api-Key: $SALAD_KEY" \
-        "$SALAD_API/organizations/$ORG/projects/$PROJ/containers/$GROUP" 2>/dev/null \
-    | "$PY" -c 'import sys,json
-try:
-    d=json.load(sys.stdin)
-except Exception:
-    print("unknown"); raise SystemExit
-print((d.get("current_state") or {}).get("status") or "unknown")'
-}
+# ---- liveness: one check, die if the gateway is dead ----------------------
+# 200 on /v1/models = group running AND model loaded. 404 = the group is known
+# to the gateway but not serving (stopped / model still loading). 403 = the
+# gateway rejects the group (deleted, wrong URL, or key). 000 = cannot reach
+# the host at all (DNS / connection). (salad.cloud uses wildcard DNS, so a
+# bogus group name still resolves and gets a 403, not a 000.)
+code="$(curl -s -o /dev/null -m 10 -w '%{http_code}' \
+    -H "Salad-Api-Key: $SALAD_KEY" "$GATEWAY_BASE/v1/models" 2>/dev/null)" || code="000"
+code="${code:-000}"
+if [ "$code" != "200" ]; then
+    echo "cl_salad: gateway $GATEWAY_HOST is dead (HTTP $code) — not starting claude." >&2
+    case "$code" in
+        000) echo "cl_salad: cannot reach the host at all (DNS / connection)." >&2
+             echo "cl_salad: check the URL, or start the group with cl_salad_deploy." >&2 ;;
+        404) echo "cl_salad: the group is not serving — it is stopped, or the model is" >&2
+             echo "cl_salad: still loading. Start it with cl_salad_deploy (which waits" >&2
+             echo "cl_salad: for readiness) and re-run cl_salad." >&2 ;;
+        403) echo "cl_salad: the gateway rejects this group — it may be deleted, or the" >&2
+             echo "cl_salad: URL / key may be wrong. Check with cl_salad_deploy --status." >&2 ;;
+        *)   echo "cl_salad: unexpected response from /v1/models — the group may be" >&2
+             echo "cl_salad: (re)starting. Use cl_salad_deploy, which waits for readiness." >&2 ;;
+    esac
+    exit 2
+fi
 
-# HTTP status of the public /v1/models endpoint (200 == model loaded & serving)
-models_code() {
-    curl -s -o /dev/null -w '%{http_code}' -H "Salad-Api-Key: $SALAD_KEY" \
-        "$GATEWAY_BASE/v1/models" 2>/dev/null || echo 000
-}
+echo "cl_salad: model ready on $GATEWAY_HOST — starting proxy on 127.0.0.1:$PROXY_PORT" >&2
 
-# poll /v1/models until it returns 200 (or timeout seconds elapse)
-wait_ready() {
-    timeout="${1:-900}"
-    elapsed=0
-    while [ "$elapsed" -lt "$timeout" ]; do
-        [ "$(models_code)" = "200" ] && return 0
-        sleep 5
-        elapsed=$((elapsed + 5))
-    done
-    return 1
-}
-
-# ---- auto-start / readiness ----------------------------------------------
+# ---- launch the proxy ----------------------------------------------------
 PROXY_PID=""
 cleanup() {
     [ -n "$PROXY_PID" ] && kill "$PROXY_PID" 2>/dev/null
 }
 trap cleanup EXIT
 
-if [ "${SALAD_NO_AUTOSTART:-0}" != "1" ]; then
-    st="$(group_status)"
-    case "$st" in
-        running)
-            echo "cl_salad: group $GROUP running — waiting for model readiness..." >&2
-            ;;
-        stopped|"")
-            echo "cl_salad: group $GROUP is '${st:-stopped}' — starting it (this incurs cost)..." >&2
-            curl -sS -X POST -H "Salad-Api-Key: $SALAD_KEY" -o /dev/null \
-                "$SALAD_API/organizations/$ORG/projects/$PROJ/containers/$GROUP/start" 2>/dev/null
-            echo "cl_salad: start requested — waiting for the group to come up..." >&2
-            ;;
-        *)
-            echo "cl_salad: group $GROUP status '$st' — waiting for model readiness..." >&2
-            ;;
-    esac
-    if ! wait_ready 900; then
-        echo "cl_salad: timed out after 900s waiting for $GATEWAY_HOST/v1/models." >&2
-        echo "cl_salad: the group is on-demand and a fresh start re-downloads the model;" >&2
-        echo "cl_salad: it may still be starting. Re-run cl_salad in a few minutes." >&2
-        exit 2
-    fi
-else
-    code="$(models_code)"
-    if [ "$code" != "200" ]; then
-        echo "cl_salad: gateway not ready (HTTP $code) and SALAD_NO_AUTOSTART=1." >&2
-        echo "cl_salad: start the group manually (or unset SALAD_NO_AUTOSTART) and retry." >&2
-        exit 2
-    fi
-fi
-
-echo "cl_salad: model ready on $GATEWAY_HOST — starting proxy on 127.0.0.1:$PROXY_PORT" >&2
-
-# ---- launch the proxy ----------------------------------------------------
 "$PY" "$HERE/salad_proxy.py" \
     --port "$PROXY_PORT" \
     --upstream "$GATEWAY_BASE/v1/chat/completions" \
@@ -184,6 +141,7 @@ export ANTHROPIC_BASE_URL="http://127.0.0.1:$PROXY_PORT"
 export ANTHROPIC_API_KEY="local"
 
 "$CLAUDE" --permission-mode bypassPermissions --model "$MODEL_ALIAS" "$@"
-
+status=$?
 kill "$PROXY_PID" 2>/dev/null
 wait "$PROXY_PID" 2>/dev/null
+exit "$status"    # claude's own code — don't leak the proxy's TERM status

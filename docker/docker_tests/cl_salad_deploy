@@ -1,0 +1,217 @@
+#!/bin/sh
+# cl_salad_deploy — the deploy half of the old cl_salad: look up the group's
+# status, start it if it's stopped, wait for the model to be ready, then hand
+# off to cl_salad to run Claude Code.
+#
+# Every variable cl_salad reads from the SALAD_* env can instead be set with
+# an option here; an option beats the env var, the env var beats the default.
+# If no --url is given, the gateway DNS is looked up from the group itself
+# (networking.dns), so `cl_salad_deploy --group <name>` is enough.
+#
+# Options must come BEFORE any claude argument (the first non-option token
+# ends option parsing and everything from there goes to claude). Put `--`
+# before claude flags if a flag name could clash with an option.
+#
+# Usage:
+#   cl_salad_deploy [options] [claude args...]
+#
+# Examples:
+#   cl_salad_deploy                                  # defaults = prod group
+#   cl_salad_deploy --group qwen38-27b-q5            # the v5 test group
+#   cl_salad_deploy --org akl-on-salad --project comfy --group qwen38-27b-q5
+#   cl_salad_deploy --url https://<dns> --port 8094  # other gateway / proxy port
+#   cl_salad_deploy --status                         # print group status, exit
+#   cl_salad_deploy --no-run                         # start + wait, no claude
+#   cl_salad_deploy --group qwen38-27b-q5 -- -p "Say hi"
+#
+# Options (what each sets, and the default):
+#   --url URL            gateway URL or bare DNS  (SALAD_GATEWAY_HOST;
+#                                              default: looked up from the group)
+#   --org ORG            Salad org                (SALAD_ORG,      ma-casa-in-paris)
+#   --project NAME       Salad project            (SALAD_PROJECT,  qwen38-27b)
+#   --group NAME         container group          (SALAD_GROUP,    qwen38-27b-q6k)
+#   --model ALIAS        served model alias       (SALAD_MODEL_ALIAS, qwen38-27b)
+#   --keyfile PATH       Salad key file           (SALAD_KEYFILE,  <script dir>/salad_api.txt)
+#   --port PORT          local proxy port         (SALAD_PROXY_PORT, 8093)
+#   --thinking 0|1       enable Qwen thinking     (SALAD_ENABLE_THINKING, 0)
+#   --context-tokens N   input token cap          (CLAUDE_CODE_MAX_CONTEXT_TOKENS, 64000)
+#   --output-tokens N    output token cap         (CLAUDE_CODE_MAX_OUTPUT_TOKENS, 16000)
+#   --timeout SECS       readiness wait           (default 2700 — covers a cold
+#                                              start: image pull + ~18 GiB model download)
+#   --no-run             start + wait, then exit without launching claude
+#   --status             print the group's status and exit
+#   -h, --help           this help
+set -u
+
+_SELF="$(readlink -f "$0" 2>/dev/null || echo "$0")"
+HERE="$(cd "$(dirname "$_SELF")" && pwd)"
+PY="$(command -v python3 || echo python3)"
+SALAD_API="https://api.salad.com/api/public"
+
+usage() {
+    sed -n '2,/^set -u/p' "$0" | sed 's/^# \{0,1\}//' | sed '$d'
+}
+
+# ---- options ---------------------------------------------------------------
+URL=""; ORG=""; PROJ=""; GROUP=""; MODEL=""; KEYFILE=""
+PORT=""; THINKING=""; CTOKS=""; OTOKS=""; TIMEOUT=""
+NO_RUN=0; STATUS_ONLY=0
+
+while :; do
+    case "${1:-}" in
+        --url)            URL="${2:?--url needs a value}";        shift 2 ;;
+        --org)            ORG="${2:?--org needs a value}";        shift 2 ;;
+        --project)        PROJ="${2:?--project needs a value}";   shift 2 ;;
+        --group)          GROUP="${2:?--group needs a value}";    shift 2 ;;
+        --model)          MODEL="${2:?--model needs a value}";    shift 2 ;;
+        --keyfile)        KEYFILE="${2:?--keyfile needs a value}"; shift 2 ;;
+        --port)           PORT="${2:?--port needs a value}";      shift 2 ;;
+        --thinking)       THINKING="${2:?--thinking needs a value}"; shift 2 ;;
+        --context-tokens) CTOKS="${2:?--context-tokens needs a value}"; shift 2 ;;
+        --output-tokens)  OTOKS="${2:?--output-tokens needs a value}"; shift 2 ;;
+        --timeout)        TIMEOUT="${2:?--timeout needs a value}"; shift 2 ;;
+        --no-run)         NO_RUN=1; shift ;;
+        --status)         STATUS_ONLY=1; shift ;;
+        -h|--help)        usage; exit 0 ;;
+        --)               shift; break ;;
+        *)                break ;;        # first claude arg — the rest passes through
+    esac
+done
+
+# option > env > default
+ORG="${ORG:-${SALAD_ORG:-ma-casa-in-paris}}"
+PROJ="${PROJ:-${SALAD_PROJECT:-qwen38-27b}}"
+GROUP="${GROUP:-${SALAD_GROUP:-qwen38-27b-q6k}}"
+MODEL="${MODEL:-${SALAD_MODEL_ALIAS:-qwen38-27b}}"
+KEYFILE="${KEYFILE:-${SALAD_KEYFILE:-${HERE}/salad_api.txt}}"
+PORT="${PORT:-${SALAD_PROXY_PORT:-8093}}"
+THINKING="${THINKING:-${SALAD_ENABLE_THINKING:-0}}"
+CTOKS="${CTOKS:-${CLAUDE_CODE_MAX_CONTEXT_TOKENS:-64000}}"
+OTOKS="${OTOKS:-${CLAUDE_CODE_MAX_OUTPUT_TOKENS:-16000}}"
+TIMEOUT="${TIMEOUT:-2700}"
+URL="${URL:-${SALAD_GATEWAY_HOST:-}}"
+
+SALAD_KEY="$(tr -d '[:space:]' < "$KEYFILE" 2>/dev/null || true)"
+if [ -z "$SALAD_KEY" ]; then
+    echo "cl_salad_deploy: cannot read Salad key from $KEYFILE" >&2
+    exit 1
+fi
+
+# ---- management API helpers ------------------------------------------------
+# print the group's current_state.status, or "unknown"
+group_status() {
+    curl -sS -H "Salad-Api-Key: $SALAD_KEY" \
+        "$SALAD_API/organizations/$ORG/projects/$PROJ/containers/$GROUP" 2>/dev/null \
+    | "$PY" -c 'import sys,json
+try:
+    d=json.load(sys.stdin)
+except Exception:
+    print("unknown"); raise SystemExit
+print((d.get("current_state") or {}).get("status") or "unknown")'
+}
+
+# print the group's networking.dns (the public gateway), or "" if not found
+group_dns() {
+    curl -sS -H "Salad-Api-Key: $SALAD_KEY" \
+        "$SALAD_API/organizations/$ORG/projects/$PROJ/containers/$GROUP" 2>/dev/null \
+    | "$PY" -c 'import sys,json
+try:
+    d=json.load(sys.stdin)
+except Exception:
+    raise SystemExit
+print((d.get("networking") or {}).get("dns") or "")'
+}
+
+# ---- resolve the gateway ----------------------------------------------------
+# Normalise whatever we have to host[:port]: drop the scheme, then any path.
+GATEWAY_HOST="$URL"
+[ -n "$GATEWAY_HOST" ] || GATEWAY_HOST="$(group_dns)"
+if [ -z "$GATEWAY_HOST" ]; then
+    echo "cl_salad_deploy: no --url given and could not look up the gateway DNS" >&2
+    echo "cl_salad_deploy: for $ORG/$PROJ/$GROUP (group missing? API error?). Pass --url." >&2
+    exit 1
+fi
+GATEWAY_HOST="${GATEWAY_HOST#http://}"
+GATEWAY_HOST="${GATEWAY_HOST#https://}"
+GATEWAY_HOST="${GATEWAY_HOST%%/*}"
+GATEWAY_BASE="https://${GATEWAY_HOST}"
+
+# HTTP status of the public /v1/models endpoint (200 == model loaded & serving)
+models_code() {
+    curl -s -o /dev/null -m 10 -w '%{http_code}' -H "Salad-Api-Key: $SALAD_KEY" \
+        "$GATEWAY_BASE/v1/models" 2>/dev/null || echo 000
+}
+
+# poll /v1/models until 200 (or $1 seconds elapse); also bails early if the
+# group flips back to 'stopped' while waiting (it will never become ready)
+wait_ready() {
+    timeout="${1:-2700}"
+    elapsed=0
+    checked=0
+    while [ "$elapsed" -lt "$timeout" ]; do
+        [ "$(models_code)" = "200" ] && return 0
+        checked=$((checked + 1))
+        if [ $((checked % 12)) -eq 0 ]; then    # group-status check every ~60 s
+            st="$(group_status)"
+            [ "$st" = "stopped" ] && {
+                echo "cl_salad_deploy: group $GROUP went back to 'stopped' while waiting." >&2
+                echo "cl_salad_deploy: it is failing to start — check the Salad UI, don't wait." >&2
+                return 1
+            }
+        fi
+        sleep 5
+        elapsed=$((elapsed + 5))
+    done
+    return 1
+}
+
+# ---- status-only mode -------------------------------------------------------
+if [ "$STATUS_ONLY" = "1" ]; then
+    st="$(group_status)"
+    echo "$GROUP: $st (gateway: $GATEWAY_HOST)"
+    exit 0
+fi
+
+# ---- deploy: auto-start if stopped, then wait for readiness -----------------
+st="$(group_status)"
+case "$st" in
+    running)
+        echo "cl_salad_deploy: group $GROUP running — waiting for model readiness (timeout ${TIMEOUT}s)..." >&2
+        ;;
+    stopped|"")
+        echo "cl_salad_deploy: group $GROUP is '${st:-stopped}' — starting it (this incurs cost)..." >&2
+        curl -sS -X POST -H "Salad-Api-Key: $SALAD_KEY" -o /dev/null \
+            "$SALAD_API/organizations/$ORG/projects/$PROJ/containers/$GROUP/start" 2>/dev/null
+        echo "cl_salad_deploy: start requested — waiting for the group to come up (timeout ${TIMEOUT}s)..." >&2
+        ;;
+    *)
+        echo "cl_salad_deploy: group $GROUP status '$st' — waiting for model readiness (timeout ${TIMEOUT}s)..." >&2
+        ;;
+esac
+if ! wait_ready "$TIMEOUT"; then
+    echo "cl_salad_deploy: timed out after ${TIMEOUT}s waiting for $GATEWAY_HOST/v1/models." >&2
+    echo "cl_salad_deploy: a fresh start re-downloads the model; it may still be" >&2
+    echo "cl_salad_deploy: starting. Re-run with --status to check, or --no-run to" >&2
+    echo "cl_salad_deploy: keep waiting without launching claude." >&2
+    exit 2
+fi
+
+echo "cl_salad_deploy: model ready on $GATEWAY_HOST (group $GROUP)." >&2
+
+# ---- hand off to cl_salad ----------------------------------------------------
+if [ "$NO_RUN" = "1" ]; then
+    echo "cl_salad_deploy: done (no claude, per --no-run). To run Claude Code:" >&2
+    echo "cl_salad_deploy:   cl_salad $GATEWAY_HOST" >&2
+    exit 0
+fi
+
+# Export the resolved configuration; cl_salad picks it up, re-checks the
+# gateway (fast 200 path), starts the proxy, and runs claude with "$@".
+export SALAD_GATEWAY_HOST="$GATEWAY_HOST"
+export SALAD_MODEL_ALIAS="$MODEL"
+export SALAD_KEYFILE="$KEYFILE"
+export SALAD_PROXY_PORT="$PORT"
+export SALAD_ENABLE_THINKING="$THINKING"
+export CLAUDE_CODE_MAX_CONTEXT_TOKENS="$CTOKS"
+export CLAUDE_CODE_MAX_OUTPUT_TOKENS="$OTOKS"
+exec "$HERE/cl_salad" "$GATEWAY_HOST" "$@"
