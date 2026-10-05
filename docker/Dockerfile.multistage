@@ -7,7 +7,7 @@
 # CUDA 12.8 base; llama.cpp is built with NCCL support (-DGGML_CUDA_NCCL=ON).
 #
 # Build: docker build -f Dockerfile.multistage -t qwen38-llama .
-# Run:   see docker_tests/docker-compose.yml (or ./run_27b.sh / ./run_9b.sh there)
+# Run:   see docker-compose.yml (or ./run_27b.sh / ./run_9b.sh next to this file)
 
 ###############################################################################
 # Stage 1: builder — CUDA devel toolchain + compilers; discarded after build
@@ -202,9 +202,9 @@ COPY qwen3.8.q6.jinja ${LLAMA_CPP_DIR}/qwen3.8.q6.jinja
 #                 active downloads. Run it from an SSH session to verify which
 #                 build a Salad worker is actually serving (the worker image
 #                 cache can serve an older image under the same repo name).
-COPY docker_tests/llm.sh /usr/local/bin/llm.sh
-COPY docker_tests/question.sh /usr/local/bin/question.sh
-COPY docker_tests/version.sh /usr/local/bin/version.sh
+COPY llm.sh /usr/local/bin/llm.sh
+COPY question.sh /usr/local/bin/question.sh
+COPY version.sh /usr/local/bin/version.sh
 RUN chmod +x /usr/local/bin/llm.sh /usr/local/bin/question.sh /usr/local/bin/version.sh \
     && printf '#!/bin/sh\nexec ps -p 1 -o etime=\n' > /usr/local/bin/uptime \
     && chmod +x /usr/local/bin/uptime

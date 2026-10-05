@@ -456,7 +456,7 @@ def main() -> int:
           f"{'(no --model-draft, USE_DRAFT_MODEL=none)' if args.use_draft_model == 'none' else '--model-draft ...draft-Q8_0.gguf'} "
           f"--alias {MODEL_ALIAS}")
     print(f"      3. gateway answers only after the probe passes (/ready, ~40-min window, first probe at 30 s):")
-    print(f"         docker/docker_tests/curl2_salad.sh -url https://{dns} -m {MODEL_ALIAS}")
+    print(f"         claude/curl2_salad.sh -url https://{dns} -m {MODEL_ALIAS}")
     return 0
 
 

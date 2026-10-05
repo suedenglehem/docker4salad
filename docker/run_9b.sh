@@ -5,7 +5,7 @@
 #           On this box: 0/2 = RTX 3090 (24 GB), 1 = RTX 3080 Ti (12 GB).
 # Note: switching cards recreates the container, which re-downloads the model
 #       (no host bind mount by design — see docker-compose.yml).
-cd /dd2/andrei/docker/on_salad/docker/docker_tests || exit 1
+cd /dd2/andrei/docker/on_salad/docker || exit 1
 
 GPU_ID="${1:-1}"
 [[ "$GPU_ID" =~ ^[0-9]+$ ]] || { echo "usage: $0 [GPU_ID]" >&2; exit 1; }

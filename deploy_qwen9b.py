@@ -257,7 +257,7 @@ def main() -> int:
     print(f"        from salad_client import StartContainerGroupRequest, start_container_group")
     print(f"        start_container_group(StartContainerGroupRequest('{org}','{project}','{group}'))")
     print(f"      Once it has a live instance, smoke-test with:")
-    print(f"      docker/docker_tests/curl2_salad.sh -url https://{net.get('dns')} -m {args.model_alias}")
+    print(f"      claude/curl2_salad.sh -url https://{net.get('dns')} -m {args.model_alias}")
     return 0
 
 

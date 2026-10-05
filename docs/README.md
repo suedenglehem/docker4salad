@@ -25,11 +25,11 @@ The two keys to the whole setup:
 
 | Script | Where | What it does |
 |---|---|---|
-| **`cl_salad`** | `docker/docker_tests/` (also `/usr/local/bin/cl_salad`) | **The Claude Code runner.** Checks the gateway once, **dies if it's dead**, then starts the proxy and runs Claude Code against the model. |
-| **`cl_salad_deploy`** | `docker/docker_tests/` | **The deploy half.** Looks up the group's status, starts it if stopped (costs), waits for the model, then hands off to `cl_salad`. |
-| **`salad_proxy.py`** | `docker/docker_tests/` | Stdlib Anthropic↔OpenAI bridge. Injects `Salad-Api-Key`, translates requests + streaming SSE + tool calls. Run by `cl_salad`. |
-| `version.sh` | `docker/docker_tests/` | Run **inside a running instance** (via SSH) to confirm *which build* is actually live and what it's downloading. |
-| `curl2_salad.sh` | `docker/docker_tests/` | Quick smoke test — asks the running model 2-3 simple questions through the gateway. |
+| **`cl_salad`** | `claude/` (also `/usr/local/bin/cl_salad`) | **The Claude Code runner.** Checks the gateway once, **dies if it's dead**, then starts the proxy and runs Claude Code against the model. |
+| **`cl_salad_deploy`** | `claude/` | **The deploy half.** Looks up the group's status, starts it if stopped (costs), waits for the model, then hands off to `cl_salad`. |
+| **`salad_proxy.py`** | `claude/` | Stdlib Anthropic↔OpenAI bridge. Injects `Salad-Api-Key`, translates requests + streaming SSE + tool calls. Run by `cl_salad`. |
+| `version.sh` | `docker/` | Run **inside a running instance** (via SSH) to confirm *which build* is actually live and what it's downloading. |
+| `curl2_salad.sh` | `claude/` | Quick smoke test — asks the running model 2-3 simple questions through the gateway. |
 | `salad_client.py` | repo root | Stdlib-only SaladCloud OpenAPI client (create/start/stop/delete/patch groups, GPU classes, projects). |
 | `deploy_qwen38_27b.py` | repo root | **Canonical 27B deployer** — creates/updates the `qwen38-27b-q6k` group (baked MTP + vision image, main model fetched at runtime) and starts it. |
 | `deploy_qwen38_9b.py` / `deploy_qwen9b.py` | repo root | 9B deployers (`qwen38-9b`, `qwen9b`) — plain, no draft/vision/template. |
@@ -158,10 +158,10 @@ Stdlib-only (no dependencies), loopback-only. It's what makes a raw
 Run it directly if you don't want the wrapper:
 
 ```bash
-python3 docker/docker_tests/salad_proxy.py \
+python3 claude/salad_proxy.py \
   --upstream https://<gateway>/v1/chat/completions \
   --model qwen38-27b \
-  --keyfile docker/docker_tests/salad_api.txt \
+  --keyfile claude/salad_api.txt \
   --port 8093 --thinking 0 --max-tokens-cap 12000
 ```
 
@@ -190,7 +190,7 @@ Asks the running model a couple of simple questions through the public gateway.
 Fastest way to confirm the model is up and answering.
 
 ```bash
-./docker/docker_tests/curl2_salad.sh -url https://<gateway> -m qwen38-27b
+./claude/curl2_salad.sh -url https://<gateway> -m qwen38-27b
 ```
 
 - `-url` — the gateway access domain. `-p` — public port, **default 443** (the
@@ -262,7 +262,7 @@ cl_salad_deploy    # group might be asleep → start it, wait, then claude
 ### 2. Smoke-test with curl
 
 ```bash
-./docker/docker_tests/curl2_salad.sh -url https://<gateway> -m qwen38-27b
+./claude/curl2_salad.sh -url https://<gateway> -m qwen38-27b
 ```
 
 Expect short correct answers to the built-in questions. If you get an empty
@@ -288,7 +288,7 @@ may still be downloading. Confirm readiness with `curl2_salad.sh`, and confirm t
 # from inside a live instance (SSH):
 version.sh
 # gateway-side:
-curl -s https://<gateway>/v1/models -H "Salad-Api-Key: $(tr -d '[:space:]' < docker/docker_tests/salad_api.txt)"
+curl -s https://<gateway>/v1/models -H "Salad-Api-Key: $(tr -d '[:space:]' < claude/salad_api.txt)"
 ```
 
 ---
@@ -348,16 +348,16 @@ on_salad/
 │   ├── qwen3.8.q6.jinja            # permissive chat template (shipped in image)
 │   ├── api_app.py                  # status API on :9999 (/startup /live /ready)
 │   ├── run_api.py
-│   ├── README.md                   # Docker / local-run details (image, compose, probes)
-│   └── docker_tests/
-│       ├── cl_salad                # ★ Claude Code runner (dies if gateway dead)
-│       ├── cl_salad_deploy         # ★ deploy half: start + wait, then cl_salad
-│       ├── salad_proxy.py          # Anthropic↔OpenAI bridge
-│       ├── version.sh              # in-container build/download inspector
-│       ├── curl2_salad.sh          # gateway smoke test
-│       ├── docker-compose.yml      # local 27B + 9B services
-│       ├── run_27b.sh / run_9b*.sh # local run helpers
-│       └── salad_api.txt           # gateway key (gitignored)
+│   ├── version.sh                  # in-container build/download inspector
+│   ├── docker-compose.yml          # local 27B + 9B services
+│   ├── run_27b.sh / run_9b*.sh     # local run helpers
+│   └── README.md                   # Docker / local-run details (image, compose, probes)
+├── claude/
+│   ├── cl_salad                    # ★ Claude Code runner (dies if gateway dead)
+│   ├── cl_salad_deploy             # ★ deploy half: start + wait, then cl_salad
+│   ├── salad_proxy.py              # Anthropic↔OpenAI bridge
+│   ├── curl2_salad.sh              # gateway smoke test
+│   └── salad_api.txt               # gateway key (gitignored)
 └── docs/
     ├── README.md                   # ← this file
     ├── container_group_create.md   # derived API reference (create group)

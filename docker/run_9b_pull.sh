@@ -13,7 +13,7 @@
 #       host bind mount by design — see docker-compose.yml).
 # Note: with --restart unless-stopped, a Ctrl-C exit can be restarted in the
 #       background; `docker stop qwen38-9b` is the full stop.
-cd /dd2/andrei/docker/on_salad/docker/docker_tests || exit 1
+cd /dd2/andrei/docker/on_salad/docker || exit 1
 
 IMAGE="boris271142/lmss"
 TAG="cuda128-v3"

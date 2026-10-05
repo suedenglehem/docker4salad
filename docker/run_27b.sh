@@ -6,10 +6,10 @@
 #           1 = RTX 4060 Ti (16 GB). NOTE: the 27B does NOT fit either card —
 #           Q4_K_M weights alone are ~15.4 GB, the live config ~24 GB — so this
 #           script is for smaller models or a partial CPU offload only. For the
-#           27B use the SaladCloud group: ./curl2_salad.sh or cl_salad.
+#           27B use the SaladCloud group: ../claude/curl2_salad.sh or cl_salad.
 # Note: switching cards recreates the container, which re-downloads the model
 #       (no host bind mount by design — see docker-compose.yml).
-cd /dd2/andrei/docker/on_salad/docker/docker_tests || exit 1
+cd /dd2/andrei/docker/on_salad/docker || exit 1
 
 GPU_ID="${1:-0}"
 [[ "$GPU_ID" =~ ^[0-9]+$ ]] || { echo "usage: $0 [GPU_ID]" >&2; exit 1; }

@@ -52,7 +52,7 @@
 # so a bare `docker run` behaves exactly like v3.
 #
 # BUILD (context = REPO ROOT — claude_template.sh + version.sh are COPYed
-# from docker/docker_tests/; nothing is downloaded at build time, no token):
+# from docker/; nothing is downloaded at build time, no token):
 #   docker build -f docker/Dockerfile.lmss_generic -t lmss_generic:dev .
 #
 # PUSH (NEW repo name = fresh Salad worker cache key; then pin the
@@ -73,8 +73,8 @@ RUN printf '%s\n' "${LMSS_BUILD_ID:-lmss generic-v1 (hf runtime download, claude
 
 # --- Claude Code template: dump+patch script (repo-root build context) ------
 # Zero dependencies (stdlib Python only); copied in and run at STARTUP, not at
-# build time. COPYed from docker/docker_tests/ (hence the repo-root context).
-COPY docker/docker_tests/claude_template.sh ${LLAMA_CPP_DIR}/claude_template.sh
+# build time. COPYed from docker/ (hence the repo-root context).
+COPY docker/claude_template.sh ${LLAMA_CPP_DIR}/claude_template.sh
 
 # --- version.sh: overwrite the stale v3-baked copy --------------------------
 # The v3 base ships an older version.sh (grep-based env dump, '>= 3 guards'
@@ -82,7 +82,7 @@ COPY docker/docker_tests/claude_template.sh ${LLAMA_CPP_DIR}/claude_template.sh
 # table (every var the container reads: effective vs baked default, group-set
 # marked, secrets redacted) and marker-based fingerprint classification. The
 # exec bit is set on the source file, so COPY lands it executable.
-COPY docker/docker_tests/version.sh /usr/local/bin/version.sh
+COPY docker/version.sh /usr/local/bin/version.sh
 
 # --- New control knobs --------------------------------------------------------
 # DRAFT_MODEL: optional separate MTP draft model for --model-draft. "none"
