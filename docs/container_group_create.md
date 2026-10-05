@@ -75,6 +75,14 @@ Top-level required: **`autostart_policy`, `container`, `name`, `replicas`, `rest
 
 Response-side enum: `ContainerGroupStatus` = pending | running | stopped | succeeded | failed | deploying (line 6862).
 
+### Timestamps (age / uptime)
+
+- `create_time` — when the group was created; its **age**. Survives stop/start cycles.
+- `update_time` — last modification of the group object.
+- `current_state.start_time` — when the group entered its current state; its **uptime**. Per-state, not per-instance: an instance restart inside a running group does not move it.
+
+`list_groups.py` reports both as the AGE / UPTIME columns (AGE from `create_time`, always shown; UPTIME from `current_state.start_time`, `-` when not running).
+
 ## Status codes
 
 | Code | Meaning | Body |
