@@ -1,10 +1,23 @@
-# Qwen3.8 llama.cpp (Docker)
+# llama.cpp in Docker — local + SaladCloud
 
-Dockerized [llama.cpp](https://github.com/ggml-org/llama.cpp) server for Qwen3.8 GGUF models, pinned to **one** NVIDIA GPU via `GPU_ID`. OpenAI-compatible API on the host port you choose.
+Dockerized [llama.cpp](https://github.com/ggml-org/llama.cpp) `llama-server` for GGUF models, pinned to **one** NVIDIA GPU via `GPU_ID`. OpenAI-compatible API on the host port you choose. The same images run two ways:
 
-- Image: `boris271142/lmss:cuda128-v3` (container name `qwen38-llama-fa-api`) — built from `Dockerfile.multistage`: llama.cpp compiled with CUDA + flash attention + NCCL (`-DGGML_CUDA_NCCL=ON`, pinned commit `3af988fab`, build tag b10572) in a CUDA devel stage, shipped on the `nvidia/cuda:12.8.2-runtime` base. Binary lives at `/opt/llama.cpp/build/bin/llama-server`.
-- Also ships a small status API on port **9999** (`/startup`, `/live`, `/ready` — see [Status API](#status-api-port-9999)) and debug tools inside the container: `curl`, `ssh`, `vi`, `htop`, `nvtop` (GPU monitor, built from source — not in Ubuntu 22.04 repos).
-- Models are downloaded on first start into `/models` **inside** the container (no host bind mount), so `docker compose down` removes them — nothing is left behind on the host disk.
+- **locally** (docker compose, `docker/docker_tests/`) — this box's 16 GB cards → the 9B service;
+- **on SaladCloud** — one card per container, public `*.salad.cloud` gateway; this is where the 27B Claude Code backend lives (deploy + run it on demand, switching cards and quants).
+
+Image build: llama.cpp compiled with CUDA + flash attention + NCCL (`-DGGML_CUDA_NCCL=ON`, pinned commit `3af988fab`, build tag b10572) in a CUDA devel stage, shipped on the `nvidia/cuda:12.8.2-runtime` base (`Dockerfile.multistage`). Binary at `/opt/llama.cpp/build/bin/llama-server`. Also ships a small status API on port **9999** (`/startup`, `/live`, `/ready` — see [Status API](#status-api-port-9999)) and debug tools inside the container: `curl`, `ssh`, `vi`, `htop`, `nvtop` (GPU monitor, built from source — not in Ubuntu 22.04 repos).
+
+Models are downloaded on first start into `/models` **inside** the container (no host bind mount), so `docker compose down` removes them — nothing is left behind on the host disk.
+
+### Image family
+
+| Image | Built from | Baked in | Feature env vars (all accept the `none` sentinel = off) |
+|---|---|---|---|
+| `boris271142/lmss:cuda128-v3` | `Dockerfile.multistage` (base; local compose) | nothing — model downloads on first start | `CHAT_TEMPLATE` (jinja **file path**), `DRAFT_MODEL_FILE` / `DRAFT_MODEL_URL`, `VISION_MODEL_URL` |
+| `boris271142/lmss_jonathancoletti_qwen38_q6_mtp_vision` (tag `cuda128-v5`) | `Dockerfile.lmss_q6_mtp_vision` (FROM v3) | 27B MTP draft (Q8_0, 2.95 GiB) + vision mmproj (F16, 0.86 GiB) — only the main model downloads at runtime (fast `hf` path) | `CLAUDE_TEMPLATE`, `USE_DRAFT_MODEL` — vision is always on |
+| `boris271142/lmss_generic` (tag `cuda128-v1`) | `Dockerfile.lmss_generic` (FROM v3) | nothing — model-agnostic; main model + optional draft / vision all download at runtime via `hf` | `CLAUDE_TEMPLATE`, `DRAFT_MODEL`, `VISION_MODEL` (`hf://org/repo/file` or a bare file against `MODEL_REPO`), `SPEC_TYPE` (`draft-mtp` \| `ngram-mod` \| `none`) |
+
+A Salad group's env **replaces** the image env wholesale, so a plain deployment sets the `none` sentinels explicitly rather than relying on the image defaults (which also future-proofs against an older image whose defaults were real URLs).
 
 ## Prerequisites
 
@@ -12,7 +25,11 @@ Dockerized [llama.cpp](https://github.com/ggml-org/llama.cpp) server for Qwen3.8
 - `nvidia-container-toolkit` installed (so `device_ids` GPU pinning works)
 - Free VRAM on the target card: ~23 GB for 27B at 131k ctx (noMTP Q4_K_M weights + MTP draft + q8_0 KV cache), ~6 GB for 9B at 32k ctx
 
-## Choosing quant + context length by VRAM
+## Qwen3.8
+
+Everything in this section is specific to the Qwen3.8 27B/9B line. The image and the [deployers](#deployers) are model-agnostic — any GGUF repo works with `deploy_generic.py`.
+
+### Choosing quant + context length by VRAM
 
 **Target: min 90K ctx, 128K ideal** (Claude Code's working context). Weights + KV cache + ~2.1 GiB of CUDA/compute/vision overhead must fit on the card. With the image's q8_0 KV cache, KV costs ≈ 35 KiB/token (≈ 30K tokens per GiB free):
 
@@ -42,14 +59,14 @@ Calibrated on the 3090 — all three live data points match within a few percent
 | IQ2_M | 9.90 GiB | ~120K | 262144 | 262144 |
 
 Notes:
-- Repo `JonathanColetti/Qwen3.8-27B-Uncensored-GGUF`. Use the plain `Q…` / `IQ…` files when running **without** a separate draft file (the Salad v4 image: `USE_DRAFT_MODEL=none` → self-speculation from the model's embedded MTP/nextn layers). The `noMTP-…` files have no embedded MTP layers and crash llama-server at load **unless** you feed them a separate `DRAFT_MODEL_FILE` (the local multistage default: noMTP-Q4_K_M + draft-Q8_0).
+- Repo `JonathanColetti/Qwen3.8-27B-Uncensored-GGUF`. Use the plain `Q…` / `IQ…` files when running **without** a separate draft file (the baked q6-mtp-vision image: `USE_DRAFT_MODEL=none` → self-speculation from the model's embedded MTP/nextn layers). The `noMTP-…` files have no embedded MTP layers and crash llama-server at load **unless** you feed them a separate draft (the local multistage default: noMTP-Q4_K_M + `DRAFT_MODEL_FILE` draft-Q8_0; the v5 image: `USE_DRAFT_MODEL=<file>`).
 - The 27B's trained context is **262144** — serving above it buys nothing; that's the table's ceiling.
-- The ~2.1 GiB overhead includes the ~1 GiB vision projector the baked v4 image always loads; a text-only profile gets it back. A separate `DRAFT_MODEL_FILE` (~3 GiB for draft-Q8_0) costs that much ctx budget.
+- The ~2.1 GiB overhead includes the ~1 GiB vision projector the baked q6-mtp-vision image always loads; a text-only profile gets it back. A separate draft file (~3 GiB for draft-Q8_0) costs that much ctx budget.
 - Numbers assume `--cache-type-k/v q8_0` (the image default). f16 KV doubles the KV cost → halve the ctx.
 
-## Run it
+### Run locally (docker compose)
 
-Full command with every overridable argument spelled out (defaults shown = the local compose profile: noMTP-Q4_K_M + draft-Q8_0 @ 131072). The 27B does NOT fit this box's 16 GB cards; locally, use the 9B service. The live SaladCloud production setup (Q5_K_M @ 90K on a 3090) is described in [SaladCloud](#saladcloud-27b-production-group).
+Full command with every overridable argument spelled out (defaults shown = the local compose profile: noMTP-Q4_K_M + draft-Q8_0 @ 131072). The 27B does NOT fit this box's 16 GB cards; locally, use the 9B service. The live SaladCloud production setup (Q5_K_M @ 90K on a 3090) is described in [SaladCloud](#saladcloud).
 
 ```bash
 cd /dd2/andrei/docker/on_salad/docker/docker_tests && \
@@ -66,27 +83,27 @@ HF_TOKEN="" \
 timeout 30 docker compose up -d
 ```
 
-### Arguments
+#### Arguments
 
 | Arg | Change it if… |
 |---|---|
-| `GPU_ID` (script arg) | First argument of `run_27b.sh` / `run_9b.sh` (or export it before a raw `docker compose up`): selects the physical card by nvidia-smi index via `device_ids`. Defaults: 27B → `0`, 9B → `1`. Exposing a single card also stops llama.cpp spreading layers across all visible GPUs. On this box (verified 2026-10-01): `0` = RTX 4080 SUPER (16 GB), `1` = RTX 4060 Ti (16 GB) — the 27B needs ~23 GB free on one card, so it does not fit locally (use the [SaladCloud](#saladcloud-27b-production-group) group); the 9B fits either. Check free VRAM first with `nvidia-smi` |
+| `GPU_ID` (script arg) | First argument of `run_27b.sh` / `run_9b.sh` (or export it before a raw `docker compose up`): selects the physical card by nvidia-smi index via `device_ids`. Defaults: 27B → `0`, 9B → `1`. Exposing a single card also stops llama.cpp spreading layers across all visible GPUs. On this box (verified 2026-10-01): `0` = RTX 4080 SUPER (16 GB), `1` = RTX 4060 Ti (16 GB) — the 27B needs ~23 GB free on one card, so it does not fit locally (use the [SaladCloud](#saladcloud) group); the 9B fits either. Check free VRAM first with `nvidia-smi` |
 | `HOST_PORT` | :8080 is taken by another server → use e.g. `8090` until you free it |
-| `MODEL_REPO` / `MODEL_FILE` | Different quant or model. Default (verified in `JonathanColetti/Qwen3.8-27B-Uncensored-GGUF`): the noMTP `Q4_K_M` build — its MTP draft module is not embedded, it comes from `DRAFT_MODEL_FILE`. The repo's other variants (`Q4_K_M`, `Q5_K_M`, `Q6_K`, `Q8_0`, `IQ2_M`, `IQ4_XS`) embed the draft — run them with `DRAFT_MODEL_FILE=""`. Other 27B repos (unsloth, bartowski) have no draft file: also `DRAFT_MODEL_FILE=""`. For the 9B smoke test: repo `empero-ai/Qwen3.8-9B-Distill-GGUF`, file `Qwen3.8-9B-Q4_K_M.gguf` (the compose file already disables the draft there) |
-| `DRAFT_MODEL_FILE` | MTP draft for `--spec-type draft-mtp` speculative decoding. Default `Qwen3.8-27B-Uncensored-draft-Q8_0.gguf` (~3 GB, same repo as the default model). Set to `""` to disable — the server falls back to n-gram self-speculation (needed for models whose draft isn't in `MODEL_REPO`, or on VRAM-tight cards) |
-| `CHAT_TEMPLATE` | Jinja chat template **file path** passed as `--chat-template-file` (NOT the inline `--chat-template` flag — that one takes the template *text*; a path there becomes the literal prompt and the model degenerates into a loop of the path string, e.g. `/opt/llama.cpp/qwen3.8.q6.gguf` spam). Default empty/`none` → the template embedded in the GGUF is used (the default Uncensored model already embeds a permissive one that accepts system messages anywhere). Opt in with `CHAT_TEMPLATE=/opt/llama.cpp/qwen3.8.q6.jinja` (shipped in the image) for models whose embedded template is strict, e.g. Claude Code's Anthropic-format `/v1/messages` |
+| `MODEL_REPO` / `MODEL_FILE` | Different quant or model. Default (verified in `JonathanColetti/Qwen3.8-27B-Uncensored-GGUF`): the noMTP `Q4_K_M` build — its MTP draft module is not embedded, it comes from `DRAFT_MODEL_FILE`. The repo's other variants (`Q4_K_M`, `Q5_K_M`, `Q6_K`, `Q8_0`, `IQ2_M`, `IQ4_XS`) embed the draft — run them with `DRAFT_MODEL_FILE=""`. Other 27B repos (unsloth, bartowski) have no draft file: also `DRAFT_MODEL_FILE=""`. For the 9B smoke test: repo `empero-ai/Qwen3.8-9B-Distill-GGUF`, file `Qwen3.8-9B-Q4_K_M.gguf` (the 9B service sets no draft env → the image default `none`) |
+| `DRAFT_MODEL_FILE` | MTP draft for `--spec-type draft-mtp` speculative decoding. Default `Qwen3.8-27B-Uncensored-draft-Q8_0.gguf` (~3 GB, same repo as the default model; resolved via `hf` against `MODEL_REPO`). Set to `""` to disable — the server falls back to n-gram self-speculation (needed for models whose draft isn't in `MODEL_REPO`, or on VRAM-tight cards) |
+| `CHAT_TEMPLATE` | Jinja chat template **file path** passed as `--chat-template-file` (NOT the inline `--chat-template` flag — that one takes the template *text*; a path there becomes the literal prompt and the model degenerates into a loop of the path string, e.g. `/opt/llama.cpp/qwen3.8.q6.gguf` spam). Default empty/`none` → the template embedded in the GGUF is used (the default Uncensored model already embeds a permissive one that accepts system messages anywhere). The Claude Code variant is handled automatically by `CLAUDE_TEMPLATE` in the v5/generic images — see [The Claude Code template](#the-claude-code-template) |
 | `CTX_SIZE` | Lower it (e.g. `32768`) if VRAM is tight or you don't need 131k — KV cache scales with this |
 | `N_GPU_LAYERS` | Keep `99` for full offload; lower only if the GPU is shared and you want some layers on CPU (slower) |
 | `THREADS` / `BATCH_SIZE` / `UBATCH_SIZE` | Rarely needed; leave as-is unless tuning throughput |
 | `HF_TOKEN` | Only if the repo is gated or HF rate-limits you (`hf auth token` to get one) |
-| `API_KEY` | llama-server's auth key. The run scripts read it from `api.txt` in this folder (chmod 600); missing file → server runs without key auth. `crl.sh` / `crl2.sh` also read api.txt for their Bearer header |
+| `API_KEY` | llama-server's auth key. The run scripts read it from `api.txt` in this folder (chmod 600); missing file → server runs without key auth. `curl1.sh` / `curl2.sh` also read api.txt for their Bearer header |
 
 Notes:
 - The `timeout 30` wrapper just guards against a hung build — with the image already built, `up -d` returns in seconds. Drop it if you prefer.
 - If you edit the Dockerfile later, run `docker compose build` first (or add `--build`). Compose reuses the existing `boris271142/lmss:cuda128-v3` image otherwise.
 - First start downloads the model file into the container's `/models`; restarting a stopped container loads it from disk in seconds, but `docker compose down` removes it (the next `up` re-downloads).
 
-### Smoke test variant — permanent 9B service on the RTX 4060 Ti
+#### Smoke test variant — permanent 9B service on the RTX 4060 Ti
 
 The 9B server is a second compose service (`qwen38-9b`, host port **8081**), pinned to the RTX 4060 Ti via `device_ids: ["1"]`. Same image as the 27B; only env vars differ.
 
@@ -95,22 +112,99 @@ cd /dd2/andrei/docker/on_salad/docker/docker_tests && ./run_9b.sh   # default: R
 ./run_9b.sh 0                                                       # run it on a different card instead
 ```
 
-Model + KV ≈ 5.8 GiB VRAM, ~100 tok/s generation (measured 2026-08-23 on the previous box's RTX 3080 Ti; the 9B fits either 16 GB card on this box). `crl.sh` / `crl2.sh` target it on :8081.
+Model + KV ≈ 5.8 GiB VRAM, ~100 tok/s generation (measured 2026-08-23 on the previous box's RTX 3080 Ti; the 9B fits either 16 GB card on this box). `curl2.sh` targets it on :8081 (`curl1.sh` checks :8080).
 
-## SaladCloud (27B production group)
+### The Claude Code template
 
-The 27B Claude Code backend lives in SaladCloud, not on this box: group `qwen38-27b-q6k` (org `ma-casa-in-paris`, project `qwen38-27b`), one **RTX 3090 (24 GB)**, on-demand (no autostart — `cl_salad` wakes it).
+Claude Code speaks the Anthropic Messages API: requests arrive as `/v1/messages` with `system` messages that can appear **mid-conversation** (per-turn instructions). Qwen3.8's stock template raises on that (`Jinja Exception: System message must be at the beginning`), so for Claude Code the served template must be the patched one. The image handles it at startup instead of shipping a static template:
 
-- **Image**: baked `boris271142/lmss_jonathancoletti_qwen38_q6_mtp_vision:cuda128-v4`, digest-pinned live (`sha256:789ff2b3…3a4a`). A `FROM boris271142/lmss:cuda128-v3` extension (`Dockerfile.lmss_q6_mtp_vision`): the MTP draft (Q8_0, 2.95 GiB) and mmproj (F16, 0.86 GiB) are baked into the image, so at runtime **only the main model** is downloaded from HF via `hf` (v3's `wget2` `DRAFT_MODEL_URL` / `VISION_MODEL_URL` mechanism is gone — those env vars are no longer read). The local compose still uses the plain `cuda128-v3` multistage image.
-- **Live config (2026-10-03)**: `MODEL_FILE=Qwen3.8-27B-Uncensored-Q5_K_M.gguf` (18.19 GiB, MTP head embedded in the gguf), `CTX_SIZE=90000` (served n_ctx 90112), `MODEL_ALIAS=qwen38-27b` (stable — clients reference the alias, not the group name), `CHAT_TEMPLATE=/opt/llama.cpp/qwen3.8.q6.jinja` (the patched Claude template — the GGUF-embedded one rejects mid-conversation system messages), `USE_DRAFT_MODEL=none` (self-speculation from the embedded MTP head; the baked draft is only used for noMTP quants), q8_0 KV, flash-attn, vision on. See [Choosing quant + context length by VRAM](#choosing-quant--context-length-by-vram). The group name `q6k` is a leftover from the original Q6_K deploy and is kept — renaming means delete + recreate = new DNS + the DELETE name-tombstone dance.
-- **Deploy**: `python3 deploy_qwen38_27b.py` (repo root) — create-or-update in place (stop when running → PATCH image + full env → start), which keeps the group's DNS stable. Flags: `--org`, `--project`, `--group`, `--gpu rtx5090|rtx3090`, `--model-file`, `--ctx-size`, `--image`, `--use-draft-model`, `--no-start`. Built-in defaults = the live production profile above (Q5_K_M @ CTX 90000 on rtx3090, digest-pinned v4 image), so a bare run re-applies exactly that — idempotent against the live group (verified byte-for-byte against a live GET). Caveat: the PATCH sends env **wholesale**, so every value comes from the flags/defaults, not from whatever is currently live — if you change the group's env out-of-band, update the defaults before the next deploy run.
-- **Cold start**: every stop→start re-downloads the main model (~10 min observed for Q5_K_M, ~26 min for Q6_K). The readiness probe (30 s delay + 20 × 120 s ≈ 40.5 min failure window, `GET /ready` on 8889) is sized to tolerate that; the early 30 s first probe (not the 1200 s cap) makes the gateway open the moment the model is actually ready.
-- **HF token**: `hft.txt` next to the deploy scripts (gitignored, chmod 600). If it validates against the Hub, the deployer adds `HF_TOKEN` to the group env; the image CMD forwards it to `hf download` as `--token` (authenticated, faster pulls). Missing/invalid → skipped with a warning, `hf` downloads anonymously (fine for public repos). Never printed.
-- **Gateway** (port **443**, `Salad-Api-Key` header): `corn-cabbage-2yk4e98r3rx752n0.salad.cloud`.
-- **Smoke test**: `./docker/docker_tests/curl2_salad.sh -url corn-cabbage-2yk4e98r3rx752n0.salad.cloud -m qwen38-27b` (from repo root).
-- **Claude Code against it**: `cl_salad [GATEWAY_URL]` (in `docker/docker_tests/`, installed at `/usr/local/bin/cl_salad`) — the gateway URL is its first argument, auto-starts the group if it's asleep, runs the local `salad_proxy.py` (Anthropic↔OpenAI, injects the key), then the claude CLI with 64000/16000 token caps matching the 90112 ctx.
+- **v5 / generic images — `CLAUDE_TEMPLATE=1`** (the default in both deployers): at startup the image dumps the chat template from the freshly downloaded gguf (`claude_template.sh`) and applies the one-line mid-conversation-system patch, passing the result to llama-server via **`--chat-template-file`**. `CLAUDE_TEMPLATE=none` (deployer flag `--no-claude-template`) serves the gguf's embedded template as-is — what cline / python / opencode want. Non-Qwen ggufs (no raise-marker) get the patch skipped automatically.
+- **base v3 image (local compose) — `CHAT_TEMPLATE=<path>`**: a jinja **file path** (see the Arguments table above); opt in with `CHAT_TEMPLATE=/opt/llama.cpp/qwen3.8.q6.jinja` for models whose embedded template is strict.
 
-Note: the Salad worker image cache is keyed by REPO NAME, not tag or digest — a new tag on a cached repo can still serve a stale image on workers that had cached the old one (observed live on `lmss:cuda128` on 2026-10-01). Never overwrite a tag a worker may hold; the airtight lever is a digest-pinned image ref to a digest no worker has seen. With a plain tag, verify the live build with `version.sh` in the container.
+**Gotcha (root cause of the old path-loop):** the template must go through `--chat-template-file`. The inline `--chat-template` flag takes the template *text* — pass a path there and it becomes the literal prompt, and the model degenerates into a loop of the path string.
+
+Verified e2e (2026-10-05, local GPU): the dumped template is the gguf's own 170-line template (only diff vs the reference file is whitespace on one line — renders byte-identical); a mid-conversation system message is honored (the answer comes back in the instructed language); negative control `CLAUDE_TEMPLATE=none` → HTTP 500 "System message must be at the beginning" at exactly the line the patch rewrites.
+
+## SaladCloud
+
+One card per container: Salad allocates the GPU, and inside the container it is always index `0` (hence `GPU_ID=0` in every group env). A group with `auth` on gets a public `*.salad.cloud` gateway (443 in front of the group's HTTP port 8888) that requires the `Salad-Api-Key` header.
+
+Common shape of every group here:
+
+- **Readiness probe**: HTTP `GET /ready` on 8889 (the status API), sized to survive a cold model download on a fresh worker — the 27B groups use 30 s initial delay + 20 × 120 s ≈ 40 min failure window (the spec caps: delay 1200, period 120, failure_threshold 20). The early 30 s first probe (not the 1200 s max) keeps the gateway — and cloudflare in front of it — open the moment the model is actually ready.
+- **On-demand**: autostart off + scheduled scaling — groups sit stopped (no cost) until someone starts them.
+- **The worker image cache is keyed by REPO NAME**, not tag or digest: a re-pushed tag can still serve a stale image on workers that cached the old one (observed live on `lmss:cuda128` on 2026-10-01). Never overwrite a tag a worker may hold; the airtight lever is a digest-pinned `@sha256:` ref to a digest no worker has seen (the API accepts it verbatim — both smart deployers pin digests). With a plain tag, verify the live build with `version.sh` in the container.
+- **DELETE leaves a name tombstone**: recreating a just-deleted group name 400s `name_conflict` for 10+ min. A fresh group name works immediately; keep `MODEL_ALIAS` stable so clients don't notice.
+- **Keys & projects**: `SALAD_API_KEY` comes from `salad_api.txt` (repo root, gitignored, never printed), read by the stdlib-only `salad_client.py`; one key covers every org on the account. Projects have no API create endpoint (web UI only), but container-group creation auto-creates a missing project, which the deployers rely on.
+
+### Production 27B group: `qwen38-27b-q6k`
+
+The 27B Claude Code backend: org `ma-casa-in-paris`, project `qwen38-27b`, one **RTX 3090 (24 GB)**, on-demand. Live config (GET-verified 2026-10-06):
+
+- **Image**: baked `boris271142/lmss_jonathancoletti_qwen38_q6_mtp_vision@sha256:4089a457…3839` (tag `cuda128-v5`; tag history in the deploy script: v4 `789ff2b3…`, v3 `a1ab8bd2…`). The MTP draft (Q8_0, 2.95 GiB) and mmproj (F16, 0.86 GiB) are baked in, so at runtime **only the main model** is downloaded from HF (fast `hf` path).
+- **Env**: `MODEL_FILE=Qwen3.8-27B-Uncensored-Q5_K_M.gguf` (18.19 GiB, MTP head embedded), `CTX_SIZE=90000` (served n_ctx **90112** — rounded up to a block multiple), `MODEL_ALIAS=qwen38-27b` (stable — clients reference the alias, not the group name), `CLAUDE_TEMPLATE=1`, `USE_DRAFT_MODEL=none` (self-speculation from the embedded MTP head; the baked draft is only for noMTP quants), `N_GPU_LAYERS=99`, + `HF_TOKEN` when `hft.txt` validates. q8_0 KV, flash-attn, vision on. See [Choosing quant + context length by VRAM](#choosing-quant--context-length-by-vram).
+- **Resources**: cpu 8, 16 GB RAM, 50 GB disk, shm 64, replicas 1, restart always, priority low.
+- **Gateway**: `https://corn-cabbage-2yk4e98r3rx752n0.salad.cloud` (443, `Salad-Api-Key` header).
+- The group name `q6k` is a leftover from the original Q6_K deploy and is kept — renaming means delete + recreate = new DNS + the name-tombstone dance.
+
+- **Deploy**: `python3 deploy_qwen38_27b.py` (repo root) — create-or-update in place (stop when running → PATCH image + full env → start), which keeps the group's DNS stable. A bare run re-applies exactly the production profile above (the built-in defaults are it) — idempotent against the live group. Flags: `--org`, `--project`, `--group`, `--gpu rtx5090|rtx3090`, `--model-file`, `--ctx-size`, `--image`, `--use-draft-model`, `--no-claude-template`, `--no-start`. Caveat: the PATCH sends env **wholesale** (and resources are not patchable at all), so every value comes from the flags/defaults, not from whatever is currently live — if you change the group's env out-of-band, update the defaults before the next deploy run.
+- **Cold start**: every stop→start re-downloads the main model (~10 min observed for Q5_K_M, ~26 min for Q6_K) — the probe window above is sized for it.
+- **HF token**: `hft.txt` next to the deploy scripts (gitignored, chmod 600). The deployer validates it (`whoami-v2`) and, if it passes, adds `HF_TOKEN` to the group env; the image CMD forwards it to `hf download` (authenticated, faster pulls). Missing/invalid → skipped with a warning, anonymous download (fine for public repos). Never printed.
+- **Smoke test**: `./docker/docker_tests/curl2_salad.sh -url corn-cabbage-2yk4e98r3rx752n0.salad.cloud -m qwen38-27b` (canary question `27*43?` → `1161`).
+- **Claude Code against it**: `cl_salad [GATEWAY_URL]` — or `cl_salad_deploy` when the group is asleep (it starts and waits for it). See [Service scripts](#service-scripts).
+
+### Other live groups (all stopped as of 2026-10-06)
+
+| Group | Project | Deployer | What it runs | Gateway |
+|---|---|---|---|---|
+| `qwen38-27b-q5` | `qwen38-27b` | `deploy_qwen38_27b.py --group` | v5 test/canary, same profile as prod | `starfruit-watercress-1wnfoj9fdzbao3xj.salad.cloud` |
+| `qwen38-9b` | `qwen38-27b` | `deploy_qwen38_9b.py` | plain 9B (Q4_K_M @ 32K), 7 card classes | `parmesan-cayenne-q0cfrqiksj7jhgrp.salad.cloud` |
+| `atx-swift-27b-q5` | `llm` | `deploy_generic.py` | ATX-Swift 27B Q5_K_M @ 90K + vision (the generic image's default profile) | `tamarind-caraway-1rpqcqcnbbkmqdbv.salad.cloud` |
+
+A second org `akl-on-salad` shares the same API key; every deployer takes `--org` / `--project` / `--group` to target it.
+
+## Service scripts
+
+All of it is stdlib-only Python / POSIX sh. The Salad key is read from `salad_api.txt` by `salad_client.py` and never printed; the HF token comes from `hft.txt` (see above).
+
+### Deployers
+
+All four take `--org` / `--project` / `--group` (defaults are the groups they're named after) and use create-or-update semantics: an existing group is updated in place (stop when running → PATCH image + full env → start), which keeps its DNS stable for clients; a missing group is created. All support `--no-start` (apply config, leave stopped). Resources (cpu / RAM / disk) are set at create time only — an existing group keeps its resources.
+
+| Deployer | Default group | Image | Default profile |
+|---|---|---|---|
+| `deploy_qwen38_27b.py` | `qwen38-27b-q6k` | baked q6-mtp-vision `@4089a457` (v5) | **production**: Q5_K_M @ CTX 90000, RTX 3090, `CLAUDE_TEMPLATE=1`, `USE_DRAFT_MODEL=none`, vision on |
+| `deploy_generic.py` | `atx-swift-27b-q5` (project `llm`) | `lmss_generic` `@f1b3ded2` (v1) | ATX-Swift 27B Q5_K_M @ 90000 + vision, RTX 3090 |
+| `deploy_qwen38_9b.py` | `qwen38-9b` | `lmss:cuda128-v3` (plain tag) | plain 9B Q4_K_M @ 32768, **7 card classes**, explicit `none` sentinels |
+| `deploy_qwen9b.py` | `qwen9b` (retired) | `lmss:cuda128-v3` (plain tag) | plain 9B Q4_K_M @ 32768, single RTX 3090, priority batch |
+
+- **`deploy_qwen38_27b.py`** — the canonical deployer for the production group (see [above](#production-27b-group-qwen38-27b-q6k)). `--gpu rtx5090|rtx3090` (repeatable — placement may land on any listed class), `--model-file` swaps the quant, `--use-draft-model none|<file>` (`none` = the gguf's embedded MTP head; a filename = the baked draft, needed for noMTP quants), `--no-claude-template` for non-Claude clients.
+- **`deploy_generic.py`** — model-agnostic: any GGUF repo/file via `--model-repo` / `--model-file`, served name via `--model-alias`. Draft and vision are **opt-in** per group (default `none`): `--draft-model` / `--vision-model` take `none`, `hf://org/repo/file`, or a bare file resolved against `MODEL_REPO`. `--spec-type draft-mtp|ngram-mod|none` selects speculation explicitly — an MTP-embedded gguf without a separate draft file runs `draft-mtp` on its in-gguf head instead of being downgraded to ngram-mod. `--gpu` takes several classes (Salad may place on any). Because nothing is baked, a fresh worker downloads everything (a 27B `hf download` transiently holds ~2× the file → 50 GB disk default).
+- **`deploy_qwen38_9b.py`** — replacement for the broken `qwen9b` group. Plain 9B: the three optional features are set to `none` **explicitly** (v3 env names: `DRAFT_MODEL_URL` / `VISION_MODEL_URL` / `CHAT_TEMPLATE`) rather than relying on the image defaults. Runs on any of RTX 3090 / 3090 Ti / 4090 / 4080 / 5070 Ti / 5080 / 5090; probe 120 s + 20 × 60 s (covers the ~5.4 GB download). **Created in the stopped state** — start it explicitly after creation.
+- **`deploy_qwen9b.py`** — the original 9B deployer (single 3090, priority batch, probe 120 s + 10 × 5 s). Its group was superseded by `qwen38-9b` and has been deleted (as of 2026-10-06); kept as the 9B reference for a single-3090, no-7-class deployment.
+
+### `cl_salad` — run Claude Code against a live gateway
+
+`cl_salad [GATEWAY_URL] [claude args…]` (installed at `/usr/local/bin/cl_salad`). The **simple runner**: it checks the gateway once — `GET /v1/models` must return 200 (group running **and** model loaded) — and **dies immediately if it's dead** (exit 2, with distinct messages for unreachable / 403 / other). It does NOT start or manage the group. Alive, it starts `salad_proxy.py` on a local port, points the claude CLI at it, and exits when claude exits.
+
+- The gateway URL is the first argument — the one thing that changes when a group is recreated (a bare host works, scheme optional; a first arg starting with `-` is a claude flag, not a URL). Omit it → `SALAD_GATEWAY_HOST` → built-in default (the prod group's DNS, `corn-cabbage-…`).
+- Token caps default to 64000 input + 16000 output = 80000: the served n_ctx is 90112, so total input + requested output must stay under it (or the model errors with "context length exceeded"). Lower them if you hit that.
+- Env overrides: `SALAD_GATEWAY_HOST`, `SALAD_MODEL_ALIAS` (default `qwen38-27b`), `SALAD_KEYFILE`, `SALAD_PROXY_PORT` (8093), `SALAD_ENABLE_THINKING` (0 = clean answers). The local (non-Salad) equivalents are `clov` / `cl_tr4v` in `/usr/local/bin`.
+
+### `cl_salad_deploy` — start + wait, then run
+
+`cl_salad_deploy [options] [claude args…]` (installed at `/usr/local/bin/cl_salad_deploy`). The **deploy half** (split out of the old cl_salad): looks up the group's status, starts it if it's stopped, waits for the model to be ready (default **2700 s** — covers image pull + an ~18 GiB cold download; exits early if the group flips back to stopped), then hands off to `cl_salad`.
+
+- Without `--url`, the gateway DNS is looked up from the group's own `networking.dns` — so `cl_salad_deploy --group <name>` is enough.
+- Options must come **before** any claude argument (the first non-option token ends parsing; put `--` before claude flags if a name could clash): `--url`, `--org`, `--project`, `--group`, `--model`, `--keyfile`, `--port`, `--thinking`, `--context-tokens`, `--output-tokens`, `--timeout`, `--no-run` (start + wait, no claude), `--status` (print the group's status and exit). Each mirrors the env var cl_salad reads: option > env > default.
+- Examples: `cl_salad_deploy` (prod group), `cl_salad_deploy --group qwen38-27b-q5 -- -p "Say hi"`, `cl_salad_deploy --org akl-on-salad --project llm --group atx-swift-27b-q5`.
+- Note the paid path: starting a stopped group triggers a real cold start (image pull + model download = money). `--status` and the dead-gateway paths cost nothing.
+
+### `salad_proxy.py` — the Anthropic↔OpenAI bridge
+
+Stdlib-only; listens on **127.0.0.1 only** (it holds the Salad key — never exposed to the network). Claude Code speaks the Anthropic Messages API; llama-server is OpenAI-only. The proxy translates `POST /v1/messages` → `/v1/chat/completions` and the response back (SSE streaming or JSON), maps `tool_use` / `tool_result` ↔ `tool_calls` / `role:tool`, injects the `Salad-Api-Key` header on every upstream request (read from the key file, never printed), and disables Qwen "thinking" by default so the model emits clean answers rather than a long reasoning preamble (`--thinking 1` to change). Also serves `GET /v1/models` and `GET /healthz`.
+
+Other helpers in `docker/docker_tests/`: `curl1.sh` / `curl2.sh` (local API check / question→answer on :8080 / :8081, read `api.txt` for the Bearer header), `curl2_salad.sh` (the same against a Salad gateway, with the key), `chat_salad.sh`, `check_status.sh`, `question.sh`, `run-nvidia-smi.sh`, and `version.sh` (in-container build fingerprint + env table — the live check for the image-cache caveat above).
 
 ## Verify
 
