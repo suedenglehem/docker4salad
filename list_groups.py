@@ -9,8 +9,8 @@ The SaladCloud API has no list-orgs / list-projects operations, so this walks
 a fixed map of the account's orgs and their projects. Add new projects to
 KNOWN_PROJECTS below when you create them in the web UI.
 
-For every group (active or not) it prints: status, uptime (time in the current
-state), instance counts, and the
+For every group (active or not) it prints: status, age (since creation),
+uptime (time in the current state), instance counts, and the
 gateway URL from networking.dns (the host Salad assigns per group; the port is
 routed by the gateway itself, so no :port suffix is needed). For groups that
 are running it also fetches their live instances and prints the SSH line
@@ -37,16 +37,8 @@ def _url(group: sc.ContainerGroupInfo) -> str | None:
     return f"https://{dns}" if dns else None
 
 
-def _uptime(group: sc.ContainerGroupInfo) -> str:
-    """Human-readable time since the group entered its current state."""
-    if group.current_status != "running" or not group.state_start_time:
-        return "-"
-    try:
-        started = datetime.fromisoformat(group.state_start_time)
-    except ValueError:
-        return "?"
-    secs = max(0, int((datetime.now(timezone.utc) - started).total_seconds()))
-    d, rem = divmod(secs, 86400)
+def _fmt_delta(secs: int) -> str:
+    d, rem = divmod(max(0, secs), 86400)
     h, rem = divmod(rem, 3600)
     m, _ = divmod(rem, 60)
     if d:
@@ -54,6 +46,29 @@ def _uptime(group: sc.ContainerGroupInfo) -> str:
     if h:
         return f"{h}h {m}m"
     return f"{m}m"
+
+
+def _since(group: sc.ContainerGroupInfo, iso: str | None, running_only: bool) -> str:
+    """Human-readable time since an ISO timestamp; '-' when not applicable."""
+    if running_only and group.current_status != "running":
+        return "-"
+    if not iso:
+        return "-"
+    try:
+        then = datetime.fromisoformat(iso)
+    except ValueError:
+        return "?"
+    return _fmt_delta(int((datetime.now(timezone.utc) - then).total_seconds()))
+
+
+def _age(group: sc.ContainerGroupInfo) -> str:
+    """Time since the group was created (survives stop/start cycles)."""
+    return _since(group, group.create_time, running_only=False)
+
+
+def _uptime(group: sc.ContainerGroupInfo) -> str:
+    """Time since the group entered its current state."""
+    return _since(group, group.state_start_time, running_only=True)
 
 
 def _instances(group: sc.ContainerGroupInfo) -> str:
@@ -68,7 +83,7 @@ def _ssh_lines(org: str, project: str, group_name: str, key: str) -> list[sc.Con
     try:
         return list(sc.list_container_group_instances(org, project, group_name, api_key=key))
     except sc.SaladApiError as e:
-        print(f"{'':<34} {'':<28} {'':<12} {'':>9} {'(instances failed)':<16} HTTP {e.status_code}")
+        print(f"{'':<34} {'':<28} {'':<12} {'':>9} {'':>9} {'(instances failed)':<16} HTTP {e.status_code}")
         return []
 
 
@@ -89,7 +104,7 @@ def main(argv: list[str]) -> int:
         return 2
 
     key = sc.load_api_key()
-    header = f"{'ORG/PROJECT':<34} {'GROUP':<28} {'STATUS':<12} {'UPTIME':>9} {'INSTANCES':<16} URL"
+    header = f"{'ORG/PROJECT':<34} {'GROUP':<28} {'STATUS':<12} {'AGE':>9} {'UPTIME':>9} {'INSTANCES':<16} URL"
     print(header)
     print("-" * len(header))
 
@@ -110,14 +125,14 @@ def main(argv: list[str]) -> int:
                 url = _url(g) or "-"
                 print(
                     f"{scope:<34} {g.name:<28} {(g.current_status or '?'):<12}"
-                    f" {_uptime(g):>9} {_instances(g):<16} {url}"
+                    f" {_age(g):>9} {_uptime(g):>9} {_instances(g):<16} {url}"
                 )
                 if g.current_status == "running":
                     for inst in _ssh_lines(org, project, g.name, key):
                         if not inst.ssh_line:  # API omits ssh_* when the group has no SSH config
                             continue
                         fp = f"  [{inst.ssh_host_key_fingerprint}]" if inst.ssh_host_key_fingerprint else ""
-                        print(f"{'':<34} {'':<28} {'':<12} {'':>9} {inst.ssh_line}{fp}")
+                        print(f"{'':<34} {'':<28} {'':<12} {'':>9} {'':>9} {inst.ssh_line}{fp}")
 
     print("-" * len(header))
     print(f"{total} group(s)")

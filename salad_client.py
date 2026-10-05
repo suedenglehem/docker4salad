@@ -210,6 +210,7 @@ class ContainerGroupInfo:
 
     name: str
     current_status: str | None  # pending|running|stopped|succeeded|failed|deploying
+    create_time: str | None  # ISO-8601; when the group was created (its age)
     state_start_time: str | None  # ISO-8601; when the group entered its current state
     raw: dict = field(repr=False)
 
@@ -219,6 +220,7 @@ class ContainerGroupInfo:
         return cls(
             name=str(payload.get("name", "")),
             current_status=state.get("status"),
+            create_time=payload.get("create_time"),
             state_start_time=state.get("start_time"),
             raw=payload,
         )
