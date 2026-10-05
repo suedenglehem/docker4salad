@@ -41,9 +41,11 @@ container starts.
 GPU: default RTX 3090 (24 GB) — the live production card: 18.19 GiB Q5_K_M
 + mmproj (0.86 GiB) + q8_0 KV (~3.0 GiB at the 90000 default ctx) ≈ 22 GiB,
 fits with ~2 GiB headroom (verified live 2026-10-03: served n_ctx 90112).
-An RTX 5090 (32 GB, --gpu rtx5090) fits Q6_K at 128K+ with wide headroom —
-see docker/README.md "Choosing quant + context length by VRAM" for the
-full quant/ctx matrix.
+An RTX 5090 (32 GB) fits Q6_K at 128K+ with wide headroom — see
+docker/README.md "Choosing quant + context length by VRAM" for the full
+quant/ctx matrix. --gpu takes SEVERAL classes (e.g. --gpu rtx3090 rtx5090):
+the group's gpu_classes then lists them all and Salad may place the replica
+on any of them.
 
 Ctx: the default is 90000 — the live production setting (served n_ctx
 90112; the 27B's trained context is 262144). Pass --ctx-size 132768 for
@@ -54,15 +56,18 @@ keeps its resources). The main-model `hf download` can transiently hold ~2x
 the file while it lands (~41.8 GiB for the 20.9 GiB Q6_K); 40 GiB was
 observed to be too close for comfort, so the default is 50.
 
-CHAT_TEMPLATE is the permissive jinja the image ships (Claude Code's
-Anthropic-format requests need system messages accepted anywhere).
+CLAUDE_TEMPLATE=1 (the default here) makes the image dump the chat template
+from the freshly downloaded gguf at startup and apply the one-line Claude
+Code patch (Anthropic-format requests send system messages mid-conversation;
+the stock Qwen template raises on them). --no-claude-template sends 'none',
+which serves the gguf's embedded template as-is (cline/py/opencode).
 
 SALAD_API_KEY is read from salad_api.txt by salad_client; HF_TOKEN from
 hft.txt (validated via whoami-v2; neither is ever printed).
 
 The built-in defaults ARE the live production profile (2026-10-03):
-Q5_K_M @ CTX_SIZE 90000 on an RTX 3090, digest-pinned cuda128-v4 image —
-a bare run re-applies exactly that (idempotent against the live group).
+Q5_K_M @ CTX_SIZE 90000, digest-pinned cuda128-v5 image (2026-10-05) — a
+bare run re-applies that, idempotent against an existing group.
 
 Usage:
     python3 deploy_qwen38_27b.py                     # create-or-update, start (live prod profile)
@@ -109,17 +114,18 @@ GROUP_NAME = "qwen38-27b-q6k"
 # name; curl2_salad.sh -m and the Claude Code client reference it.
 MODEL_ALIAS = "qwen38-27b"
 
-# Digest-pinned, exactly what the live group runs: the API accepts the
-# @sha256 ref verbatim, and it is the airtight lever against the worker
-# image cache (keyed by repo NAME — a tag re-push can serve stale layers on
-# workers that cached the old one). This is the cuda128-v4 push
-# (2026-10-03, build id 'lmss q6-mtp-vision-v2 (--chat-template-file fix)
-# 2026-10-03'); the tag form, for humans:
-#   boris271142/lmss_jonathancoletti_qwen38_q6_mtp_vision:cuda128-v4
-# v3 manifest-list digest (previous image), for reference:
-#   sha256:a1ab8bd22b9fd7aef5c00e902744cb3161d4a204c92e6265fe266a332bec51fa
+# Digest-pinned: the API accepts the @sha256 ref verbatim, and it is the
+# airtight lever against the worker image cache (keyed by repo NAME — a tag
+# re-push can serve stale layers on workers that cached the old one). This
+# is the cuda128-v5 push (2026-10-05, build id 'lmss q6-mtp-vision-v5
+# (baked draft+vision, claude-template) 2026-10-05'); the tag form, for
+# humans:
+#   boris271142/lmss_jonathancoletti_qwen38_q6_mtp_vision:cuda128-v5
+# Previous manifest-list digests, for reference:
+#   cuda128-v4: sha256:789ff2b34000409d13d76c2f51d607502f65d96c739fa3adfc5d04ae6f353a4a
+#   cuda128-v3: sha256:a1ab8bd22b9fd7aef5c00e902744cb3161d4a204c92e6265fe266a332bec51fa
 IMAGE = ("boris271142/lmss_jonathancoletti_qwen38_q6_mtp_vision"
-         "@sha256:789ff2b34000409d13d76c2f51d607502f65d96c739fa3adfc5d04ae6f353a4a")
+         "@sha256:4089a457281519033764868d5422786b7c48e0d2e81f7847354ceb5acd953839")
 
 MODEL_REPO = "JonathanColetti/Qwen3.8-27B-Uncensored-GGUF"
 # Default = live production quant (2026-10-03): Q5_K_M, MTP head embedded in
@@ -159,12 +165,13 @@ def parse_args() -> argparse.Namespace:
                              "no project-create endpoint, create it in the web UI)")
     parser.add_argument("--group", default=GROUP_NAME,
                         help="container group name (also used as the NAME env)")
-    parser.add_argument("--gpu", choices=GPU_CHOICES, default="rtx3090",
-                        help="GPU class (rtx3090 = live production card, 24 GB; rtx5090 = 32 GB, "
-                             "fits more quant/ctx)")
+    parser.add_argument("--gpu", choices=GPU_CHOICES, nargs="+", default=["rtx3090"],
+                        help="GPU class(es); pass several to let Salad place on any of them "
+                             "(rtx3090 = live production card, 24 GB; rtx5090 = 32 GB, fits more "
+                             "quant/ctx)")
     parser.add_argument("--image", default=IMAGE,
                         help="Docker image (baked q6-mtp-vision image; default is digest-pinned "
-                             "cuda128-v4, the live group's exact ref)")
+                             "cuda128-v5)")
     parser.add_argument("--model-file", default=MODEL_FILE,
                         help="env MODEL_FILE — the quant to serve (plain Q/IQ files embed the MTP "
                              "head; noMTP builds pair with --use-draft-model 1)")
@@ -178,6 +185,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--use-draft-model", default="none",
                         help="'none' = gguf's embedded MTP head; any other value adds "
                              "--model-draft with the baked draft (noMTP quants)")
+    parser.add_argument("--no-claude-template", action="store_true",
+                        help="env CLAUDE_TEMPLATE=none — serve the gguf's embedded chat "
+                             "template as-is, no Claude Code patch (default CLAUDE_TEMPLATE=1 "
+                             "applies the one-line mid-conversation-system patch at startup)")
     parser.add_argument("--no-start", action="store_true", help="apply config only, do not start")
     return parser.parse_args()
 
@@ -223,13 +234,19 @@ def load_hf_token(path: str = HF_TOKEN_FILE) -> str | None:
 
 
 def build_env(name: str, ctx_size: str, use_draft_model: str, hf_token: str | None,
-              model_file: str | None = None) -> dict[str, str]:
+              model_file: str | None = None, claude_template: str = "1") -> dict[str, str]:
     """Full env for the group (create sets it, PATCH replaces it wholesale).
 
     The baked image drops v3's DRAFT_MODEL_URL / VISION_MODEL_URL: the draft +
     mmproj are baked in, vision is always on. USE_DRAFT_MODEL is the only
     draft knob — 'none' uses the gguf's embedded MTP head, any other value
     makes the CMD pass --model-draft with the baked draft file.
+
+    CLAUDE_TEMPLATE (v5): '1' (default) = at startup the image dumps the chat
+    template from the freshly downloaded gguf and applies the one-line Claude
+    Code patch (mid-conversation system messages) via --chat-template-file;
+    'none' = serve the gguf's embedded template as-is. The static
+    CHAT_TEMPLATE=/opt/llama.cpp/qwen3.8.q6.jinja mechanism is retired.
     """
     env = {
         "GPU_ID": "0",
@@ -247,9 +264,10 @@ def build_env(name: str, ctx_size: str, use_draft_model: str, hf_token: str | No
         # Served alias stays 'qwen38-27b' (clients + curl2_salad.sh -m),
         # independent of the group name.
         "MODEL_ALIAS": MODEL_ALIAS,
-        # Permissive template the image ships: Claude Code's Anthropic-format
-        # /v1/messages requests need system messages accepted anywhere.
-        "CHAT_TEMPLATE": "/opt/llama.cpp/qwen3.8.q6.jinja",
+        # Claude Code template: '1' = dump the gguf's own template at startup
+        # and apply the one-line mid-conversation-system patch (--no-claude-
+        # template sends 'none' -> embedded template as-is).
+        "CLAUDE_TEMPLATE": claude_template,
         # 'none' = the quant's embedded MTP head (Q5_K_M/Q6_K/Q4_K_M builds).
         # Any other value -> the image passes --model-draft
         # /models/...draft-Q8_0.gguf (needed for noMTP quants).
@@ -326,14 +344,16 @@ def main() -> int:
     project = args.project
     group = args.group
 
-    print(f"[1/5] resolving GPU class {args.gpu!r} in org {org!r}")
-    gpu = resolve_gpu_class(args.gpu, list_gpu_classes(org))
-    print(f"      -> {gpu.name!r} ({gpu.id})")
+    print(f"[1/5] resolving GPU class(es) {args.gpu!r} in org {org!r}")
+    gpu_classes = list_gpu_classes(org)
+    gpus = tuple(resolve_gpu_class(c, gpu_classes) for c in args.gpu)
+    print("      -> " + ", ".join(f"{g.name!r} ({g.id})" for g in gpus))
 
     print("[2/5] loading HF token (validated, never printed)")
     hf_token = load_hf_token()
     print(f"      token {'validated' if hf_token else 'UNAVAILABLE — model download will run unauthenticated'}")
-    env = build_env(group, args.ctx_size, args.use_draft_model, hf_token, args.model_file)
+    env = build_env(group, args.ctx_size, args.use_draft_model, hf_token, args.model_file,
+                    claude_template="none" if args.no_claude_template else "1")
 
     existing = get_group(org, project, group)
     if existing is not None:
@@ -355,7 +375,7 @@ def main() -> int:
             org, project, group,
             UpdateContainerGroupRequest(
                 image=args.image,
-                gpu_classes=(gpu.id,),
+                gpu_classes=tuple(g.id for g in gpus),
                 environment_variables=env,
                 readiness_probe=dict(READINESS_PROBE),
             ),
@@ -363,7 +383,8 @@ def main() -> int:
         print(f"      HTTP {result.status_code} {result.reason_phrase} status={result.current_status!r}")
     else:
         print(f"[3/5] group absent — creating (memory={int(round(args.memory_size * 1024))} MB, "
-              f"disk={int(round(args.disk_size * 1024**3))} bytes, gpu={gpu.name!r})")
+              f"disk={int(round(args.disk_size * 1024**3))} bytes, "
+              f"gpu={[g.name for g in gpus]!r})")
         try:
             proj = create_project(org, project)
             print(f"      created project via POST -> HTTP {proj.status_code}")
@@ -383,7 +404,7 @@ def main() -> int:
             environment_variables=env,
             cpu=8,
             memory_mb=int(round(args.memory_size * 1024)),
-            gpu_classes=(gpu.id,),
+            gpu_classes=tuple(g.id for g in gpus),
             shm_size=64,
             storage_amount=int(round(args.disk_size * 1024**3)),
             image_caching=True,
@@ -429,8 +450,8 @@ def main() -> int:
     print_group(get_group(org, project, group))
     print("OK: group running. 'running' means the container process is up —")
     print(f"      1. verify the LIVE build in-container: version.sh should print")
-    print(f"         'lmss q6-mtp-vision-v2 (--chat-template-file fix) 2026-10-03'; /models")
-    print(f"         holds the baked draft + mmproj while the main model hf-downloads")
+    print(f"         'lmss q6-mtp-vision-v5 (baked draft+vision, claude-template) 2026-10-05';")
+    print(f"         /models holds the baked draft + mmproj while the main model hf-downloads")
     print(f"      2. PID1 cmdline: --spec-type draft-mtp --spec-draft-n-max 5 --mmproj "
           f"{'(no --model-draft, USE_DRAFT_MODEL=none)' if args.use_draft_model == 'none' else '--model-draft ...draft-Q8_0.gguf'} "
           f"--alias {MODEL_ALIAS}")

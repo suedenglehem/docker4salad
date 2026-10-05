@@ -25,13 +25,27 @@
 # VISION is ALWAYS on: --mmproj /models/mmproj-...-F16.gguf is passed
 # unconditionally (that is why the image is named _vision).
 #
+# CLAUDE TEMPLATE — controlled by the NEW CLAUDE_TEMPLATE env:
+#   * CLAUDE_TEMPLATE=none (default)             -> byte-identical to v4: the
+#     gguf's embedded template is used (or the static CHAT_TEMPLATE path if a
+#     group still sets one).
+#   * CLAUDE_TEMPLATE set (any value != "none")  -> at startup, AFTER the main
+#     model download, ${LLAMA_CPP_DIR}/claude_template.sh dumps the chat
+#     template from the freshly downloaded gguf and replaces the one line that
+#     raises on mid-conversation system messages (Claude Code sends them); the
+#     patched file is passed via --chat-template-file and OVERRIDES CT, so the
+#     single --chat-template-file flag below emits exactly once. A non-Qwen
+#     gguf (no raise-marker) -> the script exits 0 silently and CT is left as
+#     the CHAT_TEMPLATE block set it (embedded fallback).
+#
 # The v3 DRAFT_MODEL_URL / VISION_MODEL_URL (wget2) mechanism is GONE — its
 # inherited ENVs are no longer read by this CMD; USE_DRAFT_MODEL + the baked
 # files replace it. They are left inherited (unused) so the base image is
 # otherwise undisturbed.
 #
-# BUILD:
-#   docker build -f Dockerfile.lmss_q6_mtp_vision \
+# BUILD (context = REPO ROOT — the Claude template script is COPYed from
+# docker/docker_tests/, so build from the repo root):
+#   docker build -f docker/Dockerfile.lmss_q6_mtp_vision \
 #     -t lmss_jonathancoletti_qwen38_q6_mtp_vision:dev .
 #   (base boris271142/lmss:cuda128-v3 is pulled if not local; the 27B repo is
 #    public so the bake `hf download` needs no token)
@@ -64,7 +78,20 @@ RUN set -eux; \
 # first word, e.g. "lmss q6-mtp..." -> "lmss"). Override with
 # --build-arg LMSS_BUILD_ID="..." for a per-push id.
 ARG LMSS_BUILD_ID
-RUN printf '%s\n' "${LMSS_BUILD_ID:-lmss q6-mtp-vision-v1 (baked draft+vision) 2026-10-02}" > /etc/llama-image-build
+RUN printf '%s\n' "${LMSS_BUILD_ID:-lmss q6-mtp-vision-v5 (baked draft+vision, claude-template) 2026-10-05}" > /etc/llama-image-build
+
+# --- Claude Code template: dump+patch script (repo-root build context) ------
+# Zero dependencies (stdlib Python only); copied in and run at STARTUP, not at
+# build time. COPYed from docker/docker_tests/ (hence the repo-root context).
+COPY docker/docker_tests/claude_template.sh ${LLAMA_CPP_DIR}/claude_template.sh
+
+# --- version.sh: overwrite the stale v3-baked copy --------------------------
+# The v3 base ships an older version.sh (grep-based env dump, '>= 3 guards'
+# fingerprint that misclassifies v4). This one adds the full env table (every
+# var the container reads: effective vs baked default, group-set marked,
+# secrets redacted) and marker-based fingerprint classification. The exec bit
+# is set on the source file, so COPY lands it executable.
+COPY docker/docker_tests/version.sh /usr/local/bin/version.sh
 
 # --- New control knob --------------------------------------------------------
 # USE_DRAFT_MODEL: "none" (default) -> the gguf's MTP head is embedded and used
@@ -74,6 +101,12 @@ RUN printf '%s\n' "${LMSS_BUILD_ID:-lmss q6-mtp-vision-v1 (baked draft+vision) 2
 # "none" sentinel (never empty) to match the image's other feature conventions;
 # the SaladCloud API rejects empty env values (minLength 1).
 ENV USE_DRAFT_MODEL=none
+# CLAUDE_TEMPLATE: "none" (default) -> v4 behavior (embedded template, or the
+# static CHAT_TEMPLATE path if the group sets one). Any other value -> at
+# startup the freshly downloaded gguf's chat template is dumped and the
+# one-line Claude Code patch applied (see CLAUDE TEMPLATE section above); the
+# patched file overrides CT.
+ENV CLAUDE_TEMPLATE=none
 
 # --- Runtime CMD -------------------------------------------------------------
 # Faithful copy of the v3 CMD with exactly two changes: (1) no wget2 for the
@@ -107,6 +140,18 @@ fi; \
 CT=; \
 if [ -n \"${CHAT_TEMPLATE}\" ] && [ \"${CHAT_TEMPLATE}\" != \"none\" ]; then \
   CT=\"${CHAT_TEMPLATE}\"; \
+fi; \
+# Claude Code template: when CLAUDE_TEMPLATE is enabled (set, not "none"), \
+# dump the chat template from the freshly downloaded gguf and apply the \
+# one-line Claude patch. The script's stdout is the patched file's path and \
+# OVERRIDES CT, so the single --chat-template-file flag below picks it up. \
+# Runs AFTER the download block above (the model file must exist) and \
+# re-runs cheaply on container restart (header-only scan). Non-Qwen gguf (no \
+# raise-marker) -> script exits 0 with empty stdout: CT stays as the \
+# CHAT_TEMPLATE block left it (embedded fallback). Hard error -> exit 1 -> \
+# container dies loudly under set -euo pipefail. \
+if [ -n \"${CLAUDE_TEMPLATE}\" ] && [ \"${CLAUDE_TEMPLATE}\" != \"none\" ]; then \
+  CT=\"$(\"${LLAMA_CPP_DIR}/claude_template.sh\" \"${MODEL_DIR}/${MODEL_FILE}\" \"${API_STATE_DIR}/claude_chat_template.jinja\" 2>>\"${API_STATE_DIR}/claude_template.log\")\"; \
 fi; \
 # Baked auxiliary model paths (present in the image layers; never downloaded). \
 DRAFT_BAKED=\"${MODEL_DIR}/Qwen3.8-27B-Uncensored-draft-Q8_0.gguf\"; \
