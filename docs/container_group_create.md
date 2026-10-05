@@ -81,7 +81,7 @@ Response-side enum: `ContainerGroupStatus` = pending | running | stopped | succe
 - `update_time` — last modification of the group object.
 - `current_state.start_time` — when the group entered its current state; its **uptime**. Per-state, not per-instance: an instance restart inside a running group does not move it.
 
-`list_groups.py` reports both as the AGE / UPTIME columns (AGE from `create_time`, always shown; UPTIME from `current_state.start_time`, `-` when not running).
+`list_groups.py` reports both as the AGE / UPTIME columns (AGE from `create_time`, UPTIME from `current_state.start_time`; both `-` when the group is not running).
 
 ## Status codes
 

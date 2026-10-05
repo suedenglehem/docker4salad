@@ -62,8 +62,8 @@ def _since(group: sc.ContainerGroupInfo, iso: str | None, running_only: bool) ->
 
 
 def _age(group: sc.ContainerGroupInfo) -> str:
-    """Time since the group was created (survives stop/start cycles)."""
-    return _since(group, group.create_time, running_only=False)
+    """Time since the group was created; '-' when not running (like UPTIME)."""
+    return _since(group, group.create_time, running_only=True)
 
 
 def _uptime(group: sc.ContainerGroupInfo) -> str:
