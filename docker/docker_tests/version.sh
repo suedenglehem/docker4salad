@@ -24,7 +24,9 @@ echo "== env vars the container reads: effective vs baked default =="
 # the env wholesale — removing a key reverts it to the baked value).
 # Baked defaults are kept in sync with docker/Dockerfile.lmss_q6_mtp_vision:
 # the boris271142/lmss:cuda128-v3 base ENV, plus USE_DRAFT_MODEL (v4) and
-# CLAUDE_TEMPLATE (v5).
+# CLAUDE_TEMPLATE (v5). The generic image
+# (docker/Dockerfile.lmss_generic) additionally bakes DRAFT_MODEL /
+# VISION_MODEL / SPEC_TYPE.
 show_var() {
   # $1 = var name, $2 = baked default (literal __nobaked__ = the image does
   # not bake it at all; empty string = baked but empty)
@@ -70,6 +72,9 @@ show_var CTX_SIZE         131072
 show_var CHAT_TEMPLATE    none
 show_var CLAUDE_TEMPLATE  none
 show_var USE_DRAFT_MODEL  none
+show_var DRAFT_MODEL      none
+show_var VISION_MODEL     none
+show_var SPEC_TYPE        draft-mtp
 show_var SPEC_DRAFT_N_MAX 5
 show_var HF_TOKEN         __nobaked__
 show_var API_KEY          ""
@@ -86,8 +91,9 @@ show_var API_STATE_DIR    /tmp/llama-api
 show_var LLAMA_CPP_DIR    /opt/llama.cpp
 echo "  (NAME is set by the deployer but nothing in the image reads it; the"
 echo "   inherited DRAFT_MODEL_URL / DRAFT_MODEL_DIR / VISION_MODEL_URL /"
-echo "   VISION_MODEL_DIR are no longer read by this CMD — draft and vision"
-echo "   are baked into the image and the draft is gated on USE_DRAFT_MODEL)"
+echo "   VISION_MODEL_DIR are no longer read by any CMD. The qwen3.8 image"
+echo "   bakes draft+vision (the draft gated on USE_DRAFT_MODEL); the generic"
+echo "   image downloads them at runtime from DRAFT_MODEL / VISION_MODEL refs)"
 echo
 
 echo "== CMD fingerprint (PID 1 — which sentinel generation) =="
@@ -100,6 +106,13 @@ echo "sentinel guards (!= \"none\") in PID1 cmdline: $GUARDS (informational)"
 if printf '%s' "$CMDLINE" | grep -q 'DRAFT_MODEL_URL'; then
   echo "  -> V3 (wget2) image: draft/vision downloaded at runtime via"
   echo "     DRAFT_MODEL_URL / VISION_MODEL_URL"
+elif printf '%s' "$CMDLINE" | grep -q 'SPEC_TYPE'; then
+  echo "  -> GENERIC image: draft/vision downloaded at runtime via the hf CLI"
+  echo "     from"
+  echo "     DRAFT_MODEL / VISION_MODEL refs (hf://<org>/<repo>/<file> or a"
+  echo "     bare file against MODEL_REPO), speculation mode from SPEC_TYPE"
+  echo "     (draft-mtp|ngram-mod|none), Claude template gated on"
+  echo "     CLAUDE_TEMPLATE"
 elif printf '%s' "$CMDLINE" | grep -q 'CLAUDE_TEMPLATE'; then
   echo "  -> V5 image: Claude template gated on CLAUDE_TEMPLATE (dumps the"
   echo "     chat template from the downloaded gguf + one-line Claude patch),"

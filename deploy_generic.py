@@ -1,0 +1,468 @@
+"""Deploy a group on the generic (model-agnostic) `lmss_generic` image.
+
+The built-in defaults ARE the ATX-Swift test profile (2026-10-05):
+bjivanovich/ATX-Swift-1.5-Qwen3.8-27B-Uncensored-MTP-GGUF @ Q5_K_M (18.77
+GiB), vision projector mmproj-BF16.gguf (0.87 GiB) from the same repo, the
+MTP head EMBEDDED in the gguf (DRAFT_MODEL=none, SPEC_TYPE=draft-mtp),
+CLAUDE_TEMPLATE=1, CTX_SIZE 90000 on an RTX 3090.
+
+Image: `lmss_generic` (FROM boris271142/lmss:cuda128-v3, NO baked models,
+Dockerfile.lmss_generic): at runtime EVERYTHING is downloaded from
+HuggingFace via the fast `hf` xet path — the main model, and the OPTIONAL
+draft (DRAFT_MODEL) and vision projector (VISION_MODEL). The v3 wget2
+DRAFT_MODEL_URL / VISION_MODEL_URL (full URL) mechanism is gone; the new
+refs take "hf://<org>/<repo>/<file>" or a bare file resolved against
+MODEL_REPO, and a download failure dies the container loudly.
+
+Unlike the baked qwen3.8 image, this one is model-agnostic:
+  * draft + vision are opt-in per group (default none) — in the 27B
+    q6-mtp-vision image they are baked and vision is always on
+  * SPEC_TYPE selects the speculation mode explicitly (draft-mtp |
+    ngram-mod | none): an embedded-MTP gguf without a separate draft file
+    runs on its in-gguf head (SPEC_TYPE=draft-mtp + DRAFT_MODEL=none)
+    instead of being downgraded to ngram-mod
+
+Create-or-update semantics: if the group already exists it is updated in
+place (stop when running -> PATCH image + full env -> start), which keeps
+the group's DNS stable for clients. A missing group is created. The
+readiness probe is the ~40-minute failure window that tolerates a cold
+main-model download on a new worker (30 s delay + 20 x 120 s = 2430 s max,
+the spec caps: delay 1200, period 120, failure_threshold 20). The 30 s
+delay (not 1200) keeps the FIRST probe early, so the gateway — and
+cloudflare in front of it — open as soon as the model is actually ready.
+
+GPU: default RTX 3090 (24 GB): 18.77 GiB ATX Q5_K_M + mmproj (0.87 GiB) +
+q8_0 KV (~3.0 GiB at the 90000 default ctx) ≈ 22.6 GiB, fits with ~1.4 GiB
+headroom. The Q6_K build (20.89 GiB) + vision + 90K KV ≈ 24.8 GiB needs an
+RTX 5090 (32 GB). Full 132768 ctx (KV ~4.6 GiB) fits Q5_K_M on a 5090.
+--gpu takes SEVERAL classes (e.g. --gpu rtx3090 rtx5090): the group's
+gpu_classes then lists them all and Salad may place the replica on any.
+
+Ctx: default 90000 (the Q5_K_M/3090 fit; served n_ctx is rounded up to a
+multiple of the block size, 90112 on the Qwen3.8 27B line).
+
+Disk: 50 GiB (create path; resources are NOT patchable, an existing group
+keeps its resources). The main-model `hf download` can transiently hold ~2x
+the file while it lands (~37.5 GiB for the 18.77 GiB Q5_K_M); 40 GiB was
+too close for comfort on the 27B deployer, so the default is 50.
+
+CLAUDE_TEMPLATE=1 (the default here) makes the image dump the chat template
+from the freshly downloaded gguf at startup and apply the one-line Claude
+Code patch (Anthropic-format requests send system messages mid-conversation;
+the stock Qwen template raises on them). --no-claude-template sends 'none',
+which serves the gguf's embedded template as-is (cline/py/opencode).
+Non-Qwen ggufs (no raise-marker) get the patch skipped by the script.
+
+SALAD_API_KEY is read from salad_api.txt by salad_client; HF_TOKEN from
+hft.txt (validated via whoami-v2; neither is ever printed).
+
+Usage:
+    python3 deploy_generic.py                  # ATX-Swift test profile (create-or-update, start)
+    python3 deploy_generic.py --no-start       # apply config only
+    python3 deploy_generic.py --vision-model none            # no vision
+    python3 deploy_generic.py --draft-model hf://<org>/<repo>/<draft.gguf>
+    python3 deploy_generic.py --spec-type ngram-mod          # non-MTP gguf, no draft
+    python3 deploy_generic.py --model-repo <org>/<name> --model-file <quant.gguf> \
+        --model-alias my-model
+"""
+
+import argparse
+import os
+import sys
+import time
+import urllib.error
+import urllib.request
+
+from salad_client import (
+    CreateContainerGroupRequest,
+    GpuClassInfo,
+    SaladApiError,
+    StartContainerGroupRequest,
+    StopContainerGroupRequest,
+    UpdateContainerGroupRequest,
+    create_container_group,
+    create_project,
+    get_container_group,
+    list_gpu_classes,
+    start_container_group,
+    stop_container_group,
+    update_container_group,
+)
+
+# Default org (override with --org): an account can host several orgs, all
+# sharing the same Salad API key.
+ORGANIZATION_NAME = "ma-casa-in-paris"
+# 'llm' — the user-created LLM-experiments project (web UI; the API has no
+# project-create endpoint), kept separate from the production 'qwen38-27b'.
+PROJECT_NAME = "llm"
+GROUP_NAME = "atx-swift-27b-q5"
+# Served model name (llama-server --alias) — deliberately NOT the group
+# name; the Claude Code client (cl_salad --model) references it.
+MODEL_ALIAS = "atx-swift-27b"
+
+# Digest-pinned: the API accepts the @sha256 ref verbatim, and it is the
+# airtight lever against the worker image cache (keyed by repo NAME — a tag
+# re-push can serve stale layers on workers that cached the old one). This
+# is the cuda128-v1 push (2026-10-05, build id 'lmss generic-v1 (hf runtime
+# download, claude-template) 2026-10-05'); the tag form, for humans:
+#   boris271142/lmss_generic:cuda128-v1
+IMAGE = "boris271142/lmss_generic" \
+        "@sha256:f1b3ded2a6cd454316db4d0304d7e7868e5baa9321d01e7def3a933d9b4f4d0e"
+
+MODEL_REPO = "bjivanovich/ATX-Swift-1.5-Qwen3.8-27B-Uncensored-MTP-GGUF"
+# Q5_K_M — MTP head embedded in the gguf (the 'MTP' in the repo name), so no
+# separate draft file is needed (DRAFT_MODEL=none, SPEC_TYPE=draft-mtp).
+MODEL_FILE = "ATX-Swift-1.5-Qwen3.8-27B-Uncensored-MTP-i1-Q5_K_M.gguf"
+# Optional auxiliary models: "none" = off; "hf://<org>/<repo>/<file>" or a
+# bare "<file>" against MODEL_REPO (downloaded at runtime with `hf`).
+DRAFT_MODEL = "none"
+VISION_MODEL = ("hf://bjivanovich/ATX-Swift-1.5-Qwen3.8-27B-Uncensored-"
+                "MTP-GGUF/mmproj-BF16.gguf")
+# Speculation mode: draft-mtp | ngram-mod | none.
+SPEC_TYPE = "draft-mtp"
+
+HF_TOKEN_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "hft.txt")
+
+GPU_CHOICES = ("rtx5090", "rtx3090")
+SPEC_TYPE_CHOICES = ("draft-mtp", "ngram-mod", "none")
+
+# Readiness failure window for a cold worker: 30 s delay + 20 x 120 s =
+# 2430 s (~40 min). The spec caps failure_threshold at 20, period at 120,
+# delay at 1200. The delay is kept at 30 (not the 1200 max) so the first
+# probe fires early and the API goes live the moment the model is ready,
+# not 20 min after the container starts.
+READINESS_PROBE = {
+    "initial_delay_seconds": 30,
+    "period_seconds": 120,
+    "timeout_seconds": 1,
+    "success_threshold": 1,
+    "failure_threshold": 20,
+    "http": {"path": "/ready", "port": 8889, "scheme": "http", "headers": []},
+}
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Create-or-update a group on the generic (model-agnostic) lmss_generic image.",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    parser.add_argument("--org", default=ORGANIZATION_NAME,
+                        help="Salad organization to deploy into (an account can host several "
+                             "orgs sharing one API key)")
+    parser.add_argument("--project", default=PROJECT_NAME,
+                        help="Salad project to deploy into (projects must exist — the API has "
+                             "no project-create endpoint, create it in the web UI)")
+    parser.add_argument("--group", default=GROUP_NAME,
+                        help="container group name (also used as the NAME env)")
+    parser.add_argument("--gpu", choices=GPU_CHOICES, nargs="+", default=["rtx3090"],
+                        help="GPU class(es); pass several to let Salad place on any of them "
+                             "(rtx3090 = 24 GB, fits ATX Q5_K_M + vision @ 90K; rtx5090 = 32 GB, "
+                             "fits Q6_K / full ctx)")
+    parser.add_argument("--image", default=IMAGE,
+                        help="Docker image (generic image; digest-pin the ref after each push)")
+    parser.add_argument("--model-repo", default=MODEL_REPO,
+                        help="env MODEL_REPO — the HuggingFace repo the main model (and any "
+                             "bare draft/vision file) is downloaded from")
+    parser.add_argument("--model-file", default=MODEL_FILE,
+                        help="env MODEL_FILE — the main gguf to serve (quant)")
+    parser.add_argument("--model-alias", default=MODEL_ALIAS,
+                        help="env MODEL_ALIAS — the served model name (--alias) clients use")
+    parser.add_argument("--draft-model", default=DRAFT_MODEL,
+                        help="'none' = the gguf's embedded MTP head (when SPEC_TYPE=draft-mtp); "
+                             "'hf://<org>/<repo>/<file>' or a bare '<file>' against --model-repo "
+                             "for a separate --model-draft")
+    parser.add_argument("--vision-model", default=VISION_MODEL,
+                        help="'none' = no vision; 'hf://<org>/<repo>/<file>' or a bare '<file>' "
+                             "for the mmproj projector (~1 GiB of VRAM)")
+    parser.add_argument("--spec-type", choices=SPEC_TYPE_CHOICES, default=SPEC_TYPE,
+                        help="speculation mode: draft-mtp (embedded or separate MTP head), "
+                             "ngram-mod (n-gram self-speculation, no MTP needed), none (off)")
+    parser.add_argument("--ctx-size", default="90000",
+                        help="env CTX_SIZE (90000 = the Q5_K_M/3090 fit; 132768 = full, 5090)")
+    parser.add_argument("--disk-size", type=float, default=50.0,
+                        help="disk in GiB, CREATE path only (resources are not patchable)")
+    parser.add_argument("--memory-size", type=float, default=16.0,
+                        help="memory in GB, CREATE path only (resources are not patchable)")
+    parser.add_argument("--no-claude-template", action="store_true",
+                        help="env CLAUDE_TEMPLATE=none — serve the gguf's embedded chat "
+                             "template as-is, no Claude Code patch (default CLAUDE_TEMPLATE=1 "
+                             "applies the one-line mid-conversation-system patch at startup)")
+    parser.add_argument("--no-start", action="store_true", help="apply config only, do not start")
+    return parser.parse_args()
+
+
+def resolve_gpu_class(choice: str, classes: tuple[GpuClassInfo, ...]) -> GpuClassInfo:
+    """Match 'rtx5090' to a class named e.g. 'RTX 5090 (32 GB)' exactly.
+
+    Normalization strips the parenthesized VRAM suffix and lowercases/removes
+    spaces, so 'RTX 5090 Laptop (24 GB)' does NOT match choice 'rtx5090'.
+    """
+    target = choice.lower()
+    for gpu_class in classes:
+        base = gpu_class.name.split("(")[0].strip().lower().replace(" ", "")
+        if base == target:
+            return gpu_class
+    available = ", ".join(c.name for c in classes)
+    raise ValueError(f"GPU class {choice!r} not found among available classes: {available}")
+
+
+def load_hf_token(path: str = HF_TOKEN_FILE) -> str | None:
+    """Read + validate the HF token from hft.txt (never printed).
+
+    Validation is one whoami-v2 call; a token the Hub rejects is not sent
+    (it would only produce an 'unauthenticated requests' warning in the
+    container, and an explicit invalid --token is no one's friend).
+    """
+    try:
+        with open(path, encoding="utf-8") as f:
+            token = f.read().strip()
+    except OSError:
+        return None
+    if not token:
+        return None
+    req = urllib.request.Request(
+        "https://huggingface.co/api/whoami-v2",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            return token if resp.status == 200 else None
+    except (urllib.error.URLError, OSError):
+        return None
+
+
+def build_env(name: str, ctx_size: str, model_repo: str, model_file: str,
+              model_alias: str, draft_model: str, vision_model: str,
+              spec_type: str, hf_token: str | None,
+              claude_template: str = "1") -> dict[str, str]:
+    """Full env for the group (create sets it, PATCH replaces it wholesale).
+
+    The generic image is model-agnostic: MODEL_REPO / MODEL_FILE /
+    MODEL_ALIAS / CTX_SIZE select the model per group, and DRAFT_MODEL /
+    VISION_MODEL (default 'none') opt into the hf-downloaded auxiliary
+    models. SPEC_TYPE picks the speculation mode explicitly — draft-mtp on
+    an embedded-MTP gguf with DRAFT_MODEL=none runs the in-gguf head (the
+    derived draft-present/absent two-way would have downgraded it to
+    ngram-mod).
+
+    CLAUDE_TEMPLATE: '1' (default) = at startup the image dumps the chat
+    template from the freshly downloaded gguf and applies the one-line
+    Claude Code patch (mid-conversation system messages) via
+    --chat-template-file; 'none' = serve the gguf's embedded template as-is.
+    """
+    env = {
+        "GPU_ID": "0",
+        "MODEL_REPO": model_repo,
+        "MODEL_FILE": model_file,
+        # Hybrid model (1 in 4 layers is full attention): q8_0 KV ≈ 35 KiB/token
+        # — ~3.0 GiB at the 90000 default, ~4.6 GiB at 132768.
+        "CTX_SIZE": ctx_size,
+        "N_GPU_LAYERS": "99",
+        "NAME": name,
+        "MODEL_ALIAS": model_alias,
+        # Optional auxiliary models — "none" = off (never empty: the
+        # SaladCloud API rejects empty env values, minLength 1).
+        "DRAFT_MODEL": draft_model,
+        "VISION_MODEL": vision_model,
+        "SPEC_TYPE": spec_type,
+        # Claude Code template: '1' = dump the gguf's own template at startup
+        # and apply the one-line mid-conversation-system patch (--no-claude-
+        # template sends 'none' -> embedded template as-is).
+        "CLAUDE_TEMPLATE": claude_template,
+    }
+    if hf_token:
+        env["HF_TOKEN"] = hf_token
+    return env
+
+
+def redact(env: dict[str, str]) -> dict[str, str]:
+    """Mask secrets for printing (HF_TOKEN is the only secret in the env)."""
+    return {k: "<REDACTED>" if k == "HF_TOKEN" else v for k, v in env.items()}
+
+
+def get_group(org: str, project: str, group: str):
+    try:
+        return get_container_group(org, project, group)
+    except SaladApiError as e:
+        if e.status_code == 404:
+            return None
+        raise
+
+
+def wait_for(status: str, timeout_s: int, org: str, project: str, group: str) -> None:
+    deadline = time.time() + timeout_s
+    while time.time() < deadline:
+        current = get_container_group(org, project, group)
+        if current.current_status == status:
+            return
+        print(f"      status={current.current_status!r} (waiting for {status!r}) ...", flush=True)
+        time.sleep(10)
+    raise TimeoutError(f"group did not reach {status!r} within {timeout_s} s")
+
+
+def wait_until_not_pending(timeout_s: int, org: str, project: str, group: str) -> str:
+    """Wait out the create-path 'pending' window (start 400s while pending).
+
+    A freshly created group is 'pending' and the API refuses START with
+    HTTP 400 'not allowed while in a Pending status' until it settles.
+    Returns the status we settled on.
+    """
+    deadline = time.time() + timeout_s
+    while time.time() < deadline:
+        current = get_container_group(org, project, group)
+        if current.current_status != "pending":
+            return current.current_status
+        print(f"      status={current.current_status!r} (waiting for the group to settle) ...", flush=True)
+        time.sleep(15)
+    raise TimeoutError(f"group was still 'pending' after {timeout_s} s — not started")
+
+
+def print_group(after) -> str:
+    """Print the group's config (env redacted); return the gateway DNS."""
+    c = after.raw["container"]
+    net = after.raw.get("networking") or {}
+    cenv = dict(c.get("environment_variables") or {})
+    print(f"      name={after.name!r} status={after.current_status!r}")
+    print(f"      image={c['image']!r}")
+    print(f"      resources={c['resources']}")
+    print(f"      env={redact(cenv)}")
+    print(f"      replicas={after.raw['replicas']} restart_policy={after.raw['restart_policy']} "
+          f"priority={after.raw.get('priority')} autostart={after.raw.get('autostart_policy')} "
+          f"scheduled_scaling={after.raw.get('scheduled-scaling-enabled')}")
+    print(f"      readiness_probe={after.raw.get('readiness_probe')}")
+    print(f"      networking port={net.get('port')} protocol={net.get('protocol')} "
+          f"auth={net.get('auth')} dns={net.get('dns')!r}")
+    return net.get("dns")
+
+
+def main() -> int:
+    args = parse_args()
+    org = args.org
+    project = args.project
+    group = args.group
+
+    print(f"[1/5] resolving GPU class(es) {args.gpu!r} in org {org!r}")
+    gpu_classes = list_gpu_classes(org)
+    gpus = tuple(resolve_gpu_class(c, gpu_classes) for c in args.gpu)
+    print("      -> " + ", ".join(f"{g.name!r} ({g.id})" for g in gpus))
+
+    print("[2/5] loading HF token (validated, never printed)")
+    hf_token = load_hf_token()
+    print(f"      token {'validated' if hf_token else 'UNAVAILABLE — model download will run unauthenticated'}")
+    env = build_env(group, args.ctx_size, args.model_repo, args.model_file,
+                    args.model_alias, args.draft_model, args.vision_model,
+                    args.spec_type, hf_token,
+                    claude_template="none" if args.no_claude_template else "1")
+
+    existing = get_group(org, project, group)
+    if existing is not None:
+        print(f"[3/5] group exists (status={existing.current_status!r}, "
+              f"image={existing.raw['container']['image']!r}) — updating in place "
+              f"(DNS stays stable for clients)")
+        if not args.no_start and existing.current_status in ("running", "scaling"):
+            print("      stopping group before PATCH")
+            stop_container_group(StopContainerGroupRequest(
+                organization_name=org,
+                project_name=project,
+                container_group_name=group,
+            ))
+            wait_for("stopped", 120, org, project, group)
+            print("      stopped")
+        if args.no_start and existing.current_status in ("running", "scaling"):
+            print("      NOTE: --no-start while running — the PATCH takes effect on the next start")
+        result = update_container_group(
+            org, project, group,
+            UpdateContainerGroupRequest(
+                image=args.image,
+                gpu_classes=tuple(g.id for g in gpus),
+                environment_variables=env,
+                readiness_probe=dict(READINESS_PROBE),
+            ),
+        )
+        print(f"      HTTP {result.status_code} {result.reason_phrase} status={result.current_status!r}")
+    else:
+        print(f"[3/5] group absent — creating (memory={int(round(args.memory_size * 1024))} MB, "
+              f"disk={int(round(args.disk_size * 1024**3))} bytes, "
+              f"gpu={[g.name for g in gpus]!r})")
+        try:
+            proj = create_project(org, project)
+            print(f"      created project via POST -> HTTP {proj.status_code}")
+        except SaladApiError as e:
+            if e.status_code in (404, 409):
+                print(f"      project endpoint HTTP {e.status_code} — using existing project")
+            else:
+                raise
+        request = CreateContainerGroupRequest(
+            name=group,
+            display_name=group,
+            autostart_policy=False,
+            replicas=1,
+            restart_policy="always",
+            container_image=args.image,
+            command=(),
+            environment_variables=env,
+            cpu=8,
+            memory_mb=int(round(args.memory_size * 1024)),
+            gpu_classes=tuple(g.id for g in gpus),
+            shm_size=64,
+            storage_amount=int(round(args.disk_size * 1024**3)),
+            image_caching=True,
+            priority="low",
+            networking={
+                "auth": True,
+                "client_request_timeout": 100000,
+                "server_response_timeout": 100000,
+                "port": 8888,
+                "protocol": "http",
+                "load_balancer": "round_robin",
+                "single_connection_limit": False,
+            },
+            readiness_probe=dict(READINESS_PROBE),
+            scheduled_scaling_enabled=True,
+        )
+        created = create_container_group(org, project, request)
+        print(f"      HTTP {created.status_code} {created.reason_phrase} "
+              f"id={created.id!r} status={created.current_status!r}")
+
+    print("[4/5] verifying group config")
+    dns = print_group(get_group(org, project, group))
+
+    if args.no_start:
+        print("OK: group config applied (NOT started, per --no-start)")
+        return 0
+
+    print("[5/5] starting group")
+    # Create path: a fresh group is 'pending' and START 400s until it settles.
+    if get_group(org, project, group).current_status == "pending":
+        settled = wait_until_not_pending(600, org, project, group)
+        print(f"      settled to {settled!r}")
+    started = start_container_group(StartContainerGroupRequest(
+        organization_name=org,
+        project_name=project,
+        container_group_name=group,
+    ))
+    print(f"      start -> HTTP {started.status_code} {started.reason_phrase}; dns={dns!r}")
+    print("      waiting for running (container up; the model may still be downloading — "
+          "a cold worker re-downloads the main model, ~18.8 GiB for ATX Q5_K_M, "
+          "plus the optional draft/vision if set)...")
+    wait_for("running", 1800, org, project, group)
+    print_group(get_group(org, project, group))
+    print("OK: group running. 'running' means the container process is up —")
+    print(f"      1. verify the LIVE build in-container: version.sh should print")
+    print(f"         'lmss generic-v1 (hf runtime download, claude-template) 2026-10-05'")
+    print(f"      2. PID1 cmdline should carry --spec-type {args.spec_type}"
+          + (f" --model-draft ..." if args.draft_model != "none" else " (no --model-draft, "
+             f"DRAFT_MODEL={args.draft_model})")
+          + (f" --mmproj ..." if args.vision_model != "none" else " (no --mmproj)")
+          + f" --alias {args.model_alias}")
+    print(f"      3. gateway answers only after the probe passes (/ready, ~40-min window, first probe at 30 s):")
+    print(f"         docker/docker_tests/curl2_salad.sh -url https://{dns} -m {args.model_alias}")
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except (SaladApiError, ValueError, TimeoutError) as e:
+        print(f"FAIL: {e}", file=sys.stderr)
+        sys.exit(1)

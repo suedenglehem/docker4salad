@@ -1,0 +1,241 @@
+# =============================================================================
+# lmss_generic   (name spelling confirmed before push)
+#
+# The GENERIC model image: FROM boris271142/lmss:cuda128-v3 with NO baked
+# models. At runtime everything is downloaded from HuggingFace via the fast
+# `hf` xet path — the large main model AND the optional MTP draft and vision
+# projector. It is the generic counterpart of lmss_jonathancoletti_qwen38_
+# q6_mtp_vision (which bakes the 27B draft+vision into the image layers and
+# always runs them); this image is model-agnostic, so it can serve ANY gguf
+# whose auxiliary files (if it has any) live on the Hub.
+#
+#   baked (build time):  nothing model-related (the v3 runtime base only)
+#   runtime download:    the main model, + optional draft (DRAFT_MODEL),
+#                        + optional vision projector (VISION_MODEL)
+#
+# The v3 DRAFT_MODEL_URL / VISION_MODEL_URL mechanism (full URL + wget2,
+# miserable speed) is GONE. The new DRAFT_MODEL / VISION_MODEL envs take a
+# model REF instead:
+#   * "none" (default)                      -> the feature is off
+#   * "hf://<org>/<repo>/<file>"            -> that repo + file
+#   * "<file>" (bare, no hf://)             -> the file in MODEL_REPO
+# A set ref is downloaded with `hf download` (same tool, same xet fast path,
+# same optional --token as the main model) into MODEL_DIR, then passed to
+# llama-server as --model-draft / --mmproj. The "none" sentinel (never
+# empty) matches the image's other feature conventions; the SaladCloud API
+# rejects empty env values (minLength 1).
+#
+# SPECULATIVE DECODING — controlled by the NEW SPEC_TYPE env (three-way):
+#   * SPEC_TYPE=draft-mtp (default)         -> --spec-type draft-mtp
+#     --spec-draft-n-max ${SPEC_DRAFT_N_MAX}; the gguf's EMBEDDED MTP head is
+#     used in place when DRAFT_MODEL is none, or the separate downloaded
+#     draft is passed via --model-draft when DRAFT_MODEL is set.
+#   * SPEC_TYPE=ngram-mod                    -> --spec-type ngram-mod
+#     (n-match 24 / n-min 48 / n-max 64 — the v3 multistage fallback params):
+#     n-gram self-speculation, no MTP head needed.
+#   * SPEC_TYPE=none                         -> no speculative decoding at all.
+# The explicit mode is what makes embedded-MTP ggufs work without a separate
+# draft file (e.g. ATX-Swift Q5_K_M: draft-mtp + DRAFT_MODEL=none) — the old
+# derived two-way (draft present -> draft-mtp, else ngram-mod) would have
+# downgraded such a model to ngram-mod.
+#
+# CLAUDE TEMPLATE — same as the v5 qwen3.8 image: CLAUDE_TEMPLATE=none
+# (default) serves the gguf's embedded template (or the static CHAT_TEMPLATE
+# path if a group sets one); CLAUDE_TEMPLATE set (any value != "none") makes
+# startup dump the chat template from the freshly downloaded gguf and apply
+# the one-line Claude Code patch (mid-conversation system messages) via
+# --chat-template-file.
+#
+# MODEL SELECTION is 100% group-env driven: the deployer (deploy_generic.py)
+# sets MODEL_REPO / MODEL_FILE / MODEL_ALIAS / CTX_SIZE per group. The image
+# inherits the v3 base defaults (JonathanColetti Qwen3.8 noMTP-Q4_K_M) only
+# so a bare `docker run` behaves exactly like v3.
+#
+# BUILD (context = REPO ROOT — claude_template.sh + version.sh are COPYed
+# from docker/docker_tests/; nothing is downloaded at build time, no token):
+#   docker build -f docker/Dockerfile.lmss_generic -t lmss_generic:dev .
+#
+# PUSH (NEW repo name = fresh Salad worker cache key; then pin the
+# manifest-list digest in deploy_generic.py for the airtight re-pull lever):
+#   docker tag  lmss_generic:dev boris271142/lmss_generic:cuda128-v1
+#   docker push boris271142/lmss_generic:cuda128-v1
+# =============================================================================
+
+FROM boris271142/lmss:cuda128-v3
+
+# Build id for /usr/local/bin/version.sh (same file the v3 image writes).
+# The default lives in the RUN (shell ${ARG:-default}), NOT in the ARG line —
+# a Dockerfile ARG default cannot carry unquoted spaces (it truncates to the
+# first word, e.g. "lmss q6-mtp..." -> "lmss"). Override with
+# --build-arg LMSS_BUILD_ID="..." for a per-push id.
+ARG LMSS_BUILD_ID
+RUN printf '%s\n' "${LMSS_BUILD_ID:-lmss generic-v1 (hf runtime download, claude-template) 2026-10-05}" > /etc/llama-image-build
+
+# --- Claude Code template: dump+patch script (repo-root build context) ------
+# Zero dependencies (stdlib Python only); copied in and run at STARTUP, not at
+# build time. COPYed from docker/docker_tests/ (hence the repo-root context).
+COPY docker/docker_tests/claude_template.sh ${LLAMA_CPP_DIR}/claude_template.sh
+
+# --- version.sh: overwrite the stale v3-baked copy --------------------------
+# The v3 base ships an older version.sh (grep-based env dump, '>= 3 guards'
+# fingerprint that misclassifies newer images). This one adds the full env
+# table (every var the container reads: effective vs baked default, group-set
+# marked, secrets redacted) and marker-based fingerprint classification. The
+# exec bit is set on the source file, so COPY lands it executable.
+COPY docker/docker_tests/version.sh /usr/local/bin/version.sh
+
+# --- New control knobs --------------------------------------------------------
+# DRAFT_MODEL: optional separate MTP draft model for --model-draft. "none"
+# (default) = off (with SPEC_TYPE=draft-mtp the gguf's embedded MTP head is
+# used in place). "hf://<org>/<repo>/<file>" or a bare "<file>" (against
+# MODEL_REPO); downloaded at runtime with `hf` when missing.
+ENV DRAFT_MODEL=none
+# VISION_MODEL: optional multimodal projector (mmproj) GGUF for --mmproj.
+# Same ref syntax as DRAFT_MODEL; "none" (default) = off (the projector costs
+# ~1 GiB of VRAM, so it stays off unless the card has the headroom).
+ENV VISION_MODEL=none
+# SPEC_TYPE: the speculation mode — draft-mtp (default) | ngram-mod | none.
+# See the SPECULATIVE DECODING section above.
+ENV SPEC_TYPE=draft-mtp
+# CLAUDE_TEMPLATE: "none" (default) -> the gguf's embedded template (or the
+# static CHAT_TEMPLATE path if the group sets one). Any other value -> at
+# startup the freshly downloaded gguf's chat template is dumped and the
+# one-line Claude Code patch applied (see CLAUDE TEMPLATE section above); the
+# patched file overrides CT.
+ENV CLAUDE_TEMPLATE=none
+
+# --- Runtime CMD -------------------------------------------------------------
+# The v3 CMD with the wget2 DRAFT_MODEL_URL / VISION_MODEL_URL blocks replaced
+# by `hf` downloads driven by the DRAFT_MODEL / VISION_MODEL refs, and the
+# derived two-way spec-type replaced by the explicit three-way SPEC_TYPE.
+# Everything else (socat, run_api.py, the CHAT_TEMPLATE + CLAUDE_TEMPLATE
+# CT block, the full llama-server argv) is identical to v3/v5.
+CMD ["/bin/bash", "-lc", "\
+set -euo pipefail; \
+mkdir -p \"${MODEL_DIR}\" \"${API_STATE_DIR}\"; \
+nohup python3 run_api.py >>\"${API_STATE_DIR}/api.log\" 2>&1 & \
+# Forward all IPv6 TCP :8888 -> 127.0.0.1:8080 (llama-server) and \
+# :8889 -> 127.0.0.1:9999 (status API). TCP6-LISTEN binds [::]:<port>. \
+nohup socat TCP6-LISTEN:8888,fork,reuseaddr TCP4:127.0.0.1:8080 >>\"${API_STATE_DIR}/socat.log\" 2>&1 & \
+nohup socat TCP6-LISTEN:8889,fork,reuseaddr TCP4:127.0.0.1:9999 >>\"${API_STATE_DIR}/socat2.log\" 2>&1 & \
+# Model ref resolver for the optional auxiliary models: ref \"none\"/empty -> \
+# off (returns 1); \"hf://<org>/<repo>/<file>\" -> repo id <org>/<repo> + file \
+# <file...> (subdirectories kept); bare \"<file...>\" -> the file in \
+# MODEL_REPO. Sets the globals REPO_REF / FILE_REF; the download itself is \
+# `hf` (same fast xet path + optional token as the main model) — the v3 wget2 \
+# URL mechanism is gone. \
+resolve_model_ref() { \
+  ref=\"${1:-}\"; REPO_REF=\"\"; FILE_REF=\"\"; \
+  case \"$ref\" in \
+    \"\"|none) return 1 ;; \
+    hf://*) \
+      rest=\"${ref#hf://}\"; \
+      REPO_REF=\"${rest%%/*}\"; \
+      rest=\"${rest#*/}\"; \
+      REPO_REF=\"${REPO_REF}/${rest%%/*}\"; \
+      FILE_REF=\"${rest#*/}\"; \
+      ;; \
+    *) \
+      REPO_REF=\"${MODEL_REPO}\"; FILE_REF=\"$ref\"; \
+      ;; \
+  esac; \
+}; \
+# Main model: the big runtime download (fast hf xet path). \
+if [ ! -f \"${MODEL_DIR}/${MODEL_FILE}\" ]; then \
+  # /startup flips to ok from here on (flag is read by api_app.py). \
+  touch \"${API_STATE_DIR}/download_started\"; \
+  hf download \
+    \"${MODEL_REPO}\" \
+    \"${MODEL_FILE}\" \
+    --local-dir \"${MODEL_DIR}\" \
+    ${HF_TOKEN:+--token \"$HF_TOKEN\"}; \
+else \
+  # Main model already present (container restart): mark started, no wait. \
+  touch \"${API_STATE_DIR}/download_started\"; \
+fi; \
+# Optional MTP draft model: DRAFT_MODEL is \"none\" (off), \
+# \"hf://<org>/<repo>/<file>\", or a bare file against MODEL_REPO. Downloaded \
+# with `hf` when missing; a failed download dies loudly (set -euo pipefail). \
+DRAFT_PATH=; \
+if resolve_model_ref \"${DRAFT_MODEL}\"; then \
+  DRAFT_PATH=\"${MODEL_DIR}/${FILE_REF}\"; \
+  if [ ! -f \"${DRAFT_PATH}\" ]; then \
+    hf download \"${REPO_REF}\" \"${FILE_REF}\" --local-dir \"${MODEL_DIR}\" ${HF_TOKEN:+--token \"$HF_TOKEN\"}; \
+  fi; \
+fi; \
+# Optional multimodal projector (vision): VISION_MODEL, same ref syntax. \
+VISION_PATH=; \
+if resolve_model_ref \"${VISION_MODEL}\"; then \
+  VISION_PATH=\"${MODEL_DIR}/${FILE_REF}\"; \
+  if [ ! -f \"${VISION_PATH}\" ]; then \
+    hf download \"${REPO_REF}\" \"${FILE_REF}\" --local-dir \"${MODEL_DIR}\" ${HF_TOKEN:+--token \"$HF_TOKEN\"}; \
+  fi; \
+fi; \
+# Custom chat template: CT holds the effective path (empty when disabled). \
+CT=; \
+if [ -n \"${CHAT_TEMPLATE}\" ] && [ \"${CHAT_TEMPLATE}\" != \"none\" ]; then \
+  CT=\"${CHAT_TEMPLATE}\"; \
+fi; \
+# Claude Code template: when CLAUDE_TEMPLATE is enabled (set, not \"none\"), \
+# dump the chat template from the freshly downloaded gguf and apply the \
+# one-line Claude patch. The script's stdout is the patched file's path and \
+# OVERRIDES CT, so the single --chat-template-file flag below emits exactly \
+# once. Runs AFTER the download block above (the model file must exist) and \
+# re-runs cheaply on container restart (header-only scan). Non-Qwen gguf (no \
+# raise-marker) -> script exits 0 with empty stdout: CT stays as the \
+# CHAT_TEMPLATE block left it (embedded fallback). Hard error -> exit 1 -> \
+# container dies loudly under set -euo pipefail. \
+if [ -n \"${CLAUDE_TEMPLATE}\" ] && [ \"${CLAUDE_TEMPLATE}\" != \"none\" ]; then \
+  CT=\"$(\"${LLAMA_CPP_DIR}/claude_template.sh\" \"${MODEL_DIR}/${MODEL_FILE}\" \"${API_STATE_DIR}/claude_chat_template.jinja\" 2>>\"${API_STATE_DIR}/claude_template.log\")\"; \
+fi; \
+# Speculative decoding mode (SPEC_TYPE, three-way — see the header): \
+#   draft-mtp: embedded MTP head in place, or the separate draft via \
+#     --model-draft when DRAFT_MODEL resolved to a file; \
+#   ngram-mod: n-gram self-speculation (v3 multistage fallback params); \
+#   none:     no speculative decoding. \
+SPEC=; \
+case \"${SPEC_TYPE}\" in \
+  draft-mtp) \
+    SPEC=\"--spec-type draft-mtp --spec-draft-n-max ${SPEC_DRAFT_N_MAX}\"; \
+    if [ -n \"${DRAFT_PATH}\" ]; then SPEC=\"${SPEC} --model-draft ${DRAFT_PATH}\"; fi; \
+    ;; \
+  ngram-mod) \
+    SPEC=\"--spec-type ngram-mod --spec-ngram-mod-n-match 24 --spec-ngram-mod-n-min 48 --spec-ngram-mod-n-max 64\"; \
+    ;; \
+  none) SPEC=; ;; \
+  *) echo \"llama-image: unknown SPEC_TYPE '${SPEC_TYPE}' (want draft-mtp|ngram-mod|none)\" >&2; exit 1; ;; \
+esac; \
+exec ${LLAMA_CPP_DIR}/build/bin/llama-server \
+  --model \"${MODEL_DIR}/${MODEL_FILE}\" \
+  --alias \"${MODEL_ALIAS}\" \
+  --host \"${HOST}\" \
+  --port \"${PORT}\" \
+  --ctx-size \"${CTX_SIZE}\" \
+  --jinja \
+  # Custom chat template only when enabled (CT non-empty). CT is a FILE \
+  # PATH -> --chat-template-file (the inline --chat-template flag would \
+  # treat the path as the literal template text: prompt degenerates to the \
+  # path string and the model loops on it). \
+  ${CT:+--chat-template-file \"${CT}\"} \
+  --cache-prompt \
+  # Speculation flags from SPEC_TYPE (empty when SPEC_TYPE=none). \
+  ${SPEC} \
+  # Multimodal projector (vision) only when enabled (see VISION_PATH above). \
+  ${VISION_PATH:+--mmproj \"${VISION_PATH}\"} \
+  --parallel 1 \
+  --cont-batching \
+  --metrics \
+  --temp 0.1 \
+  --top-p 0.95 \
+  --min-p 0.05 \
+  --repeat-penalty 1.0 \
+  --flash-attn on \
+  ${API_KEY:+--api-key \"$API_KEY\"} \
+  --cache-type-k q8_0 \
+  --cache-type-v q8_0 \
+  --main-gpu \"${GPU_ID}\" \
+  --n-gpu-layers \"${N_GPU_LAYERS}\" \
+  --threads \"${THREADS}\" \
+  --batch-size \"${BATCH_SIZE}\" \
+  --ubatch-size \"${UBATCH_SIZE}\" \
+"]
