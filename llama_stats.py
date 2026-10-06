@@ -7,8 +7,9 @@ not in it) and the image installs a copy at /usr/local/bin/llama_stats.py
 (wrapped by stats.sh). This file only delegates, so there is one source of
 truth:
 
-    python3 llama_stats.py https://<group>.salad.cloud [--raw] [--interval 2]
-    python3 llama_stats.py http://127.0.0.1:8080        # local server
+    python3 llama_stats.py https://<group>.salad.cloud  # loops every 5s, Ctrl-C stops
+    python3 llama_stats.py http://127.0.0.1:8080 --once # local server, single scrape
+    # flags: [--raw] [--once | --interval N]
 
 Salad-Api-Key is auto-loaded from salad_api.txt for *.salad.cloud targets.
 """

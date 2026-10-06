@@ -103,11 +103,13 @@ MODEL_ALIAS = "atx-swift-27b"
 # Digest-pinned: the API accepts the @sha256 ref verbatim, and it is the
 # airtight lever against the worker image cache (keyed by repo NAME — a tag
 # re-push can serve stale layers on workers that cached the old one). This
-# is the cuda128-v1 push (2026-10-05, build id 'lmss generic-v1 (hf runtime
-# download, claude-template) 2026-10-05'); the tag form, for humans:
-#   boris271142/lmss_generic:cuda128-v1
+# is the cuda128-v2 push (2026-10-06, build id 'lmss generic-v2 (hf runtime
+# download, claude-template, stats) 2026-10-06' — built FROM the stats-enabled
+# base, so the image now carries stats.sh + llama_stats.py); the tag form, for
+# humans:
+#   boris271142/lmss_generic:cuda128-v2
 IMAGE = "boris271142/lmss_generic" \
-        "@sha256:f1b3ded2a6cd454316db4d0304d7e7868e5baa9321d01e7def3a933d9b4f4d0e"
+        "@sha256:6bfddecd207fd8c3a8fa0b29aabb664e79b39a421ddca4e7ba79fe7044f604ef"
 
 MODEL_REPO = "bjivanovich/ATX-Swift-1.5-Qwen3.8-27B-Uncensored-MTP-GGUF"
 # Q5_K_M — MTP head embedded in the gguf (the 'MTP' in the repo name), so no
@@ -449,7 +451,7 @@ def main() -> int:
     print_group(get_group(org, project, group))
     print("OK: group running. 'running' means the container process is up —")
     print(f"      1. verify the LIVE build in-container: version.sh should print")
-    print(f"         'lmss generic-v1 (hf runtime download, claude-template) 2026-10-05'")
+    print(f"         'lmss generic-v2 (hf runtime download, claude-template, stats) 2026-10-06'")
     print(f"      2. PID1 cmdline should carry --spec-type {args.spec_type}"
           + (f" --model-draft ..." if args.draft_model != "none" else " (no --model-draft, "
              f"DRAFT_MODEL={args.draft_model})")

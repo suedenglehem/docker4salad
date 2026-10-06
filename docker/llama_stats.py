@@ -19,7 +19,9 @@ If the server was started with --api-key, pass the LLM key too:
 `--api-key KEY` or env `API_KEY`.
 
 `--raw` dumps the raw Prometheus body (useful when a newer llama.cpp build
-renames metrics); `--interval N` re-scrapes every N seconds (Ctrl-C stops).
+renames metrics). By default it re-scrapes every 5 seconds (Ctrl-C stops);
+`--once` (or `--interval 0`) makes it a single scrape, `--interval N`
+changes the period.
 
 Metric names below were verified 2026-10-06 against a live server from the
 pinned llama.cpp build (commit 3af988fa, build b10572); anything else under
@@ -168,7 +170,9 @@ def main(argv: list) -> None:
     args = list(argv[1:])
     raw = "--raw" in args
     args = [a for a in args if a != "--raw"]
-    interval = 0.0
+    interval = 5.0
+    once = "--once" in args
+    args = [a for a in args if a != "--once"]
     if "--interval" in args:
         i = args.index("--interval")
         try:
@@ -176,6 +180,8 @@ def main(argv: list) -> None:
         except (IndexError, ValueError):
             sys.exit("usage: --interval N (seconds)")
         del args[i:i + 2]
+    if once:
+        interval = 0.0
     api_key = os.environ.get("API_KEY") or None
     if "--api-key" in args:
         i = args.index("--api-key")
