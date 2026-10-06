@@ -96,7 +96,7 @@ timeout 30 docker compose up -d
 | `N_GPU_LAYERS` | Keep `99` for full offload; lower only if the GPU is shared and you want some layers on CPU (slower) |
 | `THREADS` / `BATCH_SIZE` / `UBATCH_SIZE` | Rarely needed; leave as-is unless tuning throughput |
 | `HF_TOKEN` | Only if the repo is gated or HF rate-limits you (`hf auth token` to get one) |
-| `API_KEY` | llama-server's auth key. The run scripts read it from `api.txt` in this folder (chmod 600); missing file → server runs without key auth. `curl1.sh` / `curl2.sh` also read api.txt for their Bearer header |
+| `API_KEY` | llama-server's auth key. The run scripts read it from `api.txt` in this folder (they cd here first; chmod 600); missing file → server runs without key auth. `curl1.sh` / `curl2.sh` (in `tests/`) read it through the local `tests/api.txt` symlink |
 
 Notes:
 - The `timeout 30` wrapper just guards against a hung build — with the image already built, `up -d` returns in seconds. Drop it if you prefer.
@@ -108,7 +108,7 @@ Notes:
 The 9B server is a second compose service (`qwen38-9b`, host port **8081**), pinned to the RTX 4060 Ti via `device_ids: ["1"]`. Same image as the 27B; only env vars differ.
 
 ```bash
-cd /dd2/andrei/docker/on_salad/docker && ./run_9b.sh   # default: RTX 4060 Ti (nvidia-smi index 1)
+cd /dd2/andrei/docker/on_salad/docker/tests && ./run_9b.sh   # default: RTX 4060 Ti (nvidia-smi index 1)
 ./run_9b.sh 0                                                       # run it on a different card instead
 ```
 
@@ -150,7 +150,7 @@ The 27B Claude Code backend: org `ma-casa-in-paris`, project `qwen38-27b`, one *
 - **Deploy**: `python3 deploy_qwen38_27b.py` (repo root) — create-or-update in place (stop when running → PATCH image + full env → start), which keeps the group's DNS stable. A bare run re-applies exactly the production profile above (the built-in defaults are it) — idempotent against the live group. Flags: `--org`, `--project`, `--group`, `--gpu rtx5090|rtx3090`, `--model-file`, `--ctx-size`, `--image`, `--use-draft-model`, `--no-claude-template`, `--no-start`. Caveat: the PATCH sends env **wholesale** (and resources are not patchable at all), so every value comes from the flags/defaults, not from whatever is currently live — if you change the group's env out-of-band, update the defaults before the next deploy run.
 - **Cold start**: every stop→start re-downloads the main model (~10 min observed for Q5_K_M, ~26 min for Q6_K) — the probe window above is sized for it.
 - **HF token**: `hft.txt` next to the deploy scripts (gitignored, chmod 600). The deployer validates it (`whoami-v2`) and, if it passes, adds `HF_TOKEN` to the group env; the image CMD forwards it to `hf download` (authenticated, faster pulls). Missing/invalid → skipped with a warning, anonymous download (fine for public repos). Never printed.
-- **Smoke test**: `./claude/curl2_salad.sh -url corn-cabbage-2yk4e98r3rx752n0.salad.cloud -m qwen38-27b` (canary question `27*43?` → `1161`).
+- **Smoke test**: `./claude/curl_salad.sh -url corn-cabbage-2yk4e98r3rx752n0.salad.cloud -m qwen38-27b` (canary question `27*43?` → `1161`).
 - **Claude Code against it**: `cl_salad [GATEWAY_URL]` — or `cl_salad_deploy` when the group is asleep (it starts and waits for it). See [Service scripts](#service-scripts).
 
 ### Other live groups (all stopped as of 2026-10-06)
@@ -204,7 +204,7 @@ All four take `--org` / `--project` / `--group` (defaults are the groups they're
 
 Stdlib-only; listens on **127.0.0.1 only** (it holds the Salad key — never exposed to the network). Claude Code speaks the Anthropic Messages API; llama-server is OpenAI-only. The proxy translates `POST /v1/messages` → `/v1/chat/completions` and the response back (SSE streaming or JSON), maps `tool_use` / `tool_result` ↔ `tool_calls` / `role:tool`, injects the `Salad-Api-Key` header on every upstream request (read from the key file, never printed), and disables Qwen "thinking" by default so the model emits clean answers rather than a long reasoning preamble (`--thinking 1` to change). Also serves `GET /v1/models` and `GET /healthz`.
 
-Other helpers — local ones in `docker/`: `curl1.sh` / `curl2.sh` (API check / question→answer on :8080 / :8081, read `api.txt` for the Bearer header), `check_status.sh`, `question.sh`, `run-nvidia-smi.sh`, and `version.sh` (in-container build fingerprint + env table — the live check for the image-cache caveat above); Salad-gateway ones in `claude/`: `curl2_salad.sh` (the same smoke test against a gateway, with the key) and `chat_salad.sh` (`llm` chat through the proxy).
+Other helpers — local run/test ones in `docker/tests/`: `run_27b.sh` / `run_9b*.sh` (compose/run helpers, see above), `curl1.sh` / `curl2.sh` (API check / question→answer on :8080 / :8081, read `api.txt` for the Bearer header — via a local symlink), and `run-nvidia-smi.sh`; the rest of the local ones in `docker/`: `check_status.sh` (status-API probe on :9999 / :9998), `question.sh`, `version.sh` (in-container build fingerprint + env table — the live check for the image-cache caveat above), and `stats.sh` (in-container llama-server stats — tps/queue/totals scraped from `/metrics`; the parser is `llama_stats.py`, also installed in the image and mirrored by the repo-root `llama_stats.py` for Salad-gateway URLs from the host); Salad-gateway ones in `claude/`: `curl_salad.sh` (the same smoke test against a gateway, with the key) and `chat_salad.sh` (`llm` chat through the proxy).
 
 ## Verify
 
@@ -246,7 +246,7 @@ Bind address: `API_HOST` (default `0.0.0.0`, IPv4-only). This machine has Docker
 ```bash
 docker compose logs -f qwen38-llama   # follow server logs (qwen38-9b for the smoke test)
 docker compose ps                     # status + port mapping
-docker compose up -d qwen38-9b        # start just the 9B server (or ./run_9b.sh)
+docker compose up -d qwen38-9b        # start just the 9B server (or ./tests/run_9b.sh)
 docker compose down                   # stop and remove containers + downloaded models
 
 # Debug tools inside the container: curl, ssh, vi, htop, nvtop (GPU monitor)
@@ -276,14 +276,14 @@ docker push boris271142/lmss:cuda128-v3
 ```
 
 On the remote machine (needs Docker + nvidia-container-toolkit):
-1. Copy the `docker/` folder over (compose file, `Dockerfile.multistage`, the app files it COPYs, `run_*.sh`, `api.txt`).
+1. Copy the `docker/` folder over (compose file, `Dockerfile.multistage`, the app files it COPYs, `tests/run_*.sh`, `api.txt`).
 2. In docker-compose.yml set both services' `image:` to `boris271142/lmss:cuda128-v3` (the `build:` block then just becomes a local-rebuild fallback).
 3. Pull and start — the model downloads from HF on first run:
 
 ```bash
 docker login   # Docker Hub, if the repo is private
 docker pull boris271142/lmss:cuda128-v3
-./run_9b.sh    # or ./run_27b.sh; pass the GPU_ID arg for that machine's card layout
+./tests/run_9b.sh    # or ./tests/run_27b.sh; pass the GPU_ID arg for that machine's card layout
 ```
 
 Air-gapped (no registry access): `docker save boris271142/lmss:cuda128-v3 | ssh remote 'docker load'`.

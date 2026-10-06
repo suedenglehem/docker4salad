@@ -8,7 +8,7 @@ tombstone (salad-group-name-tombstone memory) — still 400 name_conflict
 24h+ after its 2026-10-01 DELETE, so the user approved the name
 'qwen38-27b-Q6K'; the API name pattern is lowercase-only, hence
 'qwen38-27b-q6k'. The served alias stays 'qwen38-27b' (MODEL_ALIAS env,
-llama-server --alias), so clients and curl2_salad.sh -m are unaffected.
+llama-server --alias), so clients and curl_salad.sh -m are unaffected.
 
 Serves the baked image `lmss_jonathancoletti_qwen38_q6_mtp_vision` (a
 FROM boris271142/lmss:cuda128-v3 extension, Dockerfile.lmss_q6_mtp_vision):
@@ -111,7 +111,7 @@ PROJECT_NAME = "qwen38-27b"
 # 'qwen38-27b' itself is stuck in the DELETE name-conflict tombstone.
 GROUP_NAME = "qwen38-27b-q6k"
 # Served model name (llama-server --alias) — deliberately NOT the group
-# name; curl2_salad.sh -m and the Claude Code client reference it.
+# name; curl_salad.sh -m and the Claude Code client reference it.
 MODEL_ALIAS = "qwen38-27b"
 
 # Digest-pinned: the API accepts the @sha256 ref verbatim, and it is the
@@ -261,7 +261,7 @@ def build_env(name: str, ctx_size: str, use_draft_model: str, hf_token: str | No
         "CTX_SIZE": ctx_size,
         "N_GPU_LAYERS": "99",
         "NAME": name,
-        # Served alias stays 'qwen38-27b' (clients + curl2_salad.sh -m),
+        # Served alias stays 'qwen38-27b' (clients + curl_salad.sh -m),
         # independent of the group name.
         "MODEL_ALIAS": MODEL_ALIAS,
         # Claude Code template: '1' = dump the gguf's own template at startup
@@ -456,7 +456,7 @@ def main() -> int:
           f"{'(no --model-draft, USE_DRAFT_MODEL=none)' if args.use_draft_model == 'none' else '--model-draft ...draft-Q8_0.gguf'} "
           f"--alias {MODEL_ALIAS}")
     print(f"      3. gateway answers only after the probe passes (/ready, ~40-min window, first probe at 30 s):")
-    print(f"         claude/curl2_salad.sh -url https://{dns} -m {MODEL_ALIAS}")
+    print(f"         claude/curl_salad.sh -url https://{dns} -m {MODEL_ALIAS}")
     return 0
 
 

@@ -456,7 +456,7 @@ def main() -> int:
           + (f" --mmproj ..." if args.vision_model != "none" else " (no --mmproj)")
           + f" --alias {args.model_alias}")
     print(f"      3. gateway answers only after the probe passes (/ready, ~40-min window, first probe at 30 s):")
-    print(f"         claude/curl2_salad.sh -url https://{dns} -m {args.model_alias}")
+    print(f"         claude/curl_salad.sh -url https://{dns} -m {args.model_alias}")
     return 0
 
 

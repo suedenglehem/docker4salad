@@ -267,7 +267,7 @@ def anthropic_to_openai(body, up):
         payload["stream"] = True
         payload["stream_options"] = {"include_usage": True}
     if not up.thinking:
-        # keep the Qwen answer clean; the smoke test (curl2_salad.sh) used this too
+        # keep the Qwen answer clean; the smoke test (curl_salad.sh) used this too
         payload["chat_template_kwargs"] = {"enable_thinking": False}
     return payload
 

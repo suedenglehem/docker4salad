@@ -29,7 +29,9 @@ The two keys to the whole setup:
 | **`cl_salad_deploy`** | `claude/` | **The deploy half.** Looks up the group's status, starts it if stopped (costs), waits for the model, then hands off to `cl_salad`. |
 | **`salad_proxy.py`** | `claude/` | Stdlib Anthropic↔OpenAI bridge. Injects `Salad-Api-Key`, translates requests + streaming SSE + tool calls. Run by `cl_salad`. |
 | `version.sh` | `docker/` | Run **inside a running instance** (via SSH) to confirm *which build* is actually live and what it's downloading. |
-| `curl2_salad.sh` | `claude/` | Quick smoke test — asks the running model 2-3 simple questions through the gateway. |
+| `stats.sh` | `docker/` | Run **inside a running instance**: llama-server stats — tps, queue, token totals (scrapes the local `/metrics`). |
+| `llama_stats.py` | repo root | Same stats **from the host**, against a Salad gateway URL (key auto-loaded) or a local server. |
+| `curl_salad.sh` | `claude/` | Quick smoke test — asks the running model 2-3 simple questions through the gateway. |
 | `salad_client.py` | repo root | Stdlib-only SaladCloud OpenAPI client (create/start/stop/delete/patch groups, GPU classes, projects). |
 | `deploy_qwen38_27b.py` | repo root | **Canonical 27B deployer** — creates/updates the `qwen38-27b-q6k` group (baked MTP + vision image, main model fetched at runtime) and starts it. |
 | `deploy_qwen38_9b.py` / `deploy_qwen9b.py` | repo root | 9B deployers (`qwen38-9b`, `qwen9b`) — plain, no draft/vision/template. |
@@ -184,13 +186,31 @@ ssh <salad worker>            # from the Salad UI / CLI
 version.sh                     # → build id, sentinel guards, /models, downloads
 ```
 
-### `curl2_salad.sh` — quick smoke test
+### `stats.sh` / `llama_stats.py` — server stats (tps, queue, totals)
+
+Scrapes `/metrics` (every Dockerfile enables `--metrics`):
+
+```bash
+# inside a running instance (Salad SSH or docker exec):
+stats.sh                     # one-shot
+stats.sh --interval 2        # live view (Ctrl-C to stop)
+
+# from the host, against a Salad gateway (key auto-loaded from salad_api.txt):
+python3 llama_stats.py https://<group>.salad.cloud
+```
+
+Generation/prompt tps, processing/deferred requests, token totals, max sequence
+length, and — when a draft model is enabled — spec-decode accept rate. `--raw`
+dumps the raw Prometheus body; `llamacpp:*` metrics not rendered above are
+listed under "other" so a rename in a future llama.cpp build is visible.
+
+### `curl_salad.sh` — quick smoke test
 
 Asks the running model a couple of simple questions through the public gateway.
 Fastest way to confirm the model is up and answering.
 
 ```bash
-./claude/curl2_salad.sh -url https://<gateway> -m qwen38-27b
+./claude/curl_salad.sh -url https://<gateway> -m qwen38-27b
 ```
 
 - `-url` — the gateway access domain. `-p` — public port, **default 443** (the
@@ -262,7 +282,7 @@ cl_salad_deploy    # group might be asleep → start it, wait, then claude
 ### 2. Smoke-test with curl
 
 ```bash
-./claude/curl2_salad.sh -url https://<gateway> -m qwen38-27b
+./claude/curl_salad.sh -url https://<gateway> -m qwen38-27b
 ```
 
 Expect short correct answers to the built-in questions. If you get an empty
@@ -279,7 +299,7 @@ python3 deploy_qwen38_27b.py --gpu rtx5090      # switch card (re-point + restar
 ```
 
 After a deploy, "running" only means the **container process** is up — the model
-may still be downloading. Confirm readiness with `curl2_salad.sh`, and confirm the
+may still be downloading. Confirm readiness with `curl_salad.sh`, and confirm the
 **live build** with `version.sh` in the container.
 
 ### 4. Verify what's actually running
@@ -337,6 +357,7 @@ curl -s https://<gateway>/v1/models -H "Salad-Api-Key: $(tr -d '[:space:]' < cla
 ```
 on_salad/
 ├── salad_client.py                 # SaladCloud OpenAPI client (stdlib)
+├── llama_stats.py                  # stats entry point (delegates to docker/llama_stats.py)
 ├── deploy_qwen38_27b.py            # canonical 27B deployer (qwen38-27b-q6k)
 ├── deploy_qwen38_9b.py / deploy_qwen9b.py   # 9B deployers
 ├── patch_qwen38_9b_rescue.py       # one-off digest-pinned rescue
@@ -347,16 +368,20 @@ on_salad/
 │   ├── Dockerfile.lmss_q6_mtp_vision # baked MTP draft + mmproj vision extension
 │   ├── qwen3.8.q6.jinja            # permissive chat template (shipped in image)
 │   ├── api_app.py                  # status API on :9999 (/startup /live /ready)
-│   ├── run_api.py
+│   ├── run_api.py                  # status-API entrypoint (COPYed in — a build file)
 │   ├── version.sh                  # in-container build/download inspector
+│   ├── stats.sh / llama_stats.py   # in-container stats (tps/queue/totals) via /metrics
 │   ├── docker-compose.yml          # local 27B + 9B services
-│   ├── run_27b.sh / run_9b*.sh     # local run helpers
+│   ├── tests/                      # local run/test helpers
+│   │   ├── run_27b.sh / run_9b*.sh # local run helpers
+│   │   ├── curl1.sh / curl2.sh     # API check / question→answer
+│   │   └── run-nvidia-smi.sh
 │   └── README.md                   # Docker / local-run details (image, compose, probes)
 ├── claude/
 │   ├── cl_salad                    # ★ Claude Code runner (dies if gateway dead)
 │   ├── cl_salad_deploy             # ★ deploy half: start + wait, then cl_salad
 │   ├── salad_proxy.py              # Anthropic↔OpenAI bridge
-│   ├── curl2_salad.sh              # gateway smoke test
+│   ├── curl_salad.sh               # gateway smoke test
 │   └── salad_api.txt               # gateway key (gitignored)
 └── docs/
     ├── README.md                   # ← this file
@@ -376,7 +401,7 @@ Three key files, all **gitignored** and `chmod 600`, none ever printed:
 
 | File | What it is | Used by |
 |---|---|---|
-| `salad_api.txt` | SaladCloud API key → `Salad-Api-Key` header | `cl_salad`, `cl_salad_deploy`, `salad_proxy.py`, `curl2_salad.sh`, `salad_client.py`, deploy scripts |
+| `salad_api.txt` | SaladCloud API key → `Salad-Api-Key` header | `cl_salad`, `cl_salad_deploy`, `salad_proxy.py`, `curl_salad.sh`, `salad_client.py`, deploy scripts |
 | `hft.txt` | HuggingFace token (validated, added to group env for authenticated downloads) | deploy/update scripts |
 | `api.txt` | llama-server Bearer key (only if the model needs one) | local run scripts |
 

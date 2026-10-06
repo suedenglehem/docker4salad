@@ -13,7 +13,7 @@
 #     Only sent when passed — the deployed group runs llama-server without a
 #     key, so the header is omitted by default.
 #
-# Usage: ./curl2_salad.sh -url URL [-p PORT] [-api APIKEY] [-m MODEL]
+# Usage: ./curl_salad.sh -url URL [-p PORT] [-api APIKEY] [-m MODEL]
 #   -url URL    SaladCloud access domain, e.g. "https://raisin-bean-...salad.cloud"
 #   -p PORT     port of the PUBLIC endpoint (default 443 — the access domain is
 #               fronted by Cloudflare, which only proxies standard ports). Do NOT

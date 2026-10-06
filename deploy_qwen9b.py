@@ -40,7 +40,7 @@ index 0 inside the container.
 MODEL_ALIAS=qwen9b so the served model registers under a name that is
 unambiguous in /v1/models and in the request body's "model" field (the image's
 built-in default alias is qwen38-27b). llama-server matches the model name
-loosely, so curl2_salad.sh's default -m qwen still works too.
+loosely, so curl_salad.sh's default -m qwen still works too.
 
 SALAD_API_KEY is read from salad_api.txt by salad_client (never printed).
 
@@ -257,7 +257,7 @@ def main() -> int:
     print(f"        from salad_client import StartContainerGroupRequest, start_container_group")
     print(f"        start_container_group(StartContainerGroupRequest('{org}','{project}','{group}'))")
     print(f"      Once it has a live instance, smoke-test with:")
-    print(f"      claude/curl2_salad.sh -url https://{net.get('dns')} -m {args.model_alias}")
+    print(f"      claude/curl_salad.sh -url https://{net.get('dns')} -m {args.model_alias}")
     return 0
 
 

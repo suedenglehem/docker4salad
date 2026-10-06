@@ -34,7 +34,7 @@ gets 120 s + 20 x 60 s (~22 min) before being failed, which covers the ~5.4 GB
 model download. NO 1200 s initial delay.
 
 MODEL_ALIAS=qwen9b (kept from the old group) so the existing smoke test
-curl2_salad.sh -url https://<dns> -m qwen9b keeps working against the new DNS.
+curl_salad.sh -url https://<dns> -m qwen9b keeps working against the new DNS.
 
 SALAD_API_KEY is read from salad_api.txt by salad_client (never printed).
 
@@ -132,7 +132,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--model-file", default="Qwen3.8-9B-Q4_K_M.gguf", help="env MODEL_FILE")
     parser.add_argument("--model-alias", default="qwen9b",
                         help='env MODEL_ALIAS (the name the model registers under; kept "qwen9b" '
-                             "so the existing curl2_salad.sh -m qwen9b smoke test keeps working)")
+                             "so the existing curl_salad.sh -m qwen9b smoke test keeps working)")
     parser.add_argument("--ctx-size", default="32768", help="env CTX_SIZE")
     parser.add_argument("--n-gpu-layers", default="99", help="env N_GPU_LAYERS")
     parser.add_argument("--gpu-id", default="0",
@@ -287,7 +287,7 @@ def main() -> int:
     print(f"        from salad_client import StartContainerGroupRequest, start_container_group")
     print(f"        start_container_group(StartContainerGroupRequest('{org}','{project}','{group}'))")
     print(f"      Once it has a live instance, smoke-test with:")
-    print(f"      claude/curl2_salad.sh -url https://{net.get('dns')} -m {args.model_alias}")
+    print(f"      claude/curl_salad.sh -url https://{net.get('dns')} -m {args.model_alias}")
     return 0
 
 

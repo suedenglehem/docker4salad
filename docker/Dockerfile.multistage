@@ -202,10 +202,17 @@ COPY qwen3.8.q6.jinja ${LLAMA_CPP_DIR}/qwen3.8.q6.jinja
 #                 active downloads. Run it from an SSH session to verify which
 #                 build a Salad worker is actually serving (the worker image
 #                 cache can serve an older image under the same repo name).
+#   stats.sh    - llama-server statistics (generation/prompt tps, queue,
+#                 token totals, spec-decode) scraped from the local
+#                 /metrics endpoint (llama_stats.py, also on PATH).
+#                 `stats.sh --interval 2` for a live view.
 COPY llm.sh /usr/local/bin/llm.sh
 COPY question.sh /usr/local/bin/question.sh
 COPY version.sh /usr/local/bin/version.sh
+COPY llama_stats.py /usr/local/bin/llama_stats.py
+COPY stats.sh /usr/local/bin/stats.sh
 RUN chmod +x /usr/local/bin/llm.sh /usr/local/bin/question.sh /usr/local/bin/version.sh \
+    /usr/local/bin/llama_stats.py /usr/local/bin/stats.sh \
     && printf '#!/bin/sh\nexec ps -p 1 -o etime=\n' > /usr/local/bin/uptime \
     && chmod +x /usr/local/bin/uptime
 
