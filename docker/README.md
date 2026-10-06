@@ -27,7 +27,7 @@ A Salad group's env **replaces** the image env wholesale, so a plain deployment 
 
 ## Qwen3.8
 
-Everything in this section is specific to the Qwen3.8 27B/9B line. The image and the [deployers](#deployers) are model-agnostic — any GGUF repo works with `deploy_generic.py`.
+Everything in this section is specific to the Qwen3.8 27B/9B line. The image and the [deployers](#deployers) are model-agnostic — any GGUF repo works with `deploy/deploy_generic.py`.
 
 ### Choosing quant + context length by VRAM
 
@@ -96,7 +96,7 @@ timeout 30 docker compose up -d
 | `N_GPU_LAYERS` | Keep `99` for full offload; lower only if the GPU is shared and you want some layers on CPU (slower) |
 | `THREADS` / `BATCH_SIZE` / `UBATCH_SIZE` | Rarely needed; leave as-is unless tuning throughput |
 | `HF_TOKEN` | Only if the repo is gated or HF rate-limits you (`hf auth token` to get one) |
-| `API_KEY` | llama-server's auth key. The run scripts read it from `api.txt` in this folder (they cd here first; chmod 600); missing file → server runs without key auth. `curl1.sh` / `curl2.sh` (in `tests/`) read it through the local `tests/api.txt` symlink |
+| `API_KEY` | llama-server's auth key. The run scripts read it from `api.txt` in this folder (they cd here first; chmod 600); missing file → server runs without key auth. `curl1.sh` / `curl2.sh` (in `tests/` at the repo root) read it through the local `tests/api.txt` symlink |
 
 Notes:
 - The `timeout 30` wrapper just guards against a hung build — with the image already built, `up -d` returns in seconds. Drop it if you prefer.
@@ -108,7 +108,7 @@ Notes:
 The 9B server is a second compose service (`qwen38-9b`, host port **8081**), pinned to the RTX 4060 Ti via `device_ids: ["1"]`. Same image as the 27B; only env vars differ.
 
 ```bash
-cd /dd2/andrei/docker/on_salad/docker/tests && ./run_9b.sh   # default: RTX 4060 Ti (nvidia-smi index 1)
+cd /dd2/andrei/docker/on_salad/tests && ./run_9b.sh   # default: RTX 4060 Ti (nvidia-smi index 1)
 ./run_9b.sh 0                                                       # run it on a different card instead
 ```
 
@@ -135,7 +135,7 @@ Common shape of every group here:
 - **On-demand**: autostart off + scheduled scaling — groups sit stopped (no cost) until someone starts them.
 - **The worker image cache is keyed by REPO NAME**, not tag or digest: a re-pushed tag can still serve a stale image on workers that cached the old one (observed live on `lmss:cuda128` on 2026-10-01). Never overwrite a tag a worker may hold; the airtight lever is a digest-pinned `@sha256:` ref to a digest no worker has seen (the API accepts it verbatim — both smart deployers pin digests). With a plain tag, verify the live build with `version.sh` in the container.
 - **DELETE leaves a name tombstone**: recreating a just-deleted group name 400s `name_conflict` for 10+ min. A fresh group name works immediately; keep `MODEL_ALIAS` stable so clients don't notice.
-- **Keys & projects**: `SALAD_API_KEY` comes from `salad_api.txt` (repo root, gitignored, never printed), read by the stdlib-only `salad_client.py`; one key covers every org on the account. Projects have no API create endpoint (web UI only), but container-group creation auto-creates a missing project, which the deployers rely on.
+- **Keys & projects**: `SALAD_API_KEY` comes from `deploy/salad_api.txt` (gitignored, never printed), read by the stdlib-only `salad_client.py` (repo root); one key covers every org on the account. Projects have no API create endpoint (web UI only), but container-group creation auto-creates a missing project, which the deployers rely on.
 
 ### Production 27B group: `qwen38-27b-q6k`
 
@@ -147,7 +147,7 @@ The 27B Claude Code backend: org `ma-casa-in-paris`, project `qwen38-27b`, one *
 - **Gateway**: `https://corn-cabbage-2yk4e98r3rx752n0.salad.cloud` (443, `Salad-Api-Key` header).
 - The group name `q6k` is a leftover from the original Q6_K deploy and is kept — renaming means delete + recreate = new DNS + the name-tombstone dance.
 
-- **Deploy**: `python3 deploy_qwen38_27b.py` (repo root) — create-or-update in place (stop when running → PATCH image + full env → start), which keeps the group's DNS stable. A bare run re-applies exactly the production profile above (the built-in defaults are it) — idempotent against the live group. Flags: `--org`, `--project`, `--group`, `--gpu rtx5090|rtx3090`, `--model-file`, `--ctx-size`, `--image`, `--use-draft-model`, `--no-claude-template`, `--no-start`. Caveat: the PATCH sends env **wholesale** (and resources are not patchable at all), so every value comes from the flags/defaults, not from whatever is currently live — if you change the group's env out-of-band, update the defaults before the next deploy run.
+- **Deploy**: `python3 deploy/deploy_qwen38_27b.py` — create-or-update in place (stop when running → PATCH image + full env → start), which keeps the group's DNS stable. A bare run re-applies exactly the production profile above (the built-in defaults are it) — idempotent against the live group. Flags: `--org`, `--project`, `--group`, `--gpu rtx5090|rtx3090`, `--model-file`, `--ctx-size`, `--image`, `--use-draft-model`, `--no-claude-template`, `--no-start`. Caveat: the PATCH sends env **wholesale** (and resources are not patchable at all), so every value comes from the flags/defaults, not from whatever is currently live — if you change the group's env out-of-band, update the defaults before the next deploy run.
 - **Cold start**: every stop→start re-downloads the main model (~10 min observed for Q5_K_M, ~26 min for Q6_K) — the probe window above is sized for it.
 - **HF token**: `hft.txt` next to the deploy scripts (gitignored, chmod 600). The deployer validates it (`whoami-v2`) and, if it passes, adds `HF_TOKEN` to the group env; the image CMD forwards it to `hf download` (authenticated, faster pulls). Missing/invalid → skipped with a warning, anonymous download (fine for public repos). Never printed.
 - **Smoke test**: `./claude/curl_salad.sh -url corn-cabbage-2yk4e98r3rx752n0.salad.cloud -m qwen38-27b` (canary question `27*43?` → `1161`).
@@ -157,15 +157,15 @@ The 27B Claude Code backend: org `ma-casa-in-paris`, project `qwen38-27b`, one *
 
 | Group | Project | Deployer | What it runs | Gateway |
 |---|---|---|---|---|
-| `qwen38-27b-q5` | `qwen38-27b` | `deploy_qwen38_27b.py --group` | v5 test/canary, same profile as prod | `starfruit-watercress-1wnfoj9fdzbao3xj.salad.cloud` |
-| `qwen38-9b` | `qwen38-27b` | `deploy_qwen38_9b.py` | plain 9B (Q4_K_M @ 32K), 7 card classes | `parmesan-cayenne-q0cfrqiksj7jhgrp.salad.cloud` |
-| `atx-swift-27b-q5` | `llm` | `deploy_generic.py` | ATX-Swift 27B Q5_K_M @ 90K + vision (the generic image's default profile) | `tamarind-caraway-1rpqcqcnbbkmqdbv.salad.cloud` |
+| `qwen38-27b-q5` | `qwen38-27b` | `deploy/deploy_qwen38_27b.py --group` | v5 test/canary, same profile as prod | `starfruit-watercress-1wnfoj9fdzbao3xj.salad.cloud` |
+| `qwen38-9b` | `qwen38-27b` | `deploy/deploy_qwen38_9b.py` | plain 9B (Q4_K_M @ 32K), 7 card classes | `parmesan-cayenne-q0cfrqiksj7jhgrp.salad.cloud` |
+| `atx-swift-27b-q5` | `llm` | `deploy/deploy_generic.py` | ATX-Swift 27B Q5_K_M @ 90K + vision (the generic image's default profile) | `tamarind-caraway-1rpqcqcnbbkmqdbv.salad.cloud` |
 
 A second org `akl-on-salad` shares the same API key; every deployer takes `--org` / `--project` / `--group` to target it.
 
 ## Service scripts
 
-All of it is stdlib-only Python / POSIX sh. The Salad key is read from `salad_api.txt` by `salad_client.py` and never printed; the HF token comes from `hft.txt` (see above).
+All of it is stdlib-only Python / POSIX sh. The Salad key is read from `deploy/salad_api.txt` by `salad_client.py` (repo root) and never printed; the HF token comes from `deploy/hft.txt` (see above).
 
 ### Deployers
 
@@ -173,15 +173,15 @@ All four take `--org` / `--project` / `--group` (defaults are the groups they're
 
 | Deployer | Default group | Image | Default profile |
 |---|---|---|---|
-| `deploy_qwen38_27b.py` | `qwen38-27b-q6k` | baked q6-mtp-vision `@4089a457` (v5) | **production**: Q5_K_M @ CTX 90000, RTX 3090, `CLAUDE_TEMPLATE=1`, `USE_DRAFT_MODEL=none`, vision on |
-| `deploy_generic.py` | `atx-swift-27b-q5` (project `llm`) | `lmss_generic` `@f1b3ded2` (v1) | ATX-Swift 27B Q5_K_M @ 90000 + vision, RTX 3090 |
-| `deploy_qwen38_9b.py` | `qwen38-9b` | `lmss:cuda128-v3` (plain tag) | plain 9B Q4_K_M @ 32768, **7 card classes**, explicit `none` sentinels |
-| `deploy_qwen9b.py` | `qwen9b` (retired) | `lmss:cuda128-v3` (plain tag) | plain 9B Q4_K_M @ 32768, single RTX 3090, priority batch |
+| `deploy/deploy_qwen38_27b.py` | `qwen38-27b-q6k` | baked q6-mtp-vision `@4089a457` (v5) | **production**: Q5_K_M @ CTX 90000, RTX 3090, `CLAUDE_TEMPLATE=1`, `USE_DRAFT_MODEL=none`, vision on |
+| `deploy/deploy_generic.py` | `atx-swift-27b-q5` (project `llm`) | `lmss_generic` `@f1b3ded2` (v1) | ATX-Swift 27B Q5_K_M @ 90000 + vision, RTX 3090 |
+| `deploy/deploy_qwen38_9b.py` | `qwen38-9b` | `lmss:cuda128-v3` (plain tag) | plain 9B Q4_K_M @ 32768, **7 card classes**, explicit `none` sentinels |
+| `deploy/deploy_qwen9b.py` | `qwen9b` (retired) | `lmss:cuda128-v3` (plain tag) | plain 9B Q4_K_M @ 32768, single RTX 3090, priority batch |
 
-- **`deploy_qwen38_27b.py`** — the canonical deployer for the production group (see [above](#production-27b-group-qwen38-27b-q6k)). `--gpu rtx5090|rtx3090` (repeatable — placement may land on any listed class), `--model-file` swaps the quant, `--use-draft-model none|<file>` (`none` = the gguf's embedded MTP head; a filename = the baked draft, needed for noMTP quants), `--no-claude-template` for non-Claude clients.
-- **`deploy_generic.py`** — model-agnostic: any GGUF repo/file via `--model-repo` / `--model-file`, served name via `--model-alias`. Draft and vision are **opt-in** per group (default `none`): `--draft-model` / `--vision-model` take `none`, `hf://org/repo/file`, or a bare file resolved against `MODEL_REPO`. `--spec-type draft-mtp|ngram-mod|none` selects speculation explicitly — an MTP-embedded gguf without a separate draft file runs `draft-mtp` on its in-gguf head instead of being downgraded to ngram-mod. `--gpu` takes several classes (Salad may place on any). Because nothing is baked, a fresh worker downloads everything (a 27B `hf download` transiently holds ~2× the file → 50 GB disk default).
-- **`deploy_qwen38_9b.py`** — replacement for the broken `qwen9b` group. Plain 9B: the three optional features are set to `none` **explicitly** (v3 env names: `DRAFT_MODEL_URL` / `VISION_MODEL_URL` / `CHAT_TEMPLATE`) rather than relying on the image defaults. Runs on any of RTX 3090 / 3090 Ti / 4090 / 4080 / 5070 Ti / 5080 / 5090; probe 120 s + 20 × 60 s (covers the ~5.4 GB download). **Created in the stopped state** — start it explicitly after creation.
-- **`deploy_qwen9b.py`** — the original 9B deployer (single 3090, priority batch, probe 120 s + 10 × 5 s). Its group was superseded by `qwen38-9b` and has been deleted (as of 2026-10-06); kept as the 9B reference for a single-3090, no-7-class deployment.
+- **`deploy/deploy_qwen38_27b.py`** — the canonical deployer for the production group (see [above](#production-27b-group-qwen38-27b-q6k)). `--gpu rtx5090|rtx3090` (repeatable — placement may land on any listed class), `--model-file` swaps the quant, `--use-draft-model none|<file>` (`none` = the gguf's embedded MTP head; a filename = the baked draft, needed for noMTP quants), `--no-claude-template` for non-Claude clients.
+- **`deploy/deploy_generic.py`** — model-agnostic: any GGUF repo/file via `--model-repo` / `--model-file`, served name via `--model-alias`. Draft and vision are **opt-in** per group (default `none`): `--draft-model` / `--vision-model` take `none`, `hf://org/repo/file`, or a bare file resolved against `MODEL_REPO`. `--spec-type draft-mtp|ngram-mod|none` selects speculation explicitly — an MTP-embedded gguf without a separate draft file runs `draft-mtp` on its in-gguf head instead of being downgraded to ngram-mod. `--gpu` takes several classes (Salad may place on any). Because nothing is baked, a fresh worker downloads everything (a 27B `hf download` transiently holds ~2× the file → 50 GB disk default).
+- **`deploy/deploy_qwen38_9b.py`** — replacement for the broken `qwen9b` group. Plain 9B: the three optional features are set to `none` **explicitly** (v3 env names: `DRAFT_MODEL_URL` / `VISION_MODEL_URL` / `CHAT_TEMPLATE`) rather than relying on the image defaults. Runs on any of RTX 3090 / 3090 Ti / 4090 / 4080 / 5070 Ti / 5080 / 5090; probe 120 s + 20 × 60 s (covers the ~5.4 GB download). **Created in the stopped state** — start it explicitly after creation.
+- **`deploy/deploy_qwen9b.py`** — the original 9B deployer (single 3090, priority batch, probe 120 s + 10 × 5 s). Its group was superseded by `qwen38-9b` and has been deleted (as of 2026-10-06); kept as the 9B reference for a single-3090, no-7-class deployment.
 
 ### `cl_salad` — run Claude Code against a live gateway
 
@@ -204,7 +204,7 @@ All four take `--org` / `--project` / `--group` (defaults are the groups they're
 
 Stdlib-only; listens on **127.0.0.1 only** (it holds the Salad key — never exposed to the network). Claude Code speaks the Anthropic Messages API; llama-server is OpenAI-only. The proxy translates `POST /v1/messages` → `/v1/chat/completions` and the response back (SSE streaming or JSON), maps `tool_use` / `tool_result` ↔ `tool_calls` / `role:tool`, injects the `Salad-Api-Key` header on every upstream request (read from the key file, never printed), and disables Qwen "thinking" by default so the model emits clean answers rather than a long reasoning preamble (`--thinking 1` to change). Also serves `GET /v1/models` and `GET /healthz`.
 
-Other helpers — local run/test ones in `docker/tests/`: `run_27b.sh` / `run_9b*.sh` (compose/run helpers, see above), `curl1.sh` / `curl2.sh` (API check / question→answer on :8080 / :8081, read `api.txt` for the Bearer header — via a local symlink), and `run-nvidia-smi.sh`; the rest of the local ones in `docker/`: `check_status.sh` (status-API probe on :9999 / :9998), `question.sh`, `version.sh` (in-container build fingerprint + env table — the live check for the image-cache caveat above), and `stats.sh` (in-container llama-server stats — tps/queue/totals scraped from `/metrics`; the parser is `llama_stats.py`, also installed in the image and mirrored by the repo-root `llama_stats.py` for Salad-gateway URLs from the host); Salad-gateway ones in `claude/`: `curl_salad.sh` (the same smoke test against a gateway, with the key) and `chat_salad.sh` (`llm` chat through the proxy).
+Other helpers — local run/test ones in `tests/` at the repo root: `run_27b.sh` / `run_9b*.sh` (compose/run helpers, see above), `curl1.sh` / `curl2.sh` (API check / question→answer on :8080 / :8081, read `api.txt` for the Bearer header — via a local symlink), and `run-nvidia-smi.sh`; the rest of the local ones in `docker/`: `check_status.sh` (status-API probe on :9999 / :9998), `question.sh`, `version.sh` (in-container build fingerprint + env table — the live check for the image-cache caveat above), and `stats.sh` (in-container llama-server stats — tps/queue/totals scraped from `/metrics`; the parser is `llama_stats.py`, also installed in the image and mirrored by `utils/llama_stats.py` for Salad-gateway URLs from the host); Salad-gateway ones in `claude/`: `curl_salad.sh` (the same smoke test against a gateway, with the key) and `chat_salad.sh` (`llm` chat through the proxy).
 
 ## Verify
 
@@ -246,7 +246,7 @@ Bind address: `API_HOST` (default `0.0.0.0`, IPv4-only). This machine has Docker
 ```bash
 docker compose logs -f qwen38-llama   # follow server logs (qwen38-9b for the smoke test)
 docker compose ps                     # status + port mapping
-docker compose up -d qwen38-9b        # start just the 9B server (or ./tests/run_9b.sh)
+docker compose up -d qwen38-9b        # start just the 9B server (or ../tests/run_9b.sh)
 docker compose down                   # stop and remove containers + downloaded models
 
 # Debug tools inside the container: curl, ssh, vi, htop, nvtop (GPU monitor)
@@ -276,7 +276,7 @@ docker push boris271142/lmss:cuda128-v3
 ```
 
 On the remote machine (needs Docker + nvidia-container-toolkit):
-1. Copy the `docker/` folder over (compose file, `Dockerfile.multistage`, the app files it COPYs, `tests/run_*.sh`, `api.txt`).
+1. Copy the `docker/` and `tests/` folders over (compose file, `Dockerfile.multistage`, the app files it COPYs, `tests/run_*.sh`, `api.txt`).
 2. In docker-compose.yml set both services' `image:` to `boris271142/lmss:cuda128-v3` (the `build:` block then just becomes a local-rebuild fallback).
 3. Pull and start — the model downloads from HF on first run:
 

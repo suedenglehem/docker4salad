@@ -42,18 +42,23 @@ unambiguous in /v1/models and in the request body's "model" field (the image's
 built-in default alias is qwen38-27b). llama-server matches the model name
 loosely, so curl_salad.sh's default -m qwen still works too.
 
-SALAD_API_KEY is read from salad_api.txt by salad_client (never printed).
+SALAD_API_KEY is read from deploy/salad_api.txt by salad_client (never printed).
 
 Usage:
-    python3 deploy_qwen9b.py
-    python3 deploy_qwen9b.py --ctx-size 65536 --disk-size 20
-    python3 deploy_qwen9b.py --org akl-on-salad
-    python3 deploy_qwen9b.py --project llm --group qwen9b-llm
+    python3 deploy/deploy_qwen9b.py
+    python3 deploy/deploy_qwen9b.py --ctx-size 65536 --disk-size 20
+    python3 deploy/deploy_qwen9b.py --org akl-on-salad
+    python3 deploy/deploy_qwen9b.py --project llm --group qwen9b-llm
 """
 
 import argparse
 import json
+import os
 import sys
+
+# salad_client.py lives at the repo root; running this as deploy/deploy_qwen9b.py
+# puts deploy/ on sys.path, not the root.
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from salad_client import (
     CreateContainerGroupRequest,

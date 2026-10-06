@@ -53,16 +53,16 @@ the stock Qwen template raises on them). --no-claude-template sends 'none',
 which serves the gguf's embedded template as-is (cline/py/opencode).
 Non-Qwen ggufs (no raise-marker) get the patch skipped by the script.
 
-SALAD_API_KEY is read from salad_api.txt by salad_client; HF_TOKEN from
-hft.txt (validated via whoami-v2; neither is ever printed).
+SALAD_API_KEY is read from deploy/salad_api.txt by salad_client; HF_TOKEN from
+hft.txt (next to this script; validated via whoami-v2; neither is ever printed).
 
 Usage:
-    python3 deploy_generic.py                  # ATX-Swift test profile (create-or-update, start)
-    python3 deploy_generic.py --no-start       # apply config only
-    python3 deploy_generic.py --vision-model none            # no vision
-    python3 deploy_generic.py --draft-model hf://<org>/<repo>/<draft.gguf>
-    python3 deploy_generic.py --spec-type ngram-mod          # non-MTP gguf, no draft
-    python3 deploy_generic.py --model-repo <org>/<name> --model-file <quant.gguf> \
+    python3 deploy/deploy_generic.py                  # ATX-Swift test profile (create-or-update, start)
+    python3 deploy/deploy_generic.py --no-start       # apply config only
+    python3 deploy/deploy_generic.py --vision-model none            # no vision
+    python3 deploy/deploy_generic.py --draft-model hf://<org>/<repo>/<draft.gguf>
+    python3 deploy/deploy_generic.py --spec-type ngram-mod          # non-MTP gguf, no draft
+    python3 deploy/deploy_generic.py --model-repo <org>/<name> --model-file <quant.gguf> \
         --model-alias my-model
 """
 
@@ -72,6 +72,10 @@ import sys
 import time
 import urllib.error
 import urllib.request
+
+# salad_client.py lives at the repo root; running this as deploy/deploy_generic.py
+# puts deploy/ on sys.path, not the root.
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from salad_client import (
     CreateContainerGroupRequest,

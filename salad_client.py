@@ -51,7 +51,7 @@ import urllib.request
 from dataclasses import dataclass, field
 
 BASE_URL = "https://api.salad.com/api/public"
-API_KEY_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "salad_api.txt")
+API_KEY_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "deploy", "salad_api.txt")
 
 # The CDN in front of api.salad.com rejects urllib's default User-Agent
 # ("Python-urllib/x.y") with 403 "error code: 1010"; an explicit UA passes.

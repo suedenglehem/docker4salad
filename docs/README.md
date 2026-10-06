@@ -30,11 +30,12 @@ The two keys to the whole setup:
 | **`salad_proxy.py`** | `claude/` | Stdlib Anthropic↔OpenAI bridge. Injects `Salad-Api-Key`, translates requests + streaming SSE + tool calls. Run by `cl_salad`. |
 | `version.sh` | `docker/` | Run **inside a running instance** (via SSH) to confirm *which build* is actually live and what it's downloading. |
 | `stats.sh` | `docker/` | Run **inside a running instance**: llama-server stats — tps, queue, token totals (scrapes the local `/metrics`). |
-| `llama_stats.py` | repo root | Same stats **from the host**, against a Salad gateway URL (key auto-loaded) or a local server. |
+| `utils/llama_stats.py` | `utils/` | Same stats **from the host**, against a Salad gateway URL (key auto-loaded) or a local server. |
 | `curl_salad.sh` | `claude/` | Quick smoke test — asks the running model 2-3 simple questions through the gateway. |
 | `salad_client.py` | repo root | Stdlib-only SaladCloud OpenAPI client (create/start/stop/delete/patch groups, GPU classes, projects). |
-| `deploy_qwen38_27b.py` | repo root | **Canonical 27B deployer** — creates/updates the `qwen38-27b-q6k` group (baked MTP + vision image, main model fetched at runtime) and starts it. |
-| `deploy_qwen38_9b.py` / `deploy_qwen9b.py` | repo root | 9B deployers (`qwen38-9b`, `qwen9b`) — plain, no draft/vision/template. |
+| `deploy/deploy_qwen38_27b.py` | `deploy/` | **Canonical 27B deployer** — creates/updates the `qwen38-27b-q6k` group (baked MTP + vision image, main model fetched at runtime) and starts it. |
+| `deploy/deploy_generic.py` | `deploy/` | Model-agnostic deployer (any GGUF via `--model-repo` / `--model-file`; draft + vision opt-in). |
+| `deploy/deploy_qwen38_9b.py` / `deploy/deploy_qwen9b.py` | `deploy/` | 9B deployers (`qwen38-9b`, `qwen9b`) — plain, no draft/vision/template. |
 | `patch_qwen38_9b_rescue.py` | repo root | One-off: digest-pinned PATCH to force a fresh image onto `qwen38-9b`. |
 
 Everything runs against org **`ma-casa-in-paris`**, project **`qwen38-27b`**.
@@ -195,8 +196,8 @@ Scrapes `/metrics` (every Dockerfile enables `--metrics`):
 stats.sh                     # one-shot
 stats.sh --interval 2        # live view (Ctrl-C to stop)
 
-# from the host, against a Salad gateway (key auto-loaded from salad_api.txt):
-python3 llama_stats.py https://<group>.salad.cloud
+# from the host, against a Salad gateway (key auto-loaded from deploy/salad_api.txt):
+python3 utils/llama_stats.py https://<group>.salad.cloud
 ```
 
 Generation/prompt tps, processing/deferred requests, token totals, max sequence
@@ -236,10 +237,11 @@ Base URL is `https://api.salad.com/api/public`.
 
 ### Deploy & update scripts
 
-All read the Salad key from `salad_api.txt` and (optionally) a HF token from
-`hft.txt` (validated against the Hub, added to the group env, never printed).
+All read the Salad key from `deploy/salad_api.txt` and (optionally) a HF token
+from `deploy/hft.txt` (validated against the Hub, added to the group env,
+never printed).
 
-- **`deploy_qwen38_27b.py`** — the **canonical** 27B deployer. Create-or-update the
+- **`deploy/deploy_qwen38_27b.py`** — the **canonical** 27B deployer. Create-or-update the
   `qwen38-27b-q6k` group on the baked **q6-mtp-vision** image (digest-pinned v4):
   only the main model downloads at runtime (default
   `Qwen3.8-27B-Uncensored-Q5_K_M.gguf`, 18.19 GiB — the MTP head is embedded in
@@ -252,7 +254,7 @@ All read the Salad key from `salad_api.txt` and (optionally) a HF token from
   `--model-file`, `--ctx-size` (`132768` = full 128K-class with a matching quant),
   `--image`, `--use-draft-model` (`none` = use the gguf's embedded MTP head),
   `--no-start` (apply config only), `--disk-size` / `--memory-size` (create path).
-- **`deploy_qwen38_9b.py`** / **`deploy_qwen9b.py`** — 9B (`qwen38-9b` / `qwen9b`),
+- **`deploy/deploy_qwen38_9b.py`** / **`deploy/deploy_qwen9b.py`** — 9B (`qwen38-9b` / `qwen9b`),
   plain: no draft, no vision, no template (the image's `none` sentinel makes that
   the default). `--ctx-size`, `--disk-size`.
 - **`patch_qwen38_9b_rescue.py`** — one-off rescue: PATCH `qwen38-9b` to a
@@ -293,9 +295,9 @@ think (run `version.sh`).
 ### 3. Deploy / re-deploy the Salad group
 
 ```bash
-python3 deploy_qwen38_27b.py                  # create-or-update qwen38-27b-q6k + start
-python3 deploy_qwen38_27b.py --ctx-size 132768      # full context (with a matching quant)
-python3 deploy_qwen38_27b.py --gpu rtx5090      # switch card (re-point + restart)
+python3 deploy/deploy_qwen38_27b.py                  # create-or-update qwen38-27b-q6k + start
+python3 deploy/deploy_qwen38_27b.py --ctx-size 132768      # full context (with a matching quant)
+python3 deploy/deploy_qwen38_27b.py --gpu rtx5090      # switch card (re-point + restart)
 ```
 
 After a deploy, "running" only means the **container process** is up — the model
@@ -357,12 +359,13 @@ curl -s https://<gateway>/v1/models -H "Salad-Api-Key: $(tr -d '[:space:]' < cla
 ```
 on_salad/
 ├── salad_client.py                 # SaladCloud OpenAPI client (stdlib)
-├── llama_stats.py                  # stats entry point (delegates to docker/llama_stats.py)
-├── deploy_qwen38_27b.py            # canonical 27B deployer (qwen38-27b-q6k)
-├── deploy_qwen38_9b.py / deploy_qwen9b.py   # 9B deployers
+├── deploy/                         # create-or-update deployers + the keys they read
+│   ├── deploy_qwen38_27b.py        # canonical 27B deployer (qwen38-27b-q6k)
+│   ├── deploy_generic.py           # model-agnostic (lmss_generic)
+│   ├── deploy_qwen38_9b.py / deploy_qwen9b.py   # 9B deployers
+│   ├── salad_api.txt  hft.txt      # KEYS — gitignored, chmod 600, never printed
 ├── patch_qwen38_9b_rescue.py       # one-off digest-pinned rescue
 ├── repo.txt                        # image repo name (boris271142/lmss)
-├── salad_api.txt  hft.txt  api.txt # KEYS — gitignored, chmod 600, never printed
 ├── docker/
 │   ├── Dockerfile.multistage       # llama.cpp (CUDA + FA + NCCL) image build
 │   ├── Dockerfile.lmss_q6_mtp_vision # baked MTP draft + mmproj vision extension
@@ -372,17 +375,24 @@ on_salad/
 │   ├── version.sh                  # in-container build/download inspector
 │   ├── stats.sh / llama_stats.py   # in-container stats (tps/queue/totals) via /metrics
 │   ├── docker-compose.yml          # local 27B + 9B services
-│   ├── tests/                      # local run/test helpers
-│   │   ├── run_27b.sh / run_9b*.sh # local run helpers
-│   │   ├── curl1.sh / curl2.sh     # API check / question→answer
-│   │   └── run-nvidia-smi.sh
+│   ├── api.txt                     # local LLM key (gitignored, chmod 600)
 │   └── README.md                   # Docker / local-run details (image, compose, probes)
+├── tests/                          # local run/test helpers (run_* cd into docker/ themselves)
+│   ├── run_27b.sh / run_9b*.sh     # local run helpers
+│   ├── curl1.sh / curl2.sh         # API check / question→answer
+│   └── run-nvidia-smi.sh
 ├── claude/
 │   ├── cl_salad                    # ★ Claude Code runner (dies if gateway dead)
 │   ├── cl_salad_deploy             # ★ deploy half: start + wait, then cl_salad
 │   ├── salad_proxy.py              # Anthropic↔OpenAI bridge
 │   ├── curl_salad.sh               # gateway smoke test
 │   └── salad_api.txt               # gateway key (gitignored)
+├── utils/
+│   ├── manage_groups.py            # group manager: list/refresh/start/stop/wait/delete
+│   ├── llama_stats.py              # stats entry point (delegates to docker/llama_stats.py)
+│   ├── billing.py                  # per-org portal credit balances (USD + EUR)
+│   ├── portal_vault.gpg            # billing vault (GPG AES256, gitignored)
+│   └── README.md                   # utils/ helper
 └── docs/
     ├── README.md                   # ← this file
     ├── container_group_create.md   # derived API reference (create group)
@@ -401,9 +411,9 @@ Three key files, all **gitignored** and `chmod 600`, none ever printed:
 
 | File | What it is | Used by |
 |---|---|---|
-| `salad_api.txt` | SaladCloud API key → `Salad-Api-Key` header | `cl_salad`, `cl_salad_deploy`, `salad_proxy.py`, `curl_salad.sh`, `salad_client.py`, deploy scripts |
-| `hft.txt` | HuggingFace token (validated, added to group env for authenticated downloads) | deploy/update scripts |
-| `api.txt` | llama-server Bearer key (only if the model needs one) | local run scripts |
+| `deploy/salad_api.txt` (mirrored in `claude/`) | SaladCloud API key → `Salad-Api-Key` header | `cl_salad`, `cl_salad_deploy`, `salad_proxy.py`, `curl_salad.sh`, `salad_client.py`, deploy scripts |
+| `deploy/hft.txt` | HuggingFace token (validated, added to group env for authenticated downloads) | deploy/update scripts |
+| `docker/api.txt` | llama-server Bearer key (only if the model needs one) | local run scripts |
 
 Before committing, the key files must stay out of the diff — `git check-ignore`
 should confirm each is ignored.

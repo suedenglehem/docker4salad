@@ -62,21 +62,21 @@ Code patch (Anthropic-format requests send system messages mid-conversation;
 the stock Qwen template raises on them). --no-claude-template sends 'none',
 which serves the gguf's embedded template as-is (cline/py/opencode).
 
-SALAD_API_KEY is read from salad_api.txt by salad_client; HF_TOKEN from
-hft.txt (validated via whoami-v2; neither is ever printed).
+SALAD_API_KEY is read from deploy/salad_api.txt by salad_client; HF_TOKEN from
+hft.txt (next to this script; validated via whoami-v2; neither is ever printed).
 
 The built-in defaults ARE the live production profile (2026-10-03):
 Q5_K_M @ CTX_SIZE 90000, digest-pinned cuda128-v5 image (2026-10-05) — a
 bare run re-applies that, idempotent against an existing group.
 
 Usage:
-    python3 deploy_qwen38_27b.py                     # create-or-update, start (live prod profile)
-    python3 deploy_qwen38_27b.py --no-start          # apply config only
-    python3 deploy_qwen38_27b.py --use-draft-model 1 # gguf without MTP head
-    python3 deploy_qwen38_27b.py --model-file Qwen3.8-27B-Uncensored-Q6_K.gguf \
+    python3 deploy/deploy_qwen38_27b.py                     # create-or-update, start (live prod profile)
+    python3 deploy/deploy_qwen38_27b.py --no-start          # apply config only
+    python3 deploy/deploy_qwen38_27b.py --use-draft-model 1 # gguf without MTP head
+    python3 deploy/deploy_qwen38_27b.py --model-file Qwen3.8-27B-Uncensored-Q6_K.gguf \
         --gpu rtx5090 --ctx-size 132768              # other quant/card/ctx combos
-    python3 deploy_qwen38_27b.py --org akl-on-salad  # deploy into another org on the same account
-    python3 deploy_qwen38_27b.py --project llm --group qwen38-27b-q5 --no-start  # a copy elsewhere, not started
+    python3 deploy/deploy_qwen38_27b.py --org akl-on-salad  # deploy into another org on the same account
+    python3 deploy/deploy_qwen38_27b.py --project llm --group qwen38-27b-q5 --no-start  # a copy elsewhere, not started
 """
 
 import argparse
@@ -85,6 +85,10 @@ import sys
 import time
 import urllib.error
 import urllib.request
+
+# salad_client.py lives at the repo root; running this as deploy/deploy_qwen38_27b.py
+# puts deploy/ on sys.path, not the root.
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from salad_client import (
     CreateContainerGroupRequest,

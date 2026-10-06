@@ -2,7 +2,7 @@
 """Manage Salad container groups — list, live-refresh, start, stop, wait, delete.
 
 Usage:
-  python3 manage_groups.py [ACTION] [ORG] [--interval N]
+  python3 utils/manage_groups.py [ACTION] [ORG] [--interval N]
 
   ACTION    list (default)  one-shot status table
             refresh         re-render the table every N seconds (Ctrl-C to stop)
@@ -17,12 +17,12 @@ Usage:
   --interval N
             poll period in seconds for refresh / wait (default 5)
 
-  python3 manage_groups.py                     # status, all known orgs
-  python3 manage_groups.py akl-on-salad        # one org
-  python3 manage_groups.py refresh             # live table, Ctrl-C to stop
-  python3 manage_groups.py delete              # numbered table -> prompt -> confirm
-  python3 manage_groups.py start akl-on-salad  # start a group in that org
-  python3 manage_groups.py wait                # after start: poll until ready
+  python3 utils/manage_groups.py                     # status, all known orgs
+  python3 utils/manage_groups.py akl-on-salad        # one org
+  python3 utils/manage_groups.py refresh             # live table, Ctrl-C to stop
+  python3 utils/manage_groups.py delete              # numbered table -> prompt -> confirm
+  python3 utils/manage_groups.py start akl-on-salad  # start a group in that org
+  python3 utils/manage_groups.py wait                # after start: poll until ready
 
 The SaladCloud API has no list-orgs / list-projects operations, so this walks
 a fixed map of the account's orgs and their projects. Add new projects to
@@ -47,9 +47,14 @@ Notes:
 
 from __future__ import annotations
 
+import os
 import sys
 import time
 from datetime import datetime, timezone
+
+# salad_client.py lives at the repo root; running this as utils/manage_groups.py
+# puts utils/ on sys.path, not the root.
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import salad_client as sc
 
@@ -306,7 +311,7 @@ def _run_action(action: str, sel: tuple[str, str, sc.ContainerGroupInfo], key: s
         if action == "start":
             sc.start_container_group(sc.StartContainerGroupRequest(org, project, name), api_key=key)
             print(f"202 Accepted — {name} is starting.")
-            print(f"wait for it to become ready:  python3 manage_groups.py wait {org}")
+            print(f"wait for it to become ready:  python3 utils/manage_groups.py wait {org}")
             print(
                 f"then run Claude Code:        cl_salad_deploy --org {org} --project {project} --group {name}"
             )
@@ -325,7 +330,7 @@ def _run_action(action: str, sel: tuple[str, str, sc.ContainerGroupInfo], key: s
                 if e.status_code == 404:
                     print("verified: group no longer exists.")
                 else:
-                    print(f"note: verification GET returned HTTP {e.status_code} — re-check with: python3 manage_groups.py")
+                    print(f"note: verification GET returned HTTP {e.status_code} — re-check with: python3 utils/manage_groups.py")
         else:
             return 2
         return 0

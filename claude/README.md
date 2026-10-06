@@ -130,7 +130,7 @@ cannot work as-is. Its default `SALAD_UPSTREAM`
 
 | Key | File | Header | Notes |
 |---|---|---|---|
-| **Salad gateway key** | `salad_api.txt` (here) | `Salad-Api-Key: <key>` on **every** request | Gateway auth; also works against `api.salad.com` management API. Same file is mirrored at the repo root for the deployers. |
+| **Salad gateway key** | `salad_api.txt` (here) | `Salad-Api-Key: <key>` on **every** request | Gateway auth; also works against `api.salad.com` management API. The deployers keep their own copy at `deploy/salad_api.txt` (read by `salad_client.py`). |
 | **LLM key** (optional) | passed via `-api` / `--api-key` / `$API_KEY` | `Authorization: Bearer <key>` | Only if llama-server was started with `--api-key`. The deployed group runs **without** one — the header is simply omitted. |
 
 Both are secrets: gitignored, chmod 600, never printed by the scripts.

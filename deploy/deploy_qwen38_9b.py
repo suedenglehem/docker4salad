@@ -36,18 +36,23 @@ model download. NO 1200 s initial delay.
 MODEL_ALIAS=qwen9b (kept from the old group) so the existing smoke test
 curl_salad.sh -url https://<dns> -m qwen9b keeps working against the new DNS.
 
-SALAD_API_KEY is read from salad_api.txt by salad_client (never printed).
+SALAD_API_KEY is read from deploy/salad_api.txt by salad_client (never printed).
 
 Usage:
-    python3 deploy_qwen38_9b.py
-    python3 deploy_qwen38_9b.py --ctx-size 65536 --disk-size 20
-    python3 deploy_qwen38_9b.py --org akl-on-salad
-    python3 deploy_qwen38_9b.py --project llm --group qwen38-9b-llm
+    python3 deploy/deploy_qwen38_9b.py
+    python3 deploy/deploy_qwen38_9b.py --ctx-size 65536 --disk-size 20
+    python3 deploy/deploy_qwen38_9b.py --org akl-on-salad
+    python3 deploy/deploy_qwen38_9b.py --project llm --group qwen38-9b-llm
 """
 
 import argparse
 import json
+import os
 import sys
+
+# salad_client.py lives at the repo root; running this as deploy/deploy_qwen38_9b.py
+# puts deploy/ on sys.path, not the root.
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from salad_client import (
     CreateContainerGroupRequest,

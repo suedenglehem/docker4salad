@@ -8,13 +8,14 @@ Dockerfiles in this repo pass it):
   wrapped by stats.sh which passes the local URL):
       stats.sh
   From the host, against a local server:
-      python3 llama_stats.py http://127.0.0.1:8080
+      python3 utils/llama_stats.py http://127.0.0.1:8080
   From the host, against a Salad group's Container Gateway:
-      python3 llama_stats.py https://<group>.salad.cloud
+      python3 utils/llama_stats.py https://<group>.salad.cloud
 
 Salad gateways require the Salad API key as a `Salad-Api-Key` header (same
 convention as claude/curl_salad.sh); for a *.salad.cloud target it is
-loaded automatically from salad_api.txt (repo root, or claude/salad_api.txt).
+loaded automatically from salad_api.txt (deploy/salad_api.txt, or
+claude/salad_api.txt).
 If the server was started with --api-key, pass the LLM key too:
 `--api-key KEY` or env `API_KEY`.
 
@@ -28,7 +29,7 @@ pinned llama.cpp build (commit 3af988fa, build b10572); anything else under
 the llamacpp: prefix is printed under "other metrics" so a name change in a
 future build shows up instead of being silently dropped.
 
-The repo-root llama_stats.py is a thin delegator to THIS file: the canonical
+The utils/llama_stats.py is a thin delegator to THIS file: the canonical
 code lives here because it must be inside Dockerfile.multistage's build
 context (context = docker/), which the repo root is not.
 
@@ -48,10 +49,12 @@ USER_AGENT = "llama-stats/1.0"  # the CDN in front of salad.cloud rejects urllib
 TIMEOUT_S = 15
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-# Key-file search order; resolves to repo-root salad_api.txt when the
-# canonical file sits in docker/ (the runpy delegator sets __file__ here).
+# Key-file search order (the runpy delegator sets __file__ here, so .. is the
+# repo root); the deployers' key is deploy/salad_api.txt, claude/ keeps its
+# own copy.
 _SALAD_KEY_CANDIDATES = (
     os.path.join(HERE, "salad_api.txt"),
+    os.path.join(HERE, "..", "deploy", "salad_api.txt"),
     os.path.join(HERE, "..", "salad_api.txt"),
     os.path.join(HERE, "..", "claude", "salad_api.txt"),
 )
@@ -133,7 +136,7 @@ def _http_hint(url: str, code: int) -> str:
     if host.endswith(".salad.cloud") and code in (401, 403):
         return "\nhint: gateway rejected auth — Salad key missing/wrong, or pass --api-key for the LLM key."
     if code == 404:
-        return "\nhint: a Salad group gateway 404s on EVERY path while the group is STOPPED (python3 manage_groups.py)."
+        return "\nhint: a Salad group gateway 404s on EVERY path while the group is STOPPED (python3 utils/manage_groups.py)."
     return ""
 
 
@@ -205,7 +208,7 @@ def main(argv: list) -> None:
             sys.exit(
                 f"cannot reach {url}: {reason}\n"
                 "is llama-server up? (in-container: `docker ps` + logs; "
-                "Salad: is the group RUNNING — `python3 manage_groups.py`)"
+                "Salad: is the group RUNNING — `python3 utils/manage_groups.py`)"
             )
         print(body if raw else render(url, parse_metrics(body)))
         if interval <= 0:

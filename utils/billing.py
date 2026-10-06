@@ -13,13 +13,14 @@ Output is a per-org table in USD plus an EUR column converted at the live ECB
 reference rate (frankfurter.app); if the FX lookup fails, only USD is shown.
 
 Usage:
-  python3 billing.py                 # passphrase from $PORTAL_VAULT_PASS, or prompt
-  PORTAL_VAULT_PASS='...' python3 billing.py
+  python3 utils/billing.py                 # passphrase from $PORTAL_VAULT_PASS, or prompt
+  PORTAL_VAULT_PASS='...' python3 utils/billing.py
 
-The vault (portal_vault.gpg, gitignored) is GPG symmetric AES256 and holds the
-login plus one billing URL per org; every org in it gets a balance line. If no
-vault exists yet, first run prompts for the portal email/password and the org
-slugs, verifies the login against the portal, then encrypts and saves them.
+The vault (utils/portal_vault.gpg, gitignored) is GPG symmetric AES256 and
+holds the login plus one billing URL per org; every org in it gets a balance
+line. If no vault exists yet, first run prompts for the portal email/password
+and the org slugs, verifies the login against the portal, then encrypts and
+saves them.
 """
 
 from __future__ import annotations
