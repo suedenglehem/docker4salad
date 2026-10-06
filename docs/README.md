@@ -36,7 +36,6 @@ The two keys to the whole setup:
 | `deploy/deploy_qwen38_27b.py` | `deploy/` | **Canonical 27B deployer** — creates/updates the `qwen38-27b-q6k` group (baked MTP + vision image, main model fetched at runtime) and starts it. |
 | `deploy/deploy_generic.py` | `deploy/` | Model-agnostic deployer (any GGUF via `--model-repo` / `--model-file`; draft + vision opt-in). |
 | `deploy/deploy_qwen38_9b.py` / `deploy/deploy_qwen9b.py` | `deploy/` | 9B deployers (`qwen38-9b`, `qwen9b`) — plain, no draft/vision/template. |
-| `patch_qwen38_9b_rescue.py` | repo root | One-off: digest-pinned PATCH to force a fresh image onto `qwen38-9b`. |
 
 Everything runs against org **`ma-casa-in-paris`**, project **`qwen38-27b`**.
 
@@ -242,7 +241,7 @@ from `deploy/hft.txt` (validated against the Hub, added to the group env,
 never printed).
 
 - **`deploy/deploy_qwen38_27b.py`** — the **canonical** 27B deployer. Create-or-update the
-  `qwen38-27b-q6k` group on the baked **q6-mtp-vision** image (digest-pinned v4):
+  `qwen38-27b-q6k` group on the baked **q6-mtp-vision** image (digest-pinned v5):
   only the main model downloads at runtime (default
   `Qwen3.8-27B-Uncensored-Q5_K_M.gguf`, 18.19 GiB — the MTP head is embedded in
   the gguf); the MTP draft and mmproj vision projector are baked into the image.
@@ -257,9 +256,6 @@ never printed).
 - **`deploy/deploy_qwen38_9b.py`** / **`deploy/deploy_qwen9b.py`** — 9B (`qwen38-9b` / `qwen9b`),
   plain: no draft, no vision, no template (the image's `none` sentinel makes that
   the default). `--ctx-size`, `--disk-size`.
-- **`patch_qwen38_9b_rescue.py`** — one-off rescue: PATCH `qwen38-9b` to a
-  digest-pinned image (the airtight lever against the stale repo-name cache),
-  falling back to the tag if the API rejects digests, then start.
 
 ---
 
@@ -364,8 +360,6 @@ on_salad/
 │   ├── deploy_generic.py           # model-agnostic (lmss_generic)
 │   ├── deploy_qwen38_9b.py / deploy_qwen9b.py   # 9B deployers
 │   ├── salad_api.txt  hft.txt      # KEYS — gitignored, chmod 600, never printed
-├── patch_qwen38_9b_rescue.py       # one-off digest-pinned rescue
-├── repo.txt                        # image repo name (boris271142/lmss)
 ├── docker/
 │   ├── Dockerfile.multistage       # llama.cpp (CUDA + FA + NCCL) image build
 │   ├── Dockerfile.lmss_q6_mtp_vision # baked MTP draft + mmproj vision extension

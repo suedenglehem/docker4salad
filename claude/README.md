@@ -30,7 +30,7 @@ cl_salad_deploy            cl_salad                    Claude Code
 | **`cl_salad_deploy`** | The **deploy half**. Looks up the group via the Salad management API, starts it if stopped (**this incurs cost**), waits for the model to be ready (default 45 min — a cold start re-downloads the model), then hands off to `cl_salad`. |
 | **`salad_proxy.py`** | Stdlib-only **Anthropic↔OpenAI bridge**, bound to 127.0.0.1 only (it holds the key — never exposed to the network). Translates `/v1/messages` ↔ `/v1/chat/completions`, streaming SSE and tool calls, injects `Salad-Api-Key` on every upstream request. |
 | **`curl_salad.sh`** | **Smoke test**: asks the model 2–3 known-answer questions straight through the gateway (no proxy). Fastest way to confirm a group is up and answering. |
-| **`chat_salad.sh`** | Interactive chat via Simon Willison's `llm` package, through the proxy. ⚠️ **Stale** — see below. |
+| **`chat_salad.sh`** | Interactive chat via Simon Willison's `llm` package, direct against the gateway (`llm -H` carries the Salad-Api-Key). |
 | **`salad_api.txt`** | The Salad API key (67 B). Gitignored, chmod 600, **never printed**. Read by everything above; the gateway rejects requests that lack it. |
 
 `cl_salad` and `cl_salad_deploy` are also available on PATH via
@@ -116,15 +116,18 @@ Continues past a failed question (wants all results, not to stop at the first
 hiccup). Thinking is disabled in the payload — otherwise short max_tokens
 budgets get eaten by reasoning content and the answer comes back empty.
 
-## chat_salad.sh — ⚠️ stale, fix before use
+## chat_salad.sh — chat via the `llm` package
 
-Chat via the `llm` package through the proxy (`./chat_salad.sh` for
-interactive, `./chat_salad.sh "prompt"` one-shot). **Written against the old
-`salad_proxy.py`**: it starts the proxy with **positional args** and polls a
-`__upstream` endpoint — neither exists in the current flag-only proxy, so it
-cannot work as-is. Its default `SALAD_UPSTREAM`
-(`raisin-bean-…salad.cloud`) is also a retired group. Until fixed, use
-`curl_salad.sh` or `cl_salad`.
+Chat with the model from the terminal: `./chat_salad.sh` for interactive,
+`./chat_salad.sh "prompt"` for one-shot; extra args pass through to `llm`
+(e.g. `-s "sys"`). `llm` 0.36+ sends the `Salad-Api-Key` header itself via
+`-H`, so it talks to the gateway **directly** — no proxy (the proxy is the
+Anthropic bridge `cl_salad` uses, and it does not serve OpenAI chat
+completions). Defaults to the production `qwen38-27b-q6k` gateway; point it
+elsewhere with `SALAD_UPSTREAM` / `SALAD_PORT` / `SALAD_MODEL` /
+`SALAD_KEYFILE`. It checks `/v1/models` once and dies (exit 2, hint per
+failure code) if the group is not serving; `SALAD_WAIT=1` polls for up to
+5 min instead, for a group mid cold start.
 
 ## Keys — don't mix them up
 

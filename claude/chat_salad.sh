@@ -1,82 +1,86 @@
 #!/bin/bash
 # Chat with the Qwen3.8-27B running on SaladCloud through Simon Willison's
-# `llm` package, via the local salad_proxy (which injects the Salad-Api-Key
-# header the gateway demands — llm cannot set custom headers itself, and
-# talking to the gateway directly makes llm hang).
+# `llm` package, direct against the public gateway. llm 0.36+ can send the
+# `Salad-Api-Key` header itself (via -H), so no local proxy is needed — the
+# proxy is now the Anthropic bridge that cl_salad uses and does not serve
+# OpenAI chat completions at all.
 #
 # Usage:
-#   ./chat_salad.sh                # interactive chat (--chat)
-#   ./chat_salad.sh "your prompt"  # one-shot, then exit
-#   ./chat_salad.sh -- -s "sys" ...  # everything after -- is passed to llm
+#   ./chat_salad.sh                 # interactive chat
+#   ./chat_salad.sh "your prompt"   # one-shot, then exit
+#   ./chat_salad.sh -s "sys" "prompt"   # extra args pass through to llm
 #
 # Config via env:
-#   SALAD_UPSTREAM   access domain (default raisin-bean-gy0v5oyd2bt9wfvy.salad.cloud)
+#   SALAD_UPSTREAM   access domain (default: the production qwen38-27b-q6k
+#                    gateway corn-cabbage-2yk4e98r3rx752n0.salad.cloud)
 #   SALAD_PORT       public port   (default 443 — Cloudflare only proxies
 #                    standard ports; never the in-container gateway port 8888)
-#   SALAD_PROXY_PORT local proxy port (default 8931)
+#   SALAD_MODEL      model alias   (default qwen38-27b)
+#   SALAD_KEYFILE    file holding the Salad-Api-Key (default: ./salad_api.txt)
 #
-# The proxy is auto-started (or restarted if it points at a stale upstream).
-# Readiness: the gateway's LB only routes to replicas whose readiness probe
-# (GET /ready:8889, run inside the container) passed, so before chatting we
-# poll /health through the proxy — a 200 means a ready replica is serving.
+# Readiness: /v1/models is checked ONCE — 200 means a ready instance is
+# serving. 404 = group stopped or still downloading; 403 = gateway rejects
+# the key/group. If not ready we die (exit 2, hint per code), like cl_salad.
+# Set SALAD_WAIT=1 to poll for up to 5 min instead (group mid cold start).
 set -u
 
-cd "$(dirname "$0")"   # so salad_proxy.py / salad_api.txt resolve
+cd "$(dirname "$0")"   # so salad_api.txt resolves no matter where you call it from
 
-UPSTREAM="${SALAD_UPSTREAM:-raisin-bean-gy0v5oyd2bt9wfvy.salad.cloud}"
+UPSTREAM="${SALAD_UPSTREAM:-corn-cabbage-2yk4e98r3rx752n0.salad.cloud}"
 PORT="${SALAD_PORT:-443}"
-PROXY_PORT="${SALAD_PROXY_PORT:-8931}"
-MODEL="${SALAD_MODEL:-qwen}"
+MODEL="${SALAD_MODEL:-qwen38-27b}"
+KEYFILE="${SALAD_KEYFILE:-salad_api.txt}"
 
-# ---- proxy: start / restart if stale ----------------------------------------
-ensure_proxy() {
-  local expected="https://${UPSTREAM}:${PORT}"
-  local current
-  current="$(curl -s --max-time 2 "http://127.0.0.1:${PROXY_PORT}/__upstream" 2>/dev/null)"
-  if [ "$current" != "$expected" ]; then
-    if [ -f "/tmp/salad_proxy.${PROXY_PORT}.pid" ]; then
-      kill "$(cat "/tmp/salad_proxy.${PROXY_PORT}.pid")" 2>/dev/null || true
-      sleep 1
-    fi
-    nohup python3 salad_proxy.py "${UPSTREAM}:${PORT}" "${PROXY_PORT}" \
-      >>/tmp/salad_proxy.log 2>&1 &
-    for _ in $(seq 1 40); do
-      current="$(curl -s --max-time 2 "http://127.0.0.1:${PROXY_PORT}/__upstream" 2>/dev/null)"
-      [ "$current" = "$expected" ] && return 0
-      sleep 0.5
-    done
-    echo "error: proxy did not come up on port ${PROXY_PORT} (see /tmp/salad_proxy.log)" >&2
-    return 1
-  fi
-  return 0
+if [ ! -f "$KEYFILE" ]; then
+  echo "error: key file $KEYFILE not found (expected next to this script)" >&2
+  exit 1
+fi
+SALAD_KEY="$(tr -d '[:space:]' < "$KEYFILE")"
+
+check() {
+  curl -s -o /dev/null -m 10 -w '%{http_code}' \
+    -H "Salad-Api-Key: $SALAD_KEY" "https://${UPSTREAM}:${PORT}/v1/models" 2>/dev/null
 }
 
-# ---- wait for a ready replica (gateway LB only routes ready ones) -----------
-wait_ready() {
-  local i status
-  for i in $(seq 1 60); do
-    status="$(curl -s --max-time 5 -o /dev/null -w '%{http_code}' "http://127.0.0.1:${PROXY_PORT}/health" 2>/dev/null)"
-    [ "$status" = "200" ] && return 0
-    [ $i -eq 1 ] && echo "waiting for a ready replica at ${UPSTREAM} (probe /ready:8889 inside the box)..."
-    sleep 5
-  done
-  echo "warning: /health not returning 200 after 5 min — trying anyway" >&2
-  return 0
-}
+code="$(check)" || code="000"
+code="${code:-000}"
+i=0
+while [ "$code" != "200" ] && [ "${SALAD_WAIT:-0}" = "1" ] && [ $i -lt 60 ]; do
+  [ $i -eq 0 ] && echo "gateway ${UPSTREAM} not ready (HTTP $code) — waiting up to 5 min (SALAD_WAIT=1)..."
+  sleep 5
+  i=$((i + 1))
+  code="$(check)" || code="000"
+  code="${code:-000}"
+done
 
-ensure_proxy || exit 1
-wait_ready
+if [ "$code" != "200" ]; then
+  echo "chat_salad: gateway $UPSTREAM is not serving (HTTP $code) — not starting chat." >&2
+  case "$code" in
+    000) echo "chat_salad: cannot reach the host at all (DNS / connection)." >&2
+         echo "chat_salad: check the URL, or start the group with cl_salad_deploy." >&2 ;;
+    404) echo "chat_salad: the group is not serving — it is stopped, or the model is" >&2
+         echo "chat_salad: still loading. Start it with cl_salad_deploy (which waits" >&2
+         echo "chat_salad: for readiness) and re-run chat_salad." >&2 ;;
+    403) echo "chat_salad: the gateway rejects this key/group — it may be deleted, or" >&2
+         echo "chat_salad: the URL / key may be wrong. Check with cl_salad_deploy --status." >&2 ;;
+    *)   echo "chat_salad: unexpected response from /v1/models — the group may be" >&2
+         echo "chat_salad: (re)starting. Use cl_salad_deploy, which waits for readiness." >&2 ;;
+  esac
+  exit 2
+fi
 
 # ---- chat --------------------------------------------------------------------
-# `llm openai endpoint URL` sets the openai SDK base_url; the SDK itself
+# `llm openai endpoint URL` sets the OpenAI SDK base_url; the SDK itself
 # appends /chat/completions, so the URL must end at /v1 — NOT at
 # /v1/chat/completions (that yields /v1/chat/completions/chat/completions → 404).
+# -H sends the Salad-Api-Key header on every request — llm has no other way.
 LLM_BIN="$(command -v llm || echo "$HOME/.local/bin/llm")"
+BASE="https://${UPSTREAM}:${PORT}/v1"
 
 if [ $# -gt 0 ]; then
-  # One-shot (or explicit llm args after --)
-  exec "$LLM_BIN" openai endpoint "http://127.0.0.1:${PROXY_PORT}/v1" -m "$MODEL" "$@"
+  # One-shot (extra args pass through to llm, e.g. -s "sys")
+  exec "$LLM_BIN" openai endpoint "$BASE" -m "$MODEL" -H "Salad-Api-Key" "$SALAD_KEY" "$@"
 else
   # Interactive chat
-  exec "$LLM_BIN" openai endpoint "http://127.0.0.1:${PROXY_PORT}/v1" -m "$MODEL" --chat
+  exec "$LLM_BIN" openai endpoint "$BASE" -m "$MODEL" -H "Salad-Api-Key" "$SALAD_KEY" --chat
 fi
