@@ -8,7 +8,10 @@ Usage:
             refresh         re-render the table every N seconds (Ctrl-C to stop)
             start           pick a group (by # or name) and start it — INCURS COST
             stop            pick a group and stop it
-            wait            poll a group until it is running and ready, then exit
+            wait            poll a group until at least one instance reports
+                            ready, then exit (group status alone is not enough:
+                            Salad marks a group `running` while instances are
+                            still allocating/downloading/creating)
             delete          pick a group and delete it — IRREVERSIBLE
   ORG       ma-casa-in-paris | akl-on-salad (default: every known org)
   --interval N
@@ -106,11 +109,37 @@ def _instances(group: sc.ContainerGroupInfo) -> str:
     return ", ".join(parts) if parts else "-"
 
 
-def _ready_count(group: sc.ContainerGroupInfo) -> int | None:
-    """Ready instance count, or None when the API reports no counts at all."""
-    state = group.raw.get("current_state") or {}
-    counts = state.get("instance_status_counts") or {}
-    return counts.get("ready_count")
+# Spec ContainerGroupInstanceState: allocating|downloading|creating|running|
+# stopping — the live API has been seen reporting the final state as "ready"
+# instead of "running", so the fallback accepts both.
+_READY_STATES = ("ready", "running")
+
+
+def _instance_ready(inst: sc.ContainerGroupInstanceInfo) -> bool:
+    """Spec ContainerGroupInstance.ready (boolean): passing readiness checks,
+    or — with no probe defined — fully started. Falls back to the state
+    string for API payloads that omit the boolean."""
+    if inst.ready is not None:
+        return inst.ready
+    return (inst.state or "") in _READY_STATES
+
+
+def _instance_frag(inst: sc.ContainerGroupInstanceInfo) -> str:
+    state = inst.state or "?"
+    if inst.ready is None:
+        return state
+    return f"{state}{'(ready)' if inst.ready else ''}"
+
+
+def _live_instances(
+    org: str, project: str, group_name: str, key: str
+) -> "list[sc.ContainerGroupInstanceInfo] | None":
+    """Live instances of a group; None when the list call itself failed
+    (transient — the caller keeps polling)."""
+    try:
+        return list(sc.list_container_group_instances(org, project, group_name, api_key=key))
+    except sc.SaladApiError:
+        return None
 
 
 def _ssh_lines(org: str, project: str, group_name: str, key: str) -> list[sc.ContainerGroupInstanceInfo]:
@@ -323,11 +352,18 @@ def _refresh(orgs: list[str], key: str, interval: float) -> int:
 
 
 def _wait(scope: str, name: str, key: str, interval: float) -> int:
-    """Poll one group every `interval` seconds until it is running and ready.
+    """Poll one group every `interval` seconds until an instance is ready.
 
-    "Ready" = current_status running and (no instance counts reported, or
-    at least one ready instance). Returns 0 when ready; 1 when the group
-    gives up (stopped/failed/...) or the GET itself fails.
+    "Ready" = current_status running AND at least one live instance reports
+    ready=true (spec ContainerGroupInstance.ready). The group status alone
+    is NOT enough: Salad marks a group `running` while its instances are
+    still allocating/downloading/creating (the model pull takes minutes),
+    and the group's instance_status_counts carry no ready key at all
+    (only allocating/creating/running/stopping counts). Before the first
+    instance shows up we keep polling, same while none is ready yet.
+
+    Returns 0 when ready; 1 when the group gives up (stopped/failed/...)
+    or the group GET itself fails.
     """
     org, project = scope.split("/", 1)
     print(f"waiting for {name} to become ready (polling every {interval:g}s, Ctrl-C to stop)")
@@ -339,15 +375,24 @@ def _wait(scope: str, name: str, key: str, interval: float) -> int:
             return 1
         status = g.current_status or "?"
         ts = datetime.now(timezone.utc).strftime("%H:%M:%S")
-        print(f"{ts} UTC  {status:<12} {_instances(g)}")
+        line = f"{ts} UTC  {status:<12} {_instances(g)}"
+        ready_now = False
+        if status == "running":
+            live = _live_instances(org, project, g.name, key)
+            if live is None:
+                line += "  (instance list failed — retrying)"
+            elif live:
+                line += "  " + ",".join(_instance_frag(i) for i in live)
+                ready_now = any(_instance_ready(i) for i in live)
+            else:
+                line += "  (no instances yet)"
+        print(line)
         if status in ("stopped", "succeeded", "failed", "error", "deleted"):
             print(f"bail: {name} is {status} — it will not become ready (check the Salad UI)")
             return 1
-        if status == "running":
-            ready = _ready_count(g)
-            if ready is None or ready > 0:
-                print(f"READY: {name} is running — {_url(g) or '-'}")
-                return 0
+        if ready_now:
+            print(f"READY: {name} has a ready instance — {_url(g) or '-'}")
+            return 0
         time.sleep(interval)
 
 
