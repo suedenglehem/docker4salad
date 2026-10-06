@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Manage Salad container groups — list, live-refresh, start, stop, wait, delete.
+"""Manage Salad container groups — list, live-refresh, start, stop, wait, stats, delete.
 
 Usage:
   python3 utils/manage_groups.py [ACTION] [ORG] [--interval N]
@@ -12,10 +12,17 @@ Usage:
                             ready, then exit (group status alone is not enough:
                             Salad marks a group `running` while instances are
                             still allocating/downloading/creating)
+            stats           print llama-server stats (like utils/llama_stats.py:
+                            tps / queue / totals, --interval loop, Ctrl-C stops)
+                            — but ONLY when the group is fully ready: status
+                            running, all `replicas` instances present, and each
+                            one ready=true (stricter than wait's "at least one
+                            ready"). Otherwise it prints the state and exits 1
+                            without scraping
             delete          pick a group and delete it — IRREVERSIBLE
   ORG       ma-casa-in-paris | akl-on-salad (default: every known org)
   --interval N
-            poll period in seconds for refresh / wait (default 5)
+            poll period in seconds for refresh / wait / stats (default 5)
 
   python3 utils/manage_groups.py                     # status, all known orgs
   python3 utils/manage_groups.py akl-on-salad        # one org
@@ -23,6 +30,7 @@ Usage:
   python3 utils/manage_groups.py delete              # numbered table -> prompt -> confirm
   python3 utils/manage_groups.py start akl-on-salad  # start a group in that org
   python3 utils/manage_groups.py wait                # after start: poll until ready
+  python3 utils/manage_groups.py stats               # stats, only if fully ready
 
 The SaladCloud API has no list-orgs / list-projects operations, so this walks
 a fixed map of the account's orgs and their projects. Add new projects to
@@ -48,6 +56,7 @@ Notes:
 from __future__ import annotations
 
 import os
+import runpy
 import sys
 import time
 from datetime import datetime, timezone
@@ -64,7 +73,14 @@ KNOWN_PROJECTS: dict[str, tuple[str, ...]] = {
     "akl-on-salad": ("default", "comfy"),
 }
 
-ACTIONS = ("list", "refresh", "start", "stop", "wait", "delete")
+ACTIONS = ("list", "refresh", "start", "stop", "wait", "stats", "delete")
+
+# The canonical /metrics scraper (single source of truth; it lives in docker/
+# because that directory is Dockerfile.multistage's build context). Delegated
+# to via runpy — the same pattern as utils/llama_stats.py.
+_LLM_STATS = os.path.normpath(
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "docker", "llama_stats.py")
+)
 
 
 def _url(group: sc.ContainerGroupInfo) -> str | None:
@@ -401,6 +417,70 @@ def _wait(scope: str, name: str, key: str, interval: float) -> int:
         time.sleep(interval)
 
 
+def _stats(scope: str, name: str, key: str, interval: float) -> int:
+    """Print llama-server stats for one group — but only when it is FULLY
+    ready: status running, at least `replicas` live instances present, and
+    every one of them ready=true. "Fully ready" is stricter than `wait`'s
+    "at least one ready": a group with N expected instances is not serving at
+    full capacity until all N are in.
+
+    Single check, no polling: when the group is not fully ready we print its
+    state and exit 1 without scraping (use `wait` to block until ready, then
+    re-run stats). When it is, we hand off to the canonical scraper (runpy,
+    like utils/llama_stats.py) against the gateway URL — the Salad-Api-Key
+    auto-load for *.salad.cloud happens inside it. Ctrl-C stops the loop; a
+    scrape failure exits 1 with the scraper's own hint.
+    """
+    org, project = scope.split("/", 1)
+    try:
+        g = sc.get_container_group(org, project, name, api_key=key)
+    except sc.SaladApiError as e:
+        print(f"error: {e}")
+        return 1
+    status = g.current_status or "?"
+    want = int(g.raw.get("replicas") or 1)
+    live: "list[sc.ContainerGroupInstanceInfo] | None" = None
+    if status == "running":
+        live = _live_instances(org, project, g.name, key)
+    state = f"{status:<12} {_instances(g)}"
+    if status == "running":
+        if live is None:
+            state += "  (instance list failed)"
+        elif live:
+            state += "  " + ",".join(_instance_frag(i) for i in live)
+        else:
+            state += "  (no instances yet)"
+
+    if status != "running":
+        print(f"not fully ready — no stats:  {name}  {state}")
+        print(f"it is {status} — start it first:  python3 utils/manage_groups.py start {org}")
+        return 1
+    if live is None:
+        print(f"cannot verify readiness — instance list failed:  {name}  {state}")
+        print("transient API error — re-run stats, or `wait` if it persists.")
+        return 1
+    not_ready = [i for i in live if not _instance_ready(i)]
+    if len(live) < want or not_ready:
+        detail = []
+        if len(live) < want:
+            detail.append(f"only {len(live)}/{want} instance(s) present")
+        if not_ready:
+            detail.append("not ready yet: " + ",".join(_instance_frag(i) for i in not_ready))
+        print(f"not fully ready — no stats:  {name}  {state}")
+        print("; ".join(detail) + f" — wait for it, then re-run stats:  python3 utils/manage_groups.py wait {org}")
+        return 1
+
+    url = _url(g)
+    if not url:
+        print(f"error: {name} is ready but has no gateway DNS — nothing to scrape.")
+        return 1
+    print(f"fully ready: {name} ({_instances(g)}) — {url} — Ctrl-C stops")
+    # The scraper parses sys.argv itself (url positional + --interval N).
+    sys.argv = ["llama_stats.py", url, "--interval", f"{interval:g}"]
+    runpy.run_path(_LLM_STATS, run_name="__main__")
+    return 0
+
+
 def main(argv: list[str]) -> int:
     interval = 5.0
     positional: list[str] = []
@@ -477,6 +557,8 @@ def main(argv: list[str]) -> int:
         print(f"\nselected: {s_org}/{s_project} — {g.name} ({g.current_status or '?'})  {_url(g) or '-'}")
         if action == "wait":
             return _wait(f"{s_org}/{s_project}", g.name, key, interval)
+        if action == "stats":
+            return _stats(f"{s_org}/{s_project}", g.name, key, interval)
         # start / stop / delete need confirmation before the call
         if not _confirm(action, sel):
             print("aborted — nothing done.")

@@ -382,7 +382,7 @@ on_salad/
 │   ├── curl_salad.sh               # gateway smoke test
 │   └── salad_api.txt               # gateway key (gitignored)
 ├── utils/
-│   ├── manage_groups.py            # group manager: list/refresh/start/stop/wait/delete
+│   ├── manage_groups.py            # group manager: list/refresh/start/stop/wait/stats/delete
 │   ├── llama_stats.py              # stats entry point (delegates to docker/llama_stats.py)
 │   ├── billing.py                  # per-org portal credit balances (USD + EUR)
 │   ├── portal_vault.gpg            # billing vault (GPG AES256, gitignored)

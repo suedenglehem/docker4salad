@@ -6,7 +6,7 @@ stdlib-only Python, run from the repo root: `python3 utils/<script>`.
 
 | script | what it does |
 |---|---|
-| `manage_groups.py` | group manager: `list` / `refresh` / `start` / `stop` / `wait` / `delete` |
+| `manage_groups.py` | group manager: `list` / `refresh` / `start` / `stop` / `wait` / `stats` / `delete` |
 | `llama_stats.py` | llama-server stats (tps / queue / totals) from the host |
 | `billing.py` | per-org portal credit balances (USD + live EUR) |
 
@@ -30,6 +30,14 @@ python3 utils/manage_groups.py [ACTION] [ORG] [--interval N]
 - `wait` — after `start`: poll until at least one instance reports `ready`.
   The group flipping to `running` is NOT readiness — instances are still
   allocating/downloading/creating and the model pull takes minutes.
+- `stats` — llama-server stats (same tps / queue / totals view as
+  `llama_stats.py`), but **only when the group is fully ready**: status
+  `running`, all `replicas` instances present, and every one of them
+  `ready=true` — stricter than `wait`'s "at least one ready". Single check,
+  no polling: if it isn't, it prints the group's state and exits 1 without
+  scraping (`wait` to block until ready, then re-run). When it is, it hands
+  off to the canonical `docker/llama_stats.py` against the gateway URL with
+  `--interval N` (default 5 s, Ctrl-C stops).
 
 The Salad API key is loaded from `deploy/salad_api.txt` via
 `salad_client.py` (repo root).
