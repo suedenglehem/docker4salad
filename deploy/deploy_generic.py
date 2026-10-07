@@ -6,13 +6,17 @@ GiB), vision projector mmproj-BF16.gguf (0.87 GiB) from the same repo, the
 MTP head EMBEDDED in the gguf (DRAFT_MODEL=none, SPEC_TYPE=draft-mtp),
 CLAUDE_TEMPLATE=1, CTX_SIZE 90000 on an RTX 3090.
 
-Image: `lmss_generic` (FROM boris271142/lmss:cuda128-v3, NO baked models,
-Dockerfile.lmss_generic): at runtime EVERYTHING is downloaded from
+Image: `lmss_generic_ampere` (Dockerfile.lmss_generic_ampere,
+boris271142/lmss_generic_ampere:cuda130 — the JakeATX/llamAmpere v0.4 fork
+compiled IN-CONTAINER on CUDA 13.0.2, sm_86+89): the same runtime model as
+`lmss_generic` (NO baked models, at runtime EVERYTHING is downloaded from
 HuggingFace via the fast `hf` xet path — the main model, and the OPTIONAL
-draft (DRAFT_MODEL) and vision projector (VISION_MODEL). The v3 wget2
-DRAFT_MODEL_URL / VISION_MODEL_URL (full URL) mechanism is gone; the new
-refs take "hf://<org>/<repo>/<file>" or a bare file resolved against
-MODEL_REPO, and a download failure dies the container loudly.
+draft (DRAFT_MODEL) and vision projector (VISION_MODEL)), but with the
+TurboQuant KV-cache flags BAKED into the CMD:
+`--cache-type-k turbo5 --cache-type-v turbo4 --kv-unified --fit off
+--cache-ram 4096` (turbo5 = tq5_0, turbo4 = tq4_0, ~45% of the q8_0 KV
+size) and the MTP vocab maps baked at /opt/llama.cpp/mtp-vocab/ for
+--spec-draft-vocab-map.
 
 Unlike the baked qwen3.8 image, this one is model-agnostic:
   * draft + vision are opt-in per group (default none) — in the 27B
@@ -32,9 +36,10 @@ delay (not 1200) keeps the FIRST probe early, so the gateway — and
 cloudflare in front of it — open as soon as the model is actually ready.
 
 GPU: default RTX 3090 (24 GB): 18.77 GiB ATX Q5_K_M + mmproj (0.87 GiB) +
-q8_0 KV (~3.0 GiB at the 90000 default ctx) ≈ 22.6 GiB, fits with ~1.4 GiB
-headroom. The Q6_K build (20.89 GiB) + vision + 90K KV ≈ 24.8 GiB needs an
-RTX 5090 (32 GB). Full 132768 ctx (KV ~4.6 GiB) fits Q5_K_M on a 5090.
+turbo5/turbo4 KV (~1.4 GiB at the 90000 default ctx — ~45% of the q8_0
+size, which would have been ~3.0 GiB here) ≈ 21 GiB, ~3 GiB headroom.
+The Q6_K build (20.89 GiB) + vision + 90K KV ≈ 23.2 GiB now fits a 3090
+too, and full 132768 ctx (KV ~2.1 GiB) fits Q5_K_M on a 3090 as well.
 --gpu takes SEVERAL classes (e.g. --gpu rtx3090 rtx5090): the group's
 gpu_classes then lists them all and Salad may place the replica on any.
 
@@ -117,14 +122,14 @@ MODEL_ALIAS = "atx-swift-27b"
 
 # Digest-pinned: the API accepts the @sha256 ref verbatim, and it is the
 # airtight lever against the worker image cache (keyed by repo NAME — a tag
-# re-push can serve stale layers on workers that cached the old one). This
-# is the cuda128-v3 push (2026-10-07, build id 'lmss generic-v3 (hf runtime
-# download, claude-template, extra-args) 2026-10-07' — adds the EXTRA_ARGS
-# env: one string of extra llama-server args appended LAST to the argv,
-# duplicate flags last-wins); the tag form, for humans:
-#   boris271142/lmss_generic:cuda128-v3
-IMAGE = "boris271142/lmss_generic" \
-        "@sha256:a238efd5dddb99b812bc846f07f3a9499ba7232289f4d3c8d1de7f82a45752d4"
+# re-push can serve stale layers on workers that cached the old one; this
+# repo name is fresh, so no worker has cached anything under it yet).
+# This is the cuda130 push (2026-10-07, build id 'lmss_generic_ampere-v1
+# (llamAmpere v0.4 fork, cuda 13.0.2, turbo5/turbo4 KV) 2026-10-07'); the
+# tag form, for humans:
+#   boris271142/lmss_generic_ampere:cuda130
+IMAGE = "boris271142/lmss_generic_ampere" \
+        "@sha256:f9532a85d26381225663a35f9ca0e010a7c13ed798cc6ae2adf3e23ed25cc45a"
 
 MODEL_REPO = "bjivanovich/ATX-Swift-1.5-Qwen3.8-27B-Uncensored-MTP-GGUF"
 # Q5_K_M — MTP head embedded in the gguf (the 'MTP' in the repo name), so no
@@ -140,7 +145,16 @@ SPEC_TYPE = "draft-mtp"
 # One whitespace-separated string of extra llama-server args, appended LAST
 # to the argv (duplicate flags last-wins -> overrides the baked base flags).
 # "none" = off (never empty: the SaladCloud API rejects empty env values).
-EXTRA_ARGS = "none"
+# The ATX operating point from post.txt, minus what the image bakes: the KV
+# types are baked (turbo5/turbo4 --kv-unified --fit off --cache-ram 4096),
+# and --host/--port are deliberately absent (the Salad gateway needs
+# 0.0.0.0, not post's 127.0.0.1).
+EXTRA_ARGS = ("--threads-batch 8 --prio 3 --spec-draft-n-max 3 "
+              "--spec-draft-p-min 0.1 --spec-draft-type-k q8_0 "
+              "--spec-draft-type-v q8_0 "
+              "--spec-draft-vocab-map /opt/llama.cpp/mtp-vocab/atx_65536.txt "
+              "--reasoning-format none --temp 0.2 --top-p 0.90 --top-k 40 "
+              "--repeat-penalty 1.08 --repeat-last-n 256")
 
 HF_TOKEN_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "hft.txt")
 
@@ -164,7 +178,8 @@ READINESS_PROBE = {
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Create-or-update a group on the generic (model-agnostic) lmss_generic image.",
+        description="Create-or-update a group on the generic (model-agnostic) "
+                    "lmss_generic_ampere image (llamAmpere fork, turbo5/turbo4 KV).",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument("--org", default=ORGANIZATION_NAME,
@@ -205,7 +220,8 @@ def parse_args() -> argparse.Namespace:
                              "'--threads-batch 8 --top-k 40 --temp 0.2'); no shell quoting; "
                              "'none' = off")
     parser.add_argument("--ctx-size", default="90000",
-                        help="env CTX_SIZE (90000 = the Q5_K_M/3090 fit; 132768 = full, 5090)")
+                        help="env CTX_SIZE (90000 = the ATX/3090 default; 132768 = full — "
+                             "fits the 3090 too with the turbo KV)")
     parser.add_argument("--disk-size", type=float, default=50.0,
                         help="disk in GiB, CREATE path only (resources are not patchable)")
     parser.add_argument("--memory-size", type=float, default=16.0,
@@ -286,8 +302,9 @@ def build_env(name: str, ctx_size: str, model_repo: str, model_file: str,
         "GPU_ID": "0",
         "MODEL_REPO": model_repo,
         "MODEL_FILE": model_file,
-        # Hybrid model (1 in 4 layers is full attention): q8_0 KV ≈ 35 KiB/token
-        # — ~3.0 GiB at the 90000 default, ~4.6 GiB at 132768.
+        # Hybrid model (1 in 4 layers is full attention). The ampere image
+        # bakes turbo5/turbo4 KV (~16 KiB/token, ~45% of q8_0's ~35) —
+        # ~1.4 GiB at the 90000 default, ~2.1 GiB at 132768.
         "CTX_SIZE": ctx_size,
         "N_GPU_LAYERS": "99",
         "NAME": name,

@@ -1,0 +1,24 @@
+# Secrets - must never enter a build context (local or remote build daemon).
+# (docker/.dockerignore is dead for these builds: the context is the REPO ROOT.)
+docker/api.txt
+docker/hft.txt
+deploy/hft.txt
+deploy/salad_api.txt
+utils/portal_vault.gpg
+tests/api.txt
+
+# llamAmpere fork clone: the source only. The .git (~388M) and the host
+# build/ tree are never needed - stage 1 of
+# Dockerfile.lmss_generic_ampere compiles in-container from the source.
+llama.cpp/.git
+llama.cpp/build
+
+# Repo-root docs (writeups; no Dockerfile COPYs from here). ANCHORED so the
+# fork's llama.cpp/docs/ stays in the context (mtp-vocab is COPYed).
+/docs
+
+# Scratch, caches, and this repo's own git dir
+/tmp
+__pycache__/
+*.pyc
+/.git
