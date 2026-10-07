@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 """Deploy the canonical 27B group 'qwen38-27b-q6k' (org/project/group via
 --org / --project / --group; defaults ma-casa-in-paris / qwen38-27b /
 qwen38-27b-q6k).

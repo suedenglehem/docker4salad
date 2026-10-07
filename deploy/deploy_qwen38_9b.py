@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 """Deploy container group 'qwen38-9b' into project 'qwen38-27b'
 (defaults ma-casa-in-paris / qwen38-27b / qwen38-9b; override with
 --org / --project / --group).

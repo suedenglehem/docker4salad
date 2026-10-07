@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 """Deploy a group on the model-agnostic `lmss_generic_ampere` image.
 
 The built-in defaults ARE the ATX-Swift test profile (2026-10-05):
