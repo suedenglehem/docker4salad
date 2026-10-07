@@ -1,4 +1,4 @@
-"""Deploy a group on the generic (model-agnostic) `lmss_generic` image.
+"""Deploy a group on the model-agnostic `lmss_generic_ampere` image.
 
 The built-in defaults ARE the ATX-Swift test profile (2026-10-05):
 bjivanovich/ATX-Swift-1.5-Qwen3.8-27B-Uncensored-MTP-GGUF @ Q5_K_M (18.77
@@ -65,8 +65,8 @@ LAST-WINS, so a group's EXTRA_ARGS can override the baked base flags
 (e.g. '--threads-batch 8 --top-k 40 --temp 0.2 --ctx-size 131072') without a
 per-tuning image. No shell quoting: every whitespace-separated token
 becomes one argv entry (llama.cpp flag values don't contain whitespace in
-practice). Requires the generic-v3+ image (the digest pin below IS that
-push, cuda128-v3).
+practice). Requires the generic-v3+ image (the pinned ampere image,
+cuda130, has it).
 
 SALAD_API_KEY is read from deploy/salad_api.txt by salad_client; HF_TOKEN from
 hft.txt (next to this script; validated via whoami-v2; neither is ever printed).

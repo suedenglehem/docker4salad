@@ -34,7 +34,7 @@ The two keys to the whole setup:
 | `curl_salad.sh` | `claude/` | Quick smoke test — asks the running model 2-3 simple questions through the gateway. |
 | `salad_client.py` | repo root | Stdlib-only SaladCloud OpenAPI client (create/start/stop/delete/patch groups, GPU classes, projects). |
 | `deploy/deploy_qwen38_27b.py` | `deploy/` | **Canonical 27B deployer** — creates/updates the `qwen38-27b-q6k` group (baked MTP + vision image, main model fetched at runtime) and starts it. |
-| `deploy/deploy_generic.py` | `deploy/` | Model-agnostic deployer (any GGUF via `--model-repo` / `--model-file`; draft + vision opt-in). |
+| `deploy/deploy_generic.py` | `deploy/` | Model-agnostic deployer on the **llamAmpere fork image** (turbo5/turbo4 KV cache — 131k ctx on a 24 GB card; any GGUF via `--model-repo` / `--model-file`; draft + vision opt-in). |
 | `deploy/deploy_qwen38_9b.py` / `deploy/deploy_qwen9b.py` | `deploy/` | 9B deployers (`qwen38-9b`, `qwen9b`) — plain, no draft/vision/template. |
 
 Everything runs against org **`ma-casa-in-paris`**, project **`qwen38-27b`**.
@@ -363,6 +363,8 @@ on_salad/
 ├── docker/
 │   ├── Dockerfile.multistage       # llama.cpp (CUDA + FA + NCCL) image build
 │   ├── Dockerfile.lmss_q6_mtp_vision # baked MTP draft + mmproj vision extension
+│   ├── Dockerfile.lmss_generic     # model-agnostic image (FROM v3, nothing baked)
+│   ├── Dockerfile.lmss_generic_ampere # llamAmpere fork build: turbo KV, compiled in-image (cuda 13)
 │   ├── qwen3.8.q6.jinja            # permissive chat template (shipped in image)
 │   ├── api_app.py                  # status API on :9999 (/startup /live /ready)
 │   ├── run_api.py                  # status-API entrypoint (COPYed in — a build file)

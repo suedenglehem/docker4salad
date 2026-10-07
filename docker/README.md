@@ -5,7 +5,7 @@ Dockerized [llama.cpp](https://github.com/ggml-org/llama.cpp) `llama-server` for
 - **locally** (docker compose, `docker/`) — this box's 16 GB cards → the 9B service;
 - **on SaladCloud** — one card per container, public `*.salad.cloud` gateway; this is where the 27B Claude Code backend lives (deploy + run it on demand, switching cards and quants).
 
-Image build: llama.cpp compiled with CUDA + flash attention + NCCL (`-DGGML_CUDA_NCCL=ON`, pinned commit `3af988fab`, build tag b10572) in a CUDA devel stage, shipped on the `nvidia/cuda:12.8.2-runtime` base (`Dockerfile.multistage`). Binary at `/opt/llama.cpp/build/bin/llama-server`. Also ships a small status API on port **9999** (`/startup`, `/live`, `/ready` — see [Status API](#status-api-port-9999)) and debug tools inside the container: `curl`, `ssh`, `vi`, `htop`, `nvtop` (GPU monitor, built from source — not in Ubuntu 22.04 repos).
+Image build: llama.cpp compiled with CUDA + flash attention + NCCL (`-DGGML_CUDA_NCCL=ON`, pinned commit `3af988fab`, build tag b10572) in a CUDA devel stage, shipped on the `nvidia/cuda:12.8.2-runtime` base (`Dockerfile.multistage`). Binary at `/opt/llama.cpp/build/bin/llama-server`. Also ships a small status API on port **9999** (`/startup`, `/live`, `/ready` — see [Status API](#status-api-port-9999)) and debug tools inside the container: `curl`, `ssh`, `vi`, `htop`, `nvtop` (GPU monitor, built from source — not in Ubuntu 22.04 repos). The fourth image is a **custom build of a llama.cpp fork** (llamAmpere, TurboQuant KV cache) — [the fork build](#the-llamampere-fork-build-lmss_generic_ampere).
 
 Models are downloaded on first start into `/models` **inside** the container (no host bind mount), so `docker compose down` removes them — nothing is left behind on the host disk.
 
@@ -16,8 +16,39 @@ Models are downloaded on first start into `/models` **inside** the container (no
 | `boris271142/lmss:cuda128-v3` | `Dockerfile.multistage` (base; local compose) | nothing — model downloads on first start | `CHAT_TEMPLATE` (jinja **file path**), `DRAFT_MODEL_FILE` / `DRAFT_MODEL_URL`, `VISION_MODEL_URL` |
 | `boris271142/lmss_jonathancoletti_qwen38_q6_mtp_vision` (tag `cuda128-v5`) | `Dockerfile.lmss_q6_mtp_vision` (FROM v3) | 27B MTP draft (Q8_0, 2.95 GiB) + vision mmproj (F16, 0.86 GiB) — only the main model downloads at runtime (fast `hf` path) | `CLAUDE_TEMPLATE`, `USE_DRAFT_MODEL` — vision is always on |
 | `boris271142/lmss_generic` (tag `cuda128-v1`) | `Dockerfile.lmss_generic` (FROM v3) | nothing — model-agnostic; main model + optional draft / vision all download at runtime via `hf` | `CLAUDE_TEMPLATE`, `DRAFT_MODEL`, `VISION_MODEL` (`hf://org/repo/file` or a bare file against `MODEL_REPO`), `SPEC_TYPE` (`draft-mtp` \| `ngram-mod` \| `none`) |
+| `boris271142/lmss_generic_ampere` (tag `cuda130`) | `Dockerfile.lmss_generic_ampere` (2-stage: the **llamAmpere v0.4 fork** compiled in-container on CUDA 13.0.2, sm_86+89) | the fork binary itself + TurboQuant KV flags `--cache-type-k turbo5 --cache-type-v turbo4 --kv-unified --fit off --cache-ram 4096` in the CMD + MTP vocab maps at `/opt/llama.cpp/mtp-vocab/` — still no models | same as `lmss_generic` + `EXTRA_ARGS` (one string of extra args appended LAST, last-wins) |
 
 A Salad group's env **replaces** the image env wholesale, so a plain deployment sets the `none` sentinels explicitly rather than relying on the image defaults (which also future-proofs against an older image whose defaults were real URLs).
+
+### The llamAmpere fork build (`lmss_generic_ampere`)
+
+The fourth image ships a **custom build of a llama.cpp fork**: [JakeATX/llamAmpere](https://github.com/JakeATX/llamAmpere) v0.4 (cloned at `llama.cpp/` in the repo root — gitignored, **never committed**). Upstream llama.cpp cannot run the ATX-Swift 27B MTP profile at 131k ctx on a 24 GB card — the q8_0 KV cache alone would be ~3 GiB at 90K ctx. The fork adds **TurboQuant KV-cache quantization** (`turbo2`–`turbo6`: a 128×128 Walsh-Hadamard rotation before quantization); `turbo5`/`turbo4` (= `tq5_0`/`tq4_0`) cost ≈ 45% of the q8_0 KV size, which is what lets 131k ctx fit in 24 GB.
+
+**Baked in** — unlike the rest of the family, where the *binary* is upstream and only args differ, here the llama.cpp binary itself is the fork:
+
+- the fork binary, compiled **in the image** on CUDA 13.0.2, arches `86;89` (86 = the RTX 3090 deploy target, 89 = the local smoke box)
+- `--cache-type-k turbo5 --cache-type-v turbo4 --kv-unified --fit off --cache-ram 4096` in the CMD
+- the MTP spec-draft vocab maps at `/opt/llama.cpp/mtp-vocab/` — the deployer's `EXTRA_ARGS` points `--spec-draft-vocab-map` at them
+
+Everything else — the `hf` download machinery, the control surface (`DRAFT_MODEL` / `VISION_MODEL` / `SPEC_TYPE` / `CLAUDE_TEMPLATE` / `EXTRA_ARGS`, the last one appended LAST so group args override the baked base flags), the status API, the probes — is identical to `lmss_generic`. There is **no per-tuning image**: the per-model operating point comes from the group env + `EXTRA_ARGS` (the deployer's defaults ARE the ATX profile from `tmp/post.txt`).
+
+**Why the compile runs inside the image (and never as a host-build overlay):** the build host (Ubuntu 24.04, gcc 13) produces binaries that need glibc 2.38; every base in this family is ubuntu22.04 (glibc 2.35), so a host build cannot run on any of them. Stage 1 compiles the fork from source inside `nvidia/cuda:13.0.2-devel-ubuntu22.04` so the glibc floor matches. Rebuild rule: always build in-container like this; never COPY a host `build/` tree from a newer distro into stage 2.
+
+```bash
+# Build (context = REPO ROOT; the root .dockerignore keeps llama.cpp/.git,
+# llama.cpp/build and the secret files out of it). ~45 min at 24 jobs.
+docker build -f docker/Dockerfile.lmss_generic_ampere \
+  -t lmss_generic_ampere:dev --build-arg BUILD_JOBS=24 .
+
+# Push: the NEW repo name is a fresh Salad worker image cache key, then pin
+# the manifest-list digest in deploy_generic.py (the airtight re-pull lever).
+docker tag  lmss_generic_ampere:dev boris271142/lmss_generic_ampere:cuda130
+docker push boris271142/lmss_generic_ampere:cuda130
+```
+
+Stage 1: cmake Release, `GGML_CUDA=ON`, `GGML_CUDA_NCCL=OFF` (single-GPU image — this also drops the `libnccl.so.2` DT_NEEDED the multistage Dockerfile has to satisfy by hand), `-j${BUILD_JOBS}` (default 24 — nvcc/cicc instances are memory-hungry), and a `libcuda.so.1` stub symlink on the link-time rpath-link (the real driver is injected by nvidia-container-toolkit at runtime). Stage 2: `nvidia/cuda:13.0.2-runtime-ubuntu22.04` + the family's apt/pip set + the control-surface COPYs + the vocab maps + the build id in `/etc/llama-image-build` (read by `version.sh`). CUDA 13 for this image because the deploy target is the RTX 3090; the RTX 5090 keeps the CUDA 12.8 multistage image.
+
+**Validated (2026-10-07):** `llama-server --help` lists `turbo2 (tq2) … turbo6 (tq6_0)` for `-ctk`/`-ctv` — names upstream does not know, so their acceptance is proof of the fork binary; `tq5_0`/`tq4_0` kernel references present in `libggml-cuda.so`; a live run on the 4080 SUPER (sm_89) with the full baked turbo KV flag set + `--flash-attn on` produced coherent generation at 109 t/s (a missing turbo kernel would have errored, not run). Pushed as `cuda130` @ `sha256:f9532a85…cc45a`.
 
 ## Prerequisites
 
@@ -63,6 +94,7 @@ Notes:
 - The 27B's trained context is **262144** — serving above it buys nothing; that's the table's ceiling.
 - The ~2.1 GiB overhead includes the ~1 GiB vision projector the baked q6-mtp-vision image always loads; a text-only profile gets it back. A separate draft file (~3 GiB for draft-Q8_0) costs that much ctx budget.
 - Numbers assume `--cache-type-k/v q8_0` (the image default). f16 KV doubles the KV cost → halve the ctx.
+- The [ampere fork image](#the-llamampere-fork-build-lmss_generic_ampere) changes the 24 GB card: its baked turbo5/turbo4 KV costs ≈ 16 KiB/token (~45% of q8_0's ~35), so each GiB of headroom buys ~60K ctx instead of ~30K. On a 3090: **Q5_K_M reaches the full 132768** (18.77 weights + 0.87 mmproj + ~2.1 GiB KV ≈ 21 GiB — the ATX profile) and Q6_K + vision fits at 90K.
 
 ### Run locally (docker compose)
 
@@ -153,13 +185,14 @@ The 27B Claude Code backend: org `ma-casa-in-paris`, project `qwen38-27b`, one *
 - **Smoke test**: `./claude/curl_salad.sh -url corn-cabbage-2yk4e98r3rx752n0.salad.cloud -m qwen38-27b` (canary question `27*43?` → `1161`).
 - **Claude Code against it**: `cl_salad [GATEWAY_URL]` — or `cl_salad_deploy` when the group is asleep (it starts and waits for it). See [Service scripts](#service-scripts).
 
-### Other live groups (all stopped as of 2026-10-06)
+### Other live groups (all stopped as of 2026-10-07)
 
 | Group | Project | Deployer | What it runs | Gateway |
 |---|---|---|---|---|
 | `qwen38-27b-q5` | `qwen38-27b` | `deploy/deploy_qwen38_27b.py --group` | v5 test/canary, same profile as prod | `starfruit-watercress-1wnfoj9fdzbao3xj.salad.cloud` |
 | `qwen38-9b` | `qwen38-27b` | `deploy/deploy_qwen38_9b.py` | plain 9B (Q4_K_M @ 32K), 7 card classes | `parmesan-cayenne-q0cfrqiksj7jhgrp.salad.cloud` |
-| `atx-swift-27b-q5` | `llm` | `deploy/deploy_generic.py` | ATX-Swift 27B Q5_K_M @ 90K + vision (the generic image's default profile) | `tamarind-caraway-1rpqcqcnbbkmqdbv.salad.cloud` |
+| `atx-swift-27b-q5` | `llm` | `deploy/deploy_generic.py` | ATX-Swift Q5_K_M @ 90K + vision — **A/B baseline, q8_0 KV** (still the old `lmss_generic` image) | `tamarind-caraway-1rpqcqcnbbkmqdbv.salad.cloud` |
+| `atx-swift-27b-q5-opt` | `llm` | `deploy/deploy_generic.py --group atx-swift-27b-q5-opt --model-alias atx-swift-27b-opt` | ATX-Swift Q5_K_M @ 90K + vision + **turbo5/turbo4 KV** (the [ampere fork image](#the-llamampere-fork-build-lmss_generic_ampere); A/B against the baseline) | `damson-pepper-erau5a722gxf2qm2.salad.cloud` |
 
 A second org `akl-on-salad` shares the same API key; every deployer takes `--org` / `--project` / `--group` to target it.
 
@@ -174,12 +207,12 @@ All four take `--org` / `--project` / `--group` (defaults are the groups they're
 | Deployer | Default group | Image | Default profile |
 |---|---|---|---|
 | `deploy/deploy_qwen38_27b.py` | `qwen38-27b-q6k` | baked q6-mtp-vision `@4089a457` (v5) | **production**: Q5_K_M @ CTX 90000, RTX 3090, `CLAUDE_TEMPLATE=1`, `USE_DRAFT_MODEL=none`, vision on |
-| `deploy/deploy_generic.py` | `atx-swift-27b-q5` (project `llm`) | `lmss_generic` `@f1b3ded2` (v1) | ATX-Swift 27B Q5_K_M @ 90000 + vision, RTX 3090 |
+| `deploy/deploy_generic.py` | `atx-swift-27b-q5` (project `llm`) | `lmss_generic_ampere` `@f9532a85` (tag `cuda130`) | ATX-Swift 27B Q5_K_M @ 90000 + vision + **turbo5/turbo4 KV** (ATX operating point in `EXTRA_ARGS`), RTX 3090 |
 | `deploy/deploy_qwen38_9b.py` | `qwen38-9b` | `lmss:cuda128-v3` (plain tag) | plain 9B Q4_K_M @ 32768, **7 card classes**, explicit `none` sentinels |
 | `deploy/deploy_qwen9b.py` | `qwen9b` (retired) | `lmss:cuda128-v3` (plain tag) | plain 9B Q4_K_M @ 32768, single RTX 3090, priority batch |
 
 - **`deploy/deploy_qwen38_27b.py`** — the canonical deployer for the production group (see [above](#production-27b-group-qwen38-27b-q6k)). `--gpu rtx5090|rtx3090` (repeatable — placement may land on any listed class), `--model-file` swaps the quant, `--use-draft-model none|<file>` (`none` = the gguf's embedded MTP head; a filename = the baked draft, needed for noMTP quants), `--no-claude-template` for non-Claude clients.
-- **`deploy/deploy_generic.py`** — model-agnostic: any GGUF repo/file via `--model-repo` / `--model-file`, served name via `--model-alias`. Draft and vision are **opt-in** per group (default `none`): `--draft-model` / `--vision-model` take `none`, `hf://org/repo/file`, or a bare file resolved against `MODEL_REPO`. `--spec-type draft-mtp|ngram-mod|none` selects speculation explicitly — an MTP-embedded gguf without a separate draft file runs `draft-mtp` on its in-gguf head instead of being downgraded to ngram-mod. `--gpu` takes several classes (Salad may place on any). Because nothing is baked, a fresh worker downloads everything (a 27B `hf download` transiently holds ~2× the file → 50 GB disk default).
+- **`deploy/deploy_generic.py`** — model-agnostic: any GGUF repo/file via `--model-repo` / `--model-file`, served name via `--model-alias`. Draft and vision are **opt-in** per group (default `none`): `--draft-model` / `--vision-model` take `none`, `hf://org/repo/file`, or a bare file resolved against `MODEL_REPO`. `--spec-type draft-mtp|ngram-mod|none` selects speculation explicitly — an MTP-embedded gguf without a separate draft file runs `draft-mtp` on its in-gguf head instead of being downgraded to ngram-mod. `--gpu` takes several classes (Salad may place on any). Because nothing is baked, a fresh worker downloads everything (a 27B `hf download` transiently holds ~2× the file → 50 GB disk default). The image is the [llamAmpere fork build](#the-llamampere-fork-build-lmss_generic_ampere) (turbo KV flags baked in the CMD), and `--extra-args` defaults to the ATX operating point from `tmp/post.txt` — spec-draft MTP params + the baked vocab map + sampling; the KV types are already baked, and `--host`/`--port` are deliberately absent (the Salad gateway needs 0.0.0.0, not post's 127.0.0.1). `--ctx-size 132768` runs the full ATX context — it fits a 3090 with the turbo KV.
 - **`deploy/deploy_qwen38_9b.py`** — replacement for the broken `qwen9b` group. Plain 9B: the three optional features are set to `none` **explicitly** (v3 env names: `DRAFT_MODEL_URL` / `VISION_MODEL_URL` / `CHAT_TEMPLATE`) rather than relying on the image defaults. Runs on any of RTX 3090 / 3090 Ti / 4090 / 4080 / 5070 Ti / 5080 / 5090; probe 120 s + 20 × 60 s (covers the ~5.4 GB download). **Created in the stopped state** — start it explicitly after creation.
 - **`deploy/deploy_qwen9b.py`** — the original 9B deployer (single 3090, priority batch, probe 120 s + 10 × 5 s). Its group was superseded by `qwen38-9b` and has been deleted (as of 2026-10-06); kept as the 9B reference for a single-3090, no-7-class deployment.
 
