@@ -501,6 +501,9 @@ def main(argv: list[str]) -> int:
                 return 2
             i += 2
             continue
+        if arg in ("-h", "--help"):
+            print(__doc__.strip())
+            return 0
         positional.append(arg)
         i += 1
 
@@ -540,6 +543,7 @@ def main(argv: list[str]) -> int:
     try:
         if action == "list":
             _print_table(_rows(orgs, key), key)
+            print(f"actions: {', '.join(ACTIONS)} — see --help")
             return 0
         if action == "refresh":
             return _refresh(orgs, key, interval)
