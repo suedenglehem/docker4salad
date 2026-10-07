@@ -1,19 +1,26 @@
 #!/usr/bin/env python3
-"""Deploy a group on the generic (model-agnostic) `lmss_generic` image.
+"""Deploy the ATX-Swift 27B group on the `lmss_generic_ampere` fork image.
 
-The built-in defaults ARE the ATX-Swift test profile (2026-10-05):
+This is the deployer for the llamAmpere fork build — NOT the generic
+(vanilla llama-server) one, which is deploy/deploy_generic.py. The
+built-in defaults ARE the ATX-Swift production profile (2026-10-05,
+A/B-confirmed faster than the q8_0 KV baseline on 2026-10-07):
 bjivanovich/ATX-Swift-1.5-Qwen3.8-27B-Uncensored-MTP-GGUF @ Q5_K_M (18.77
 GiB), vision projector mmproj-BF16.gguf (0.87 GiB) from the same repo, the
 MTP head EMBEDDED in the gguf (DRAFT_MODEL=none, SPEC_TYPE=draft-mtp),
-CLAUDE_TEMPLATE=1, CTX_SIZE 90000 on an RTX 3090.
+CLAUDE_TEMPLATE=1, CTX_SIZE 132768 (full ATX context) on an RTX 3090.
 
-Image: `lmss_generic` (FROM boris271142/lmss:cuda128-v3, NO baked models,
-Dockerfile.lmss_generic): at runtime EVERYTHING is downloaded from
+Image: `lmss_generic_ampere` (Dockerfile.lmss_generic_ampere,
+boris271142/lmss_generic_ampere:cuda130 — the JakeATX/llamAmpere v0.4 fork
+compiled IN-CONTAINER on CUDA 13.0.2, sm_86+89): the same runtime model as
+`lmss_generic` (NO baked models, at runtime EVERYTHING is downloaded from
 HuggingFace via the fast `hf` xet path — the main model, and the OPTIONAL
-draft (DRAFT_MODEL) and vision projector (VISION_MODEL). The v3 wget2
-DRAFT_MODEL_URL / VISION_MODEL_URL (full URL) mechanism is gone; the new
-refs take "hf://<org>/<repo>/<file>" or a bare file resolved against
-MODEL_REPO, and a download failure dies the container loudly.
+draft (DRAFT_MODEL) and vision projector (VISION_MODEL)), but with the
+TurboQuant KV-cache flags BAKED into the CMD:
+`--cache-type-k turbo5 --cache-type-v turbo4 --kv-unified --fit off
+--cache-ram 4096` (turbo5 = tq5_0, turbo4 = tq4_0, ~45% of the q8_0 KV
+size) and the MTP vocab maps baked at /opt/llama.cpp/mtp-vocab/ for
+--spec-draft-vocab-map.
 
 Unlike the baked qwen3.8 image, this one is model-agnostic:
   * draft + vision are opt-in per group (default none) — in the 27B
@@ -33,17 +40,18 @@ delay (not 1200) keeps the FIRST probe early, so the gateway — and
 cloudflare in front of it — open as soon as the model is actually ready.
 
 GPU: default RTX 3090 (24 GB): 18.77 GiB ATX Q5_K_M + mmproj (0.87 GiB) +
-q8_0 KV (~3.0 GiB at the 90000 default ctx) ≈ 22.6 GiB, fits with ~1.4 GiB
-headroom. The Q6_K build (20.89 GiB) + vision + 90K KV ≈ 24.8 GiB needs an
-RTX 5090 (32 GB). Full 132768 ctx (KV ~4.6 GiB) fits Q5_K_M on a 5090.
---gpu takes ANY card the org lists — the class name lowercased, spaces
-stripped (e.g. rtx3090, rtx4060ti, rtx5090); pass several and the group's
-gpu_classes then lists them all and Salad may place the replica on any.
-Names are resolved against the org's live GPU classes at deploy time, so an
-unknown name fails with the list of what IS available.
+turbo5/turbo4 KV (~2.1 GiB at the 132768 default ctx — ~45% of the q8_0
+size, which would have been ~4.6 GiB here) ≈ 21.7 GiB, ~2.3 GiB headroom.
+--gpu is limited to the org's sm_86 30-series cards (rtx3090 / rtx3090ti
+= 24 GB, rtx3080 / rtx3080ti = 10/12 GB): the fork image ships sm_86+89
+cubins only (GGML_CUDA_ARCHITECTURES="86;89"), so no rtx5090 (sm_120) —
+and only the 24 GB cards can hold the 27B default quant (the 3080 line
+fits smaller models / short ctx). Pass several to let Salad place on any.
 
-Ctx: default 90000 (the Q5_K_M/3090 fit; served n_ctx is rounded up to a
-multiple of the block size, 90112 on the Qwen3.8 27B line).
+Ctx: default 132768 — the FULL ATX-Swift context, which fits the 3090 only
+thanks to the turbo KV (served n_ctx is rounded up to a multiple of the
+block size, 132864 on the Qwen3.8 27B line). 90000 (90112 served) was the
+A/B default.
 
 Disk: 50 GiB (create path; resources are NOT patchable, an existing group
 keeps its resources). The main-model `hf download` can transiently hold ~2x
@@ -57,27 +65,28 @@ the stock Qwen template raises on them). --no-claude-template sends 'none',
 which serves the gguf's embedded template as-is (cline/py/opencode).
 Non-Qwen ggufs (no raise-marker) get the patch skipped by the script.
 
-EXTRA_ARGS (default 'none') is ONE whitespace-separated string of extra
-llama-server args. At startup the image word-splits it and appends the
-tokens LAST to the llama-server argv; llama.cpp resolves duplicate flags
-LAST-WINS, so a group's EXTRA_ARGS can override the baked base flags
-(e.g. '--threads-batch 8 --top-k 40 --temp 0.2 --ctx-size 131072') without a
-per-tuning image. No shell quoting: every whitespace-separated token
-becomes one argv entry (llama.cpp flag values don't contain whitespace in
-practice). Requires the generic-v3+ image (the digest pin below IS that
-push, cuda128-v3).
+EXTRA_ARGS (default: the ATX operating point, see the constant below) is
+ONE whitespace-separated string of extra llama-server args. At startup the
+image word-splits it and appends the tokens LAST to the llama-server argv;
+llama.cpp resolves duplicate flags LAST-WINS, so a group's EXTRA_ARGS can
+override the baked base flags (e.g. '--threads-batch 8 --top-k 40
+--temp 0.2 --ctx-size 131072') without a per-tuning image. No shell
+quoting: every whitespace-separated token becomes one argv entry (llama.cpp
+flag values don't contain whitespace in practice); pass --extra-args none
+to run with no extra args. Requires the generic-v3+ run script (the pinned
+ampere fork image has it).
 
 SALAD_API_KEY is read from deploy/salad_api.txt by salad_client; HF_TOKEN from
 hft.txt (next to this script; validated via whoami-v2; neither is ever printed).
 
 Usage:
-    python3 deploy/deploy_generic.py                  # ATX-Swift test profile (create-or-update, start)
-    python3 deploy/deploy_generic.py --no-start       # apply config only
-    python3 deploy/deploy_generic.py --vision-model none            # no vision
-    python3 deploy/deploy_generic.py --draft-model hf://<org>/<repo>/<draft.gguf>
-    python3 deploy/deploy_generic.py --spec-type ngram-mod          # non-MTP gguf, no draft
-    python3 deploy/deploy_generic.py --extra-args "--top-k 40 --repeat-last-n 256 --reasoning-format none"
-    python3 deploy/deploy_generic.py --model-repo <org>/<name> --model-file <quant.gguf> \
+    python3 deploy/deploy_ampere.py                  # ATX-Swift profile (create-or-update, start)
+    python3 deploy/deploy_ampere.py --no-start       # apply config only
+    python3 deploy/deploy_ampere.py --vision-model none            # no vision
+    python3 deploy/deploy_ampere.py --draft-model hf://<org>/<repo>/<draft.gguf>
+    python3 deploy/deploy_ampere.py --spec-type ngram-mod          # non-MTP gguf, no draft
+    python3 deploy/deploy_ampere.py --extra-args "--top-k 40 --repeat-last-n 256 --reasoning-format none"
+    python3 deploy/deploy_ampere.py --model-repo <org>/<name> --model-file <quant.gguf> \
         --model-alias my-model
 """
 
@@ -88,7 +97,7 @@ import time
 import urllib.error
 import urllib.request
 
-# salad_client.py lives at the repo root; running this as deploy/deploy_generic.py
+# salad_client.py lives at the repo root; running this as deploy/deploy_ampere.py
 # puts deploy/ on sys.path, not the root.
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -114,21 +123,21 @@ ORGANIZATION_NAME = "ma-casa-in-paris"
 # 'llm' — the user-created LLM-experiments project (web UI; the API has no
 # project-create endpoint), kept separate from the production 'qwen38-27b'.
 PROJECT_NAME = "llm"
-GROUP_NAME = "atx-swift-27b-q5"
+GROUP_NAME = "atx-swift-27b-q5-opt"
 # Served model name (llama-server --alias) — deliberately NOT the group
 # name; the Claude Code client (cl_salad --model) references it.
-MODEL_ALIAS = "atx-swift-27b"
+MODEL_ALIAS = "atx-swift-27b-opt"
 
 # Digest-pinned: the API accepts the @sha256 ref verbatim, and it is the
 # airtight lever against the worker image cache (keyed by repo NAME — a tag
-# re-push can serve stale layers on workers that cached the old one). This
-# is the cuda128-v3 push (2026-10-07, build id 'lmss generic-v3 (hf runtime
-# download, claude-template, extra-args) 2026-10-07' — adds the EXTRA_ARGS
-# env: one string of extra llama-server args appended LAST to the argv,
-# duplicate flags last-wins); the tag form, for humans:
-#   boris271142/lmss_generic:cuda128-v3
-IMAGE = "boris271142/lmss_generic" \
-        "@sha256:a238efd5dddb99b812bc846f07f3a9499ba7232289f4d3c8d1de7f82a45752d4"
+# re-push can serve stale layers on workers that cached the old one; this
+# repo name is fresh, so no worker has cached anything under it yet).
+# This is the cuda130 push (2026-10-07, build id 'lmss_generic_ampere-v1
+# (llamAmpere v0.4 fork, cuda 13.0.2, turbo5/turbo4 KV) 2026-10-07'); the
+# tag form, for humans:
+#   boris271142/lmss_generic_ampere:cuda130
+IMAGE = "boris271142/lmss_generic_ampere" \
+        "@sha256:f9532a85d26381225663a35f9ca0e010a7c13ed798cc6ae2adf3e23ed25cc45a"
 
 MODEL_REPO = "bjivanovich/ATX-Swift-1.5-Qwen3.8-27B-Uncensored-MTP-GGUF"
 # Q5_K_M — MTP head embedded in the gguf (the 'MTP' in the repo name), so no
@@ -144,10 +153,25 @@ SPEC_TYPE = "draft-mtp"
 # One whitespace-separated string of extra llama-server args, appended LAST
 # to the argv (duplicate flags last-wins -> overrides the baked base flags).
 # "none" = off (never empty: the SaladCloud API rejects empty env values).
-EXTRA_ARGS = "none"
+# The ATX operating point from post.txt, minus what the image bakes: the KV
+# types are baked (turbo5/turbo4 --kv-unified --fit off --cache-ram 4096),
+# and --host/--port are deliberately absent (the Salad gateway needs
+# 0.0.0.0, not post's 127.0.0.1).
+EXTRA_ARGS = ("--threads-batch 8 --prio 3 --spec-draft-n-max 3 "
+              "--spec-draft-p-min 0.1 --spec-draft-type-k q8_0 "
+              "--spec-draft-type-v q8_0 "
+              "--spec-draft-vocab-map /opt/llama.cpp/mtp-vocab/atx_65536.txt "
+              "--reasoning-format none --temp 0.2 --top-p 0.90 --top-k 40 "
+              "--repeat-penalty 1.08 --repeat-last-n 256")
 
 HF_TOKEN_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "hft.txt")
 
+# sm_86/89 only: the fork image is compiled with
+# GGML_CUDA_ARCHITECTURES="86;89", so an sm_120 card (rtx5090) has no
+# cubin in it. The four sm_86 cards the org lists; only the 24 GB ones
+# hold the 27B default quant (rtx3080 10 GB / rtx3080ti 12 GB fit only
+# smaller models / short ctx).
+GPU_CHOICES = ("rtx3090", "rtx3090ti", "rtx3080", "rtx3080ti")
 SPEC_TYPE_CHOICES = ("draft-mtp", "ngram-mod", "none")
 
 # Readiness failure window for a cold worker: 30 s delay + 20 x 120 s =
@@ -167,7 +191,8 @@ READINESS_PROBE = {
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Create-or-update a group on the generic (model-agnostic) lmss_generic image.",
+        description="Create-or-update the ATX-Swift 27B group on the "
+                    "lmss_generic_ampere image (llamAmpere v0.4 fork, turbo5/turbo4 KV).",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument("--org", default=ORGANIZATION_NAME,
@@ -178,15 +203,13 @@ def parse_args() -> argparse.Namespace:
                              "no project-create endpoint, create it in the web UI)")
     parser.add_argument("--group", default=GROUP_NAME,
                         help="container group name (also used as the NAME env)")
-    parser.add_argument("--gpu", nargs="+", default=["rtx3090"],
-                        help="GPU class name(s) — the org's class name lowercased, spaces "
-                             "stripped (e.g. rtx3090, rtx4090, rtx4060ti, rtx5090); pass several "
-                             "to let Salad place on any of them. Resolved against the org's live "
-                             "GPU classes — an unknown name lists what is available "
-                             "(rtx3090 = 24 GB, fits ATX Q5_K_M + vision @ 90K; rtx5090 = 32 GB, "
-                             "fits Q6_K / full ctx)")
+    parser.add_argument("--gpu", choices=GPU_CHOICES, nargs="+", default=["rtx3090"],
+                        help="GPU class(es) the fork image can run on (sm_86/89 cubins only — "
+                             "no rtx5090); pass several to let Salad place on any of them "
+                             "(rtx3090/rtx3090ti = 24 GB, fit ATX Q5_K_M + vision + full ctx; "
+                             "rtx3080/rtx3080ti = 10/12 GB, smaller models only)")
     parser.add_argument("--image", default=IMAGE,
-                        help="Docker image (generic image; digest-pin the ref after each push)")
+                        help="Docker image (the llamAmpere fork; digest-pin the ref after each push)")
     parser.add_argument("--model-repo", default=MODEL_REPO,
                         help="env MODEL_REPO — the HuggingFace repo the main model (and any "
                              "bare draft/vision file) is downloaded from")
@@ -210,8 +233,9 @@ def parse_args() -> argparse.Namespace:
                              "last-wins: these override the baked base flags, e.g. "
                              "'--threads-batch 8 --top-k 40 --temp 0.2'); no shell quoting; "
                              "'none' = off")
-    parser.add_argument("--ctx-size", default="90000",
-                        help="env CTX_SIZE (90000 = the Q5_K_M/3090 fit; 132768 = full, 5090)")
+    parser.add_argument("--ctx-size", default="132768",
+                        help="env CTX_SIZE (132768 = the full ATX context, fits the 3090 with "
+                             "the turbo KV; 90000 = the old A/B default)")
     parser.add_argument("--disk-size", type=float, default=50.0,
                         help="disk in GiB, CREATE path only (resources are not patchable)")
     parser.add_argument("--memory-size", type=float, default=16.0,
@@ -271,7 +295,7 @@ def build_env(name: str, ctx_size: str, model_repo: str, model_file: str,
               extra_args: str = "none") -> dict[str, str]:
     """Full env for the group (create sets it, PATCH replaces it wholesale).
 
-    The generic image is model-agnostic: MODEL_REPO / MODEL_FILE /
+    The fork image is model-agnostic: MODEL_REPO / MODEL_FILE /
     MODEL_ALIAS / CTX_SIZE select the model per group, and DRAFT_MODEL /
     VISION_MODEL (default 'none') opt into the hf-downloaded auxiliary
     models. SPEC_TYPE picks the speculation mode explicitly — draft-mtp on
@@ -292,8 +316,9 @@ def build_env(name: str, ctx_size: str, model_repo: str, model_file: str,
         "GPU_ID": "0",
         "MODEL_REPO": model_repo,
         "MODEL_FILE": model_file,
-        # Hybrid model (1 in 4 layers is full attention): q8_0 KV ≈ 35 KiB/token
-        # — ~3.0 GiB at the 90000 default, ~4.6 GiB at 132768.
+        # Hybrid model (1 in 4 layers is full attention). The ampere image
+        # bakes turbo5/turbo4 KV (~16 KiB/token, ~45% of q8_0's ~35) —
+        # ~2.1 GiB at the 132768 default, ~1.4 GiB at 90000.
         "CTX_SIZE": ctx_size,
         "N_GPU_LAYERS": "99",
         "NAME": name,
@@ -494,7 +519,7 @@ def main() -> int:
     print_group(get_group(org, project, group))
     print("OK: group running. 'running' means the container process is up —")
     print(f"      1. verify the LIVE build in-container: version.sh should print")
-    print(f"         'lmss generic-v3 (hf runtime download, claude-template, extra-args) 2026-10-07'")
+    print(f"         'lmss_generic_ampere-v1 (llamAmpere v0.4 fork, cuda 13.0.2, turbo5/turbo4 KV) 2026-10-07'")
     print(f"      2. PID1 cmdline should carry --spec-type {args.spec_type}"
           + (f" --model-draft ..." if args.draft_model != "none" else " (no --model-draft, "
              f"DRAFT_MODEL={args.draft_model})")

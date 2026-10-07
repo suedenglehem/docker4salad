@@ -34,7 +34,8 @@ The two keys to the whole setup:
 | `curl_salad.sh` | `claude/` | Quick smoke test — asks the running model 2-3 simple questions through the gateway. |
 | `salad_client.py` | repo root | Stdlib-only SaladCloud OpenAPI client (create/start/stop/delete/patch groups, GPU classes, projects). |
 | `deploy/deploy_qwen38_27b.py` | `deploy/` | **Canonical 27B deployer** — creates/updates the `qwen38-27b-q6k` group (baked MTP + vision image, main model fetched at runtime) and starts it. |
-| `deploy/deploy_generic.py` | `deploy/` | Model-agnostic deployer on the **llamAmpere fork image** (turbo5/turbo4 KV cache — 131k ctx on a 24 GB card; any GGUF via `--model-repo` / `--model-file`; draft + vision opt-in). |
+| `deploy/deploy_generic.py` | `deploy/` | Model-agnostic deployer on the **vanilla `lmss_generic` image**: any GGUF via `--model-repo` / `--model-file`, draft + vision opt-in, `--gpu` takes any card the org lists. |
+| `deploy/deploy_ampere.py` | `deploy/` | Deployer for the **llamAmpere fork image** (turbo5/turbo4 KV cache — full 132k ATX ctx on a 24 GB card; ATX-Swift production profile is the built-in default; `--gpu` limited to the org's sm_86 30-series cards). |
 | `deploy/deploy_qwen38_9b.py` / `deploy/deploy_qwen9b.py` | `deploy/` | 9B deployers (`qwen38-9b`, `qwen9b`) — plain, no draft/vision/template. |
 
 Everything runs against org **`ma-casa-in-paris`**, project **`qwen38-27b`**.
@@ -357,7 +358,8 @@ on_salad/
 ├── salad_client.py                 # SaladCloud OpenAPI client (stdlib)
 ├── deploy/                         # create-or-update deployers + the keys they read
 │   ├── deploy_qwen38_27b.py        # canonical 27B deployer (qwen38-27b-q6k)
-│   ├── deploy_generic.py           # model-agnostic (lmss_generic)
+│   ├── deploy_generic.py           # model-agnostic (vanilla lmss_generic, any card)
+│   ├── deploy_ampere.py            # llamAmpere fork build (sm_86 cards, ATX profile)
 │   ├── deploy_qwen38_9b.py / deploy_qwen9b.py   # 9B deployers
 │   ├── salad_api.txt  hft.txt      # KEYS — gitignored, chmod 600, never printed
 ├── docker/
