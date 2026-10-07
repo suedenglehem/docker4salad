@@ -53,6 +53,16 @@ the stock Qwen template raises on them). --no-claude-template sends 'none',
 which serves the gguf's embedded template as-is (cline/py/opencode).
 Non-Qwen ggufs (no raise-marker) get the patch skipped by the script.
 
+EXTRA_ARGS (default 'none') is ONE whitespace-separated string of extra
+llama-server args. At startup the image word-splits it and appends the
+tokens LAST to the llama-server argv; llama.cpp resolves duplicate flags
+LAST-WINS, so a group's EXTRA_ARGS can override the baked base flags
+(e.g. '--threads-batch 8 --top-k 40 --temp 0.2 --ctx-size 131072') without a
+per-tuning image. No shell quoting: every whitespace-separated token
+becomes one argv entry (llama.cpp flag values don't contain whitespace in
+practice). Requires the generic-v3+ image (the cuda128-v2 digest pin below
+predates EXTRA_ARGS — push a fresh tag and re-pin before using it).
+
 SALAD_API_KEY is read from deploy/salad_api.txt by salad_client; HF_TOKEN from
 hft.txt (next to this script; validated via whoami-v2; neither is ever printed).
 
@@ -62,6 +72,7 @@ Usage:
     python3 deploy/deploy_generic.py --vision-model none            # no vision
     python3 deploy/deploy_generic.py --draft-model hf://<org>/<repo>/<draft.gguf>
     python3 deploy/deploy_generic.py --spec-type ngram-mod          # non-MTP gguf, no draft
+    python3 deploy/deploy_generic.py --extra-args "--top-k 40 --repeat-last-n 256 --reasoning-format none"
     python3 deploy/deploy_generic.py --model-repo <org>/<name> --model-file <quant.gguf> \
         --model-alias my-model
 """
@@ -126,6 +137,10 @@ VISION_MODEL = ("hf://bjivanovich/ATX-Swift-1.5-Qwen3.8-27B-Uncensored-"
                 "MTP-GGUF/mmproj-BF16.gguf")
 # Speculation mode: draft-mtp | ngram-mod | none.
 SPEC_TYPE = "draft-mtp"
+# One whitespace-separated string of extra llama-server args, appended LAST
+# to the argv (duplicate flags last-wins -> overrides the baked base flags).
+# "none" = off (never empty: the SaladCloud API rejects empty env values).
+EXTRA_ARGS = "none"
 
 HF_TOKEN_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "hft.txt")
 
@@ -183,6 +198,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--spec-type", choices=SPEC_TYPE_CHOICES, default=SPEC_TYPE,
                         help="speculation mode: draft-mtp (embedded or separate MTP head), "
                              "ngram-mod (n-gram self-speculation, no MTP needed), none (off)")
+    parser.add_argument("--extra-args", default=EXTRA_ARGS,
+                        help="env EXTRA_ARGS — one whitespace-separated string of extra "
+                             "llama-server args appended LAST to the argv (duplicate flags "
+                             "last-wins: these override the baked base flags, e.g. "
+                             "'--threads-batch 8 --top-k 40 --temp 0.2'); no shell quoting; "
+                             "'none' = off")
     parser.add_argument("--ctx-size", default="90000",
                         help="env CTX_SIZE (90000 = the Q5_K_M/3090 fit; 132768 = full, 5090)")
     parser.add_argument("--disk-size", type=float, default=50.0,
@@ -240,7 +261,8 @@ def load_hf_token(path: str = HF_TOKEN_FILE) -> str | None:
 def build_env(name: str, ctx_size: str, model_repo: str, model_file: str,
               model_alias: str, draft_model: str, vision_model: str,
               spec_type: str, hf_token: str | None,
-              claude_template: str = "1") -> dict[str, str]:
+              claude_template: str = "1",
+              extra_args: str = "none") -> dict[str, str]:
     """Full env for the group (create sets it, PATCH replaces it wholesale).
 
     The generic image is model-agnostic: MODEL_REPO / MODEL_FILE /
@@ -255,6 +277,10 @@ def build_env(name: str, ctx_size: str, model_repo: str, model_file: str,
     template from the freshly downloaded gguf and applies the one-line
     Claude Code patch (mid-conversation system messages) via
     --chat-template-file; 'none' = serve the gguf's embedded template as-is.
+
+    EXTRA_ARGS: one whitespace-separated string of extra llama-server args,
+    word-split at startup and appended LAST to the argv (duplicate flags
+    last-wins -> overrides the baked base flags); 'none' = off.
     """
     env = {
         "GPU_ID": "0",
@@ -275,6 +301,12 @@ def build_env(name: str, ctx_size: str, model_repo: str, model_file: str,
         # and apply the one-line mid-conversation-system patch (--no-claude-
         # template sends 'none' -> embedded template as-is).
         "CLAUDE_TEMPLATE": claude_template,
+        # Extra llama-server args: one whitespace-separated string, appended
+        # LAST to the argv (last-wins override of the baked base flags);
+        # 'none' = off (never empty: the API rejects empty env values).
+        # Harmless on images that predate EXTRA_ARGS (the env is simply
+        # unread).
+        "EXTRA_ARGS": extra_args,
     }
     if hf_token:
         env["HF_TOKEN"] = hf_token
@@ -358,7 +390,8 @@ def main() -> int:
     env = build_env(group, args.ctx_size, args.model_repo, args.model_file,
                     args.model_alias, args.draft_model, args.vision_model,
                     args.spec_type, hf_token,
-                    claude_template="none" if args.no_claude_template else "1")
+                    claude_template="none" if args.no_claude_template else "1",
+                    extra_args=args.extra_args)
 
     existing = get_group(org, project, group)
     if existing is not None:
@@ -460,7 +493,10 @@ def main() -> int:
           + (f" --model-draft ..." if args.draft_model != "none" else " (no --model-draft, "
              f"DRAFT_MODEL={args.draft_model})")
           + (f" --mmproj ..." if args.vision_model != "none" else " (no --mmproj)")
-          + f" --alias {args.model_alias}")
+          + f" --alias {args.model_alias}"
+          + (f", and the EXTRA_ARGS tail appended last: {args.extra_args}"
+             if args.extra_args != "none"
+             else " (EXTRA_ARGS=none — no extra args)"))
     print(f"      3. gateway answers only after the probe passes (/ready, ~40-min window, first probe at 30 s):")
     print(f"         claude/curl_salad.sh -url https://{dns} -m {args.model_alias}")
     return 0

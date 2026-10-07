@@ -46,6 +46,17 @@
 # the one-line Claude Code patch (mid-conversation system messages) via
 # --chat-template-file.
 #
+# EXTRA ARGS — the EXTRA_ARGS env (default "none") is ONE STRING of extra
+# llama-server args, whitespace-separated (e.g. "--threads-batch 8 --top-k 40
+# --repeat-last-n 256 --reasoning-format none"). At startup it is word-split
+# and APPENDED AT THE END of the llama-server argv. llama.cpp resolves
+# duplicate flags LAST-WINS, so a group's EXTRA_ARGS can override the baked
+# base flags (e.g. "--ctx-size 131072 --flash-attn off --temp 0.2") without a
+# per-tuning image. Limitations: no shell quoting (every whitespace-separated
+# token becomes one argv entry; llama.cpp flag values do not contain
+# whitespace in practice); "none"/empty = off (the sentinel, never empty —
+# the SaladCloud API rejects empty env values, minLength 1).
+#
 # MODEL SELECTION is 100% group-env driven: the deployer (deploy_generic.py)
 # sets MODEL_REPO / MODEL_FILE / MODEL_ALIAS / CTX_SIZE per group. The image
 # inherits the v3 base defaults (JonathanColetti Qwen3.8 noMTP-Q4_K_M) only
@@ -69,7 +80,7 @@ FROM boris271142/lmss:cuda128-v3
 # first word, e.g. "lmss q6-mtp..." -> "lmss"). Override with
 # --build-arg LMSS_BUILD_ID="..." for a per-push id.
 ARG LMSS_BUILD_ID
-RUN printf '%s\n' "${LMSS_BUILD_ID:-lmss generic-v1 (hf runtime download, claude-template) 2026-10-05}" > /etc/llama-image-build
+RUN printf '%s\n' "${LMSS_BUILD_ID:-lmss generic-v3 (hf runtime download, claude-template, extra-args) 2026-10-07}" > /etc/llama-image-build
 
 # --- Claude Code template: dump+patch script (repo-root build context) ------
 # Zero dependencies (stdlib Python only); copied in and run at STARTUP, not at
@@ -103,6 +114,11 @@ ENV SPEC_TYPE=draft-mtp
 # one-line Claude Code patch applied (see CLAUDE TEMPLATE section above); the
 # patched file overrides CT.
 ENV CLAUDE_TEMPLATE=none
+# EXTRA_ARGS: one string of extra llama-server args, whitespace-separated;
+# word-split at startup and appended LAST to the llama-server argv (llama.cpp
+# duplicate flags = last wins, so these can override the baked base flags).
+# "none" (default) = off. See the EXTRA ARGS header section.
+ENV EXTRA_ARGS=none
 
 # --- Runtime CMD -------------------------------------------------------------
 # The v3 CMD with the wget2 DRAFT_MODEL_URL / VISION_MODEL_URL blocks replaced
@@ -205,6 +221,14 @@ case \"${SPEC_TYPE}\" in \
   none) SPEC=; ;; \
   *) echo \"llama-image: unknown SPEC_TYPE '${SPEC_TYPE}' (want draft-mtp|ngram-mod|none)\" >&2; exit 1; ;; \
 esac; \
+# Extra llama-server args (EXTRA_ARGS, see EXTRA ARGS header): word-split \
+# into EXTRA_ARGS_ARR (default IFS = whitespace) so each token becomes one \
+# argv entry; \"none\"/empty -> empty array, nothing appended. No shell \
+# quoting — a quoted value would land as ONE token, so keep values plain. \
+EXTRA_ARGS_ARR=(); \
+if [ -n \"${EXTRA_ARGS}\" ] && [ \"${EXTRA_ARGS}\" != \"none\" ]; then \
+  read -r -a EXTRA_ARGS_ARR <<< \"${EXTRA_ARGS}\"; \
+fi; \
 exec ${LLAMA_CPP_DIR}/build/bin/llama-server \
   --model \"${MODEL_DIR}/${MODEL_FILE}\" \
   --alias \"${MODEL_ALIAS}\" \
@@ -238,4 +262,9 @@ exec ${LLAMA_CPP_DIR}/build/bin/llama-server \
   --threads \"${THREADS}\" \
   --batch-size \"${BATCH_SIZE}\" \
   --ubatch-size \"${UBATCH_SIZE}\" \
+  # EXTRA_ARGS LAST: llama.cpp duplicate flags = last wins, so a group's \
+  # tuning overrides the base flags above (ctx-size, sampling, flash-attn, \
+  # cache types, spec params, ...) without a per-tuning image. The [@]+ \
+  # guard expands to nothing for an empty array under set -u. \
+  ${EXTRA_ARGS_ARR[@]+\"${EXTRA_ARGS_ARR[@]}\"} \
 "]

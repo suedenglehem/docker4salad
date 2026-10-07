@@ -26,7 +26,7 @@ echo "== env vars the container reads: effective vs baked default =="
 # the boris271142/lmss:cuda128-v3 base ENV, plus USE_DRAFT_MODEL (v4) and
 # CLAUDE_TEMPLATE (v5). The generic image
 # (docker/Dockerfile.lmss_generic) additionally bakes DRAFT_MODEL /
-# VISION_MODEL / SPEC_TYPE.
+# VISION_MODEL / SPEC_TYPE / EXTRA_ARGS.
 show_var() {
   # $1 = var name, $2 = baked default (literal __nobaked__ = the image does
   # not bake it at all; empty string = baked but empty)
@@ -76,6 +76,7 @@ show_var DRAFT_MODEL      none
 show_var VISION_MODEL     none
 show_var SPEC_TYPE        draft-mtp
 show_var SPEC_DRAFT_N_MAX 5
+show_var EXTRA_ARGS       none
 show_var HF_TOKEN         __nobaked__
 show_var API_KEY          ""
 show_var GPU_ID           0
@@ -106,6 +107,11 @@ echo "sentinel guards (!= \"none\") in PID1 cmdline: $GUARDS (informational)"
 if printf '%s' "$CMDLINE" | grep -q 'DRAFT_MODEL_URL'; then
   echo "  -> V3 (wget2) image: draft/vision downloaded at runtime via"
   echo "     DRAFT_MODEL_URL / VISION_MODEL_URL"
+elif printf '%s' "$CMDLINE" | grep -q 'EXTRA_ARGS_ARR'; then
+  echo "  -> GENERIC v3 image: + EXTRA_ARGS (one string of extra llama-server"
+  echo "     args, word-split at startup and appended LAST to the argv —"
+  echo "     duplicate flags last-wins, so a group can override the baked"
+  echo "     base flags); draft/vision via hf, spec mode from SPEC_TYPE"
 elif printf '%s' "$CMDLINE" | grep -q 'SPEC_TYPE'; then
   echo "  -> GENERIC image: draft/vision downloaded at runtime via the hf CLI"
   echo "     from"
