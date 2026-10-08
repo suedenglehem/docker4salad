@@ -27,6 +27,11 @@ calls move them — /health and /v1/models polls do NOT count, so readiness
 polling never keeps a group alive. The `llamacpp:requests_processing` gauge
 > 0 also counts (a long generation in flight).
 
+Scrape period is adaptive: at least 3 scrapes per timeout window
+(timeout / 3, floored at 5 s, capped at the 30 s default), so a small testing
+timeout (30 s) fires within ~timeout instead of up to timeout + 30 s late,
+while the default 600 s keeps the 30 s period.
+
 Safety rails:
   - The timer ARMS ONLY after llama-server's /health reports ok. Model
     download takes hours on slow workers; the watchdog never kills mid-boot.
@@ -67,7 +72,8 @@ import time
 import urllib.error
 import urllib.request
 
-POLL_S = 30.0            # metrics scrape period
+POLL_S = 30.0            # default metrics scrape period (small timeouts poll faster)
+POLL_MIN_S = 5.0         # floor on the adaptive scrape period (never hammer /metrics)
 HEALTH_PROBE_S = 30.0    # /health poll period while arming
 STATUS_EVERY_TICKS = 10  # log a heartbeat line every ~5 min
 SIGKILL_GRACE_S = 10     # SIGTERM grace before escalating to SIGKILL
@@ -210,7 +216,13 @@ def main() -> int:
 
     timeout = seconds("HEARTBEAT_TIMEOUT", 600) if mode == "heartbeat" else seconds("IDLE_TIMEOUT", 600)
     grace = seconds("IDLE_GRACE", 1800)
-    log(f"mode={mode} timeout={timeout}s grace={grace}s — arming: waiting for {HEALTH_URL} ok")
+    # Adaptive scrape period: at least 3 scrapes per timeout window, so a
+    # small timeout (e.g. 30 s in testing) fires within ~timeout, not up to
+    # timeout + 30 s late. The default 600 s keeps the 30 s period
+    # (min() caps at POLL_S); a 5 s floor keeps /metrics unharmed.
+    poll_s = min(POLL_S, max(timeout / 3.0, POLL_MIN_S))
+    log(f"mode={mode} timeout={timeout}s grace={grace}s poll={poll_s:.0f}s "
+        f"— arming: waiting for {HEALTH_URL} ok")
 
     # Arm only once llama-server is serving; never kill mid-download/boot.
     arm_deadline = time.monotonic() + grace
@@ -228,7 +240,7 @@ def main() -> int:
     ticks = 0
 
     while True:
-        time.sleep(POLL_S)
+        time.sleep(poll_s)
         ticks += 1
         score = activity()
         if score is None:

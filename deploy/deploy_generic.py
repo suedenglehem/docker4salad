@@ -244,7 +244,9 @@ def parse_args() -> argparse.Namespace:
                              "container exits")
     parser.add_argument("--heartbeat-timeout", default="600",
                         help="env HEARTBEAT_TIMEOUT — seconds without a client keepalive call "
-                             "(mode heartbeat) before the watchdog kills the container")
+                             "(mode heartbeat) before the watchdog kills the container. The "
+                             "client pinger fires every ~30 s, so keep this at ~2x the pinger "
+                             "period or more (60 s minimum) or pinger jitter can false-kill")
     parser.add_argument("--no-start", action="store_true", help="apply config only, do not start")
     return parser.parse_args()
 
