@@ -122,13 +122,14 @@ MODEL_ALIAS = "atx-swift-27b"
 # Digest-pinned: the API accepts the @sha256 ref verbatim, and it is the
 # airtight lever against the worker image cache (keyed by repo NAME — a tag
 # re-push can serve stale layers on workers that cached the old one). This
-# is the cuda128-v3 push (2026-10-07, build id 'lmss generic-v3 (hf runtime
-# download, claude-template, extra-args) 2026-10-07' — adds the EXTRA_ARGS
-# env: one string of extra llama-server args appended LAST to the argv,
-# duplicate flags last-wins); the tag form, for humans:
-#   boris271142/lmss_generic:cuda128-v3
+# is the cuda128-v4 push (2026-10-08, build id 'lmss generic-v4 (hf runtime
+# download, claude-template, extra-args, idle_watchdog + PID1 supervisor)
+# 2026-10-08' — idle/heartbeat self-shutdown watchdog + the PID1 supervisor
+# that makes its kill land; based on boris271142/lmss:cuda128-v4); the tag
+# form, for humans:
+#   boris271142/lmss_generic:cuda128-v4
 IMAGE = "boris271142/lmss_generic" \
-        "@sha256:a238efd5dddb99b812bc846f07f3a9499ba7232289f4d3c8d1de7f82a45752d4"
+        "@sha256:22a5552a3272cd4a69f3ab42b32d20a34695a186a6b73e18937f2fc76f0aa32e"
 
 MODEL_REPO = "bjivanovich/ATX-Swift-1.5-Qwen3.8-27B-Uncensored-MTP-GGUF"
 # Q5_K_M — MTP head embedded in the gguf (the 'MTP' in the repo name), so no

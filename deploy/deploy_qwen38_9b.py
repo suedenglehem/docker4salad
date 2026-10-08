@@ -79,7 +79,11 @@ GROUP_NAME = "qwen38-9b"
 # image ref to a digest no worker has seen (this group was PATCHed to
 # lmss@sha256:... for exactly that reason); with a plain tag, verify the
 # live build with version.sh in the container.
-IMAGE = "boris271142/lmss:cuda128-v3"
+# cuda128-v4 (2026-10-08): idle/heartbeat self-shutdown watchdog + the PID1
+# supervisor that makes its kill land (IDLE_SHUTDOWN=none baked = off by
+# default; arm it with --idle-shutdown on the CREATE path).
+IMAGE = "boris271142/lmss" \
+        "@sha256:248e072032e657cab37f5b439aa1a86f474ae2ede6b63cf179f84577a3ce6b9c"
 
 # The 7 card classes the old 'qwen9b' group ran on, by normalized base name
 # (parenthesized VRAM suffix stripped, lowercased, spaces removed).
