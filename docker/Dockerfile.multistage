@@ -206,13 +206,17 @@ COPY qwen3.8.q6.jinja ${LLAMA_CPP_DIR}/qwen3.8.q6.jinja
 #                 token totals, spec-decode) scraped from the local
 #                 /metrics endpoint (llama_stats.py, also on PATH).
 #                 `stats.sh --interval 2` for a live view.
+#   idle_watchdog.py - idle/heartbeat self-shutdown watchdog (started by the
+#                 CMD below when IDLE_SHUTDOWN is armed; see its docstring and
+#                 the ENV block below).
 COPY llm.sh /usr/local/bin/llm.sh
 COPY question.sh /usr/local/bin/question.sh
 COPY version.sh /usr/local/bin/version.sh
 COPY llama_stats.py /usr/local/bin/llama_stats.py
 COPY stats.sh /usr/local/bin/stats.sh
+COPY idle_watchdog.py /usr/local/bin/idle_watchdog.py
 RUN chmod +x /usr/local/bin/llm.sh /usr/local/bin/question.sh /usr/local/bin/version.sh \
-    /usr/local/bin/llama_stats.py /usr/local/bin/stats.sh \
+    /usr/local/bin/llama_stats.py /usr/local/bin/stats.sh /usr/local/bin/idle_watchdog.py \
     && printf '#!/bin/sh\nexec ps -p 1 -o etime=\n' > /usr/local/bin/uptime \
     && chmod +x /usr/local/bin/uptime
 
@@ -308,6 +312,21 @@ ENV THREADS=8 \
 # auth (see the conditional flag in CMD below).
 ENV API_KEY=
 
+# Idle/heartbeat self-shutdown (idle_watchdog.py, started by the CMD below).
+# Sentinel "none" (the default) = OFF: every group keeps the old behavior.
+#   idle      -> kill llama-server (container exits, group stops) after
+#                IDLE_TIMEOUT seconds with no chat traffic.
+#   heartbeat -> same, after HEARTBEAT_TIMEOUT seconds with no client pings
+#                (the cl_salad/chat_salad.sh keepalive pingers).
+# The watchdog arms only after /health is ok (never kills mid-download) and
+# gives up after IDLE_GRACE seconds of never-healthy. The group must run with
+# restart_policy=never for the self-exit to STAY stopped (the deployers set it
+# when the feature is armed; it is create-only in the Salad API).
+ENV IDLE_SHUTDOWN=none \
+    IDLE_TIMEOUT=600 \
+    HEARTBEAT_TIMEOUT=600 \
+    IDLE_GRACE=1800
+
 WORKDIR ${LLAMA_CPP_DIR}
 
 CMD ["/bin/bash", "-lc", "\
@@ -318,6 +337,10 @@ nohup python3 run_api.py >>\"${API_STATE_DIR}/api.log\" 2>&1 & \
 # [::]:8888, i.e. every IPv6 interface; fork handles concurrent connections. \
 nohup socat TCP6-LISTEN:8888,fork,reuseaddr TCP4:127.0.0.1:8080 >>\"${API_STATE_DIR}/socat.log\" 2>&1 & \
 nohup socat TCP6-LISTEN:8889,fork,reuseaddr TCP4:127.0.0.1:9999 >>\"${API_STATE_DIR}/socat2.log\" 2>&1 & \
+# Idle/heartbeat self-shutdown watchdog (IDLE_SHUTDOWN=none -> exits at once, \
+# zero effect; see the ENV block above). Arms only after llama-server /health \
+# is ok, so it never kills mid-download. \
+nohup python3 /usr/local/bin/idle_watchdog.py >>\"${API_STATE_DIR}/watchdog.log\" 2>&1 & \
 if [ ! -f \"${MODEL_DIR}/${MODEL_FILE}\" ]; then \
   # /startup flips to ok from here on (flag is read by api_app.py). \
   touch \"${API_STATE_DIR}/download_started\"; \
@@ -357,7 +380,7 @@ if [ -n \"${VISION_MODEL_URL}\" ] && [ \"${VISION_MODEL_URL}\" != \"none\" ]; th
     wget2 -c -O \"${VISION_PATH}\" \"${VISION_MODEL_URL}\"; \
   fi; \
 fi; \
-exec ${LLAMA_CPP_DIR}/build/bin/llama-server \
+${LLAMA_CPP_DIR}/build/bin/llama-server \
   --model \"${MODEL_DIR}/${MODEL_FILE}\" \
   --alias \"${MODEL_ALIAS}\" \
   --host \"${HOST}\" \
@@ -392,4 +415,17 @@ exec ${LLAMA_CPP_DIR}/build/bin/llama-server \
   --threads \"${THREADS}\" \
   --batch-size \"${BATCH_SIZE}\" \
   --ubatch-size \"${UBATCH_SIZE}\" \
-"]
+  # llama-server runs as a CHILD of this bash (PID 1), NOT via exec: the \
+  # kernel drops every signal — SIGKILL included — sent from inside a PID \
+  # namespace to a PID 1 with no handler installed, so a watchdog inside the \
+  # container can never kill a handler-less init (verified in-container). \
+  # This bash installs a SIGTERM trap (handler installed -> delivered): \
+  # idle_watchdog's kill(1, SIGTERM) lands, bash kills the server (children \
+  # take signals normally), and bash exiting tears down the PID namespace \
+  # (the kernel reaps everything left). docker stop's SIGTERM takes the same \
+  # graceful path. Exit code = the server's, so restart_policy sees reality. \
+  & \
+LLAMA_PID=$!; \
+trap 'kill -TERM \"$LLAMA_PID\" 2>/dev/null; exit 0' TERM INT; \
+wait \"$LLAMA_PID\"; \
+exit $?""]

@@ -1,7 +1,7 @@
 # =============================================================================
 # lmss_jonathancoletti_qwen38_q6_mtp_vision   (name spelling confirmed before push)
 #
-# A BAKED variant of boris271142/lmss:cuda128-v3 for the JonathanColetti
+# A BAKED variant of boris271142/lmss:cuda128-v4 for the JonathanColetti
 # Qwen3.8-27B quants. It extends the v3 runtime image (no recompile) and bakes
 # the two SMALL auxiliary models into /models as image layers, so at runtime the
 # group downloads ONLY the large main model from HuggingFace via the fast `hf`
@@ -47,7 +47,7 @@
 # docker/, so build from the repo root):
 #   docker build -f docker/Dockerfile.lmss_q6_mtp_vision \
 #     -t lmss_jonathancoletti_qwen38_q6_mtp_vision:dev .
-#   (base boris271142/lmss:cuda128-v3 is pulled if not local; the 27B repo is
+#   (base boris271142/lmss:cuda128-v4 is pulled if not local; the 27B repo is
 #    public so the bake `hf download` needs no token)
 #
 # PUSH (NEW repo name = fresh Salad worker cache key; then pin the manifest-list
@@ -56,7 +56,7 @@
 #   docker push boris271142/lmss_jonathancoletti_qwen38_q6_mtp_vision:<tag>
 # =============================================================================
 
-FROM boris271142/lmss:cuda128-v3
+FROM boris271142/lmss:cuda128-v4
 
 # --- Bake the two small auxiliary models into /models (build time) -----------
 # The v3 runtime image already has the `hf` CLI (huggingface_hub 1.28.0) +
@@ -78,7 +78,7 @@ RUN set -eux; \
 # first word, e.g. "lmss q6-mtp..." -> "lmss"). Override with
 # --build-arg LMSS_BUILD_ID="..." for a per-push id.
 ARG LMSS_BUILD_ID
-RUN printf '%s\n' "${LMSS_BUILD_ID:-lmss q6-mtp-vision-v5 (baked draft+vision, claude-template) 2026-10-05}" > /etc/llama-image-build
+RUN printf '%s\n' "${LMSS_BUILD_ID:-lmss q6-mtp-vision-v6 (baked draft+vision, claude-template, idle_watchdog + PID1 supervisor) 2026-10-08}" > /etc/llama-image-build
 
 # --- Claude Code template: dump+patch script (repo-root build context) ------
 # Zero dependencies (stdlib Python only); copied in and run at STARTUP, not at
@@ -107,6 +107,15 @@ ENV USE_DRAFT_MODEL=none
 # one-line Claude Code patch applied (see CLAUDE TEMPLATE section above); the
 # patched file overrides CT.
 ENV CLAUDE_TEMPLATE=none
+# Idle/heartbeat self-shutdown (idle_watchdog.py from the v3 base, started by
+# the CMD below): "none" (default) = OFF; idle -> kill after IDLE_TIMEOUT s of
+# no chat traffic; heartbeat -> kill after HEARTBEAT_TIMEOUT s of no client
+# pings. Arms only after /health ok; group needs restart_policy=never (set by
+# the deployers when armed) for the self-exit to stay stopped.
+ENV IDLE_SHUTDOWN=none \
+    IDLE_TIMEOUT=600 \
+    HEARTBEAT_TIMEOUT=600 \
+    IDLE_GRACE=1800
 
 # --- Runtime CMD -------------------------------------------------------------
 # Faithful copy of the v3 CMD with exactly two changes: (1) no wget2 for the
@@ -122,6 +131,10 @@ nohup python3 run_api.py >>\"${API_STATE_DIR}/api.log\" 2>&1 & \
 # :8889 -> 127.0.0.1:9999 (status API). TCP6-LISTEN binds [::]:<port>. \
 nohup socat TCP6-LISTEN:8888,fork,reuseaddr TCP4:127.0.0.1:8080 >>\"${API_STATE_DIR}/socat.log\" 2>&1 & \
 nohup socat TCP6-LISTEN:8889,fork,reuseaddr TCP4:127.0.0.1:9999 >>\"${API_STATE_DIR}/socat2.log\" 2>&1 & \
+# Idle/heartbeat self-shutdown watchdog (IDLE_SHUTDOWN=none -> exits at once, \
+# zero effect; see the ENV block above). Arms only after llama-server /health \
+# is ok, so it never kills mid-download. \
+nohup python3 /usr/local/bin/idle_watchdog.py >>\"${API_STATE_DIR}/watchdog.log\" 2>&1 & \
 # Main model: the ONLY runtime download (fast hf xet path). The draft + vision \
 # models are baked into the image layers, so there is no wget2 for them here. \
 if [ ! -f \"${MODEL_DIR}/${MODEL_FILE}\" ]; then \
@@ -166,7 +179,7 @@ DRAFT_PATH=; \
 if [ -n \"${USE_DRAFT_MODEL}\" ] && [ \"${USE_DRAFT_MODEL}\" != \"none\" ]; then \
   DRAFT_PATH=\"${DRAFT_BAKED}\"; \
 fi; \
-exec ${LLAMA_CPP_DIR}/build/bin/llama-server \
+${LLAMA_CPP_DIR}/build/bin/llama-server \
   --model \"${MODEL_DIR}/${MODEL_FILE}\" \
   --alias \"${MODEL_ALIAS}\" \
   --host \"${HOST}\" \
@@ -201,4 +214,17 @@ exec ${LLAMA_CPP_DIR}/build/bin/llama-server \
   --threads \"${THREADS}\" \
   --batch-size \"${BATCH_SIZE}\" \
   --ubatch-size \"${UBATCH_SIZE}\" \
-"]
+  # llama-server runs as a CHILD of this bash (PID 1), NOT via exec: the \
+  # kernel drops every signal — SIGKILL included — sent from inside a PID \
+  # namespace to a PID 1 with no handler installed, so a watchdog inside the \
+  # container can never kill a handler-less init (verified in-container). \
+  # This bash installs a SIGTERM trap (handler installed -> delivered): \
+  # idle_watchdog's kill(1, SIGTERM) lands, bash kills the server (children \
+  # take signals normally), and bash exiting tears down the PID namespace \
+  # (the kernel reaps everything left). docker stop's SIGTERM takes the same \
+  # graceful path. Exit code = the server's, so restart_policy sees reality. \
+  & \
+LLAMA_PID=$!; \
+trap 'kill -TERM \"$LLAMA_PID\" 2>/dev/null; exit 0' TERM INT; \
+wait \"$LLAMA_PID\"; \
+exit $?""]

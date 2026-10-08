@@ -17,6 +17,11 @@
 #                    standard ports; never the in-container gateway port 8888)
 #   SALAD_MODEL      model alias   (default qwen38-27b)
 #   SALAD_KEYFILE    file holding the Salad-Api-Key (default: ./salad_api.txt)
+#   SALAD_HEARTBEAT  1 = send a 1-token keepalive to the gateway every 30 s
+#                    while the chat runs — needed when the group is deployed
+#                    with IDLE_SHUTDOWN=heartbeat (the in-container watchdog
+#                    self-stops the group HEARTBEAT_TIMEOUT s after pings
+#                    stop; real chat traffic also counts as activity)
 #
 # Readiness: /v1/models is checked ONCE — 200 means a ready instance is
 # serving. 404 = group stopped or still downloading; 403 = gateway rejects
@@ -69,18 +74,50 @@ if [ "$code" != "200" ]; then
   exit 2
 fi
 
+# ---- heartbeat keepalive (opt-in: SALAD_HEARTBEAT=1) ------------------------
+# When the group runs with IDLE_SHUTDOWN=heartbeat, the in-container watchdog
+# kills the container HEARTBEAT_TIMEOUT s after token counters go flat. This
+# loop posts a 1-token completion through the gateway every 30 s while the
+# chat lives, so the group self-stops shortly after a dead connection (closed
+# terminal, lost SSH) instead of billing for hours. Real chat traffic also
+# counts as activity — the pinger is just the floor.
+HEARTBEAT_PID=""
+cleanup() {
+  [ -n "$HEARTBEAT_PID" ] && kill "$HEARTBEAT_PID" 2>/dev/null
+}
+trap cleanup EXIT
+if [ "${SALAD_HEARTBEAT:-0}" = "1" ]; then
+  (
+    while :; do
+      curl -m 10 -s -o /dev/null \
+        -H "Salad-Api-Key: $SALAD_KEY" \
+        -H "Content-Type: application/json" \
+        -X POST "https://${UPSTREAM}:${PORT}/v1/completions" \
+        -d "{\"model\":\"$MODEL\",\"prompt\":\".\",\"max_tokens\":1}" \
+        2>/dev/null
+      sleep 30
+    done
+  ) &
+  HEARTBEAT_PID=$!
+  echo "chat_salad: heartbeat keepalive ON (1-token call every 30 s; the group self-stops when this chat dies)" >&2
+fi
+
 # ---- chat --------------------------------------------------------------------
 # `llm openai endpoint URL` sets the OpenAI SDK base_url; the SDK itself
 # appends /chat/completions, so the URL must end at /v1 — NOT at
 # /v1/chat/completions (that yields /v1/chat/completions/chat/completions → 404).
 # -H sends the Salad-Api-Key header on every request — llm has no other way.
+# No `exec` when the heartbeat runs: this shell must stay as the parent so
+# the EXIT trap fires and kills the pinger when the chat ends.
 LLM_BIN="$(command -v llm || echo "$HOME/.local/bin/llm")"
 BASE="https://${UPSTREAM}:${PORT}/v1"
 
 if [ $# -gt 0 ]; then
   # One-shot (extra args pass through to llm, e.g. -s "sys")
-  exec "$LLM_BIN" openai endpoint "$BASE" -m "$MODEL" -H "Salad-Api-Key" "$SALAD_KEY" "$@"
+  "$LLM_BIN" openai endpoint "$BASE" -m "$MODEL" -H "Salad-Api-Key" "$SALAD_KEY" "$@"
 else
   # Interactive chat
-  exec "$LLM_BIN" openai endpoint "$BASE" -m "$MODEL" -H "Salad-Api-Key" "$SALAD_KEY" --chat
+  "$LLM_BIN" openai endpoint "$BASE" -m "$MODEL" -H "Salad-Api-Key" "$SALAD_KEY" --chat
 fi
+status=$?
+exit "$status"

@@ -122,6 +122,19 @@ except Exception:
 print((d.get("networking") or {}).get("dns") or "")'
 }
 
+# print the group's IDLE_SHUTDOWN env ("none"/"idle"/"heartbeat", "" if absent)
+group_idle_mode() {
+    curl -sS -H "Salad-Api-Key: $SALAD_KEY" \
+        "$SALAD_API/organizations/$ORG/projects/$PROJ/containers/$GROUP" 2>/dev/null \
+    | "$PY" -c 'import sys,json
+try:
+    d=json.load(sys.stdin)
+except Exception:
+    raise SystemExit
+env = (d.get("container") or {}).get("environment_variables") or {}
+print(env.get("IDLE_SHUTDOWN") or "")'
+}
+
 # ---- resolve the gateway ----------------------------------------------------
 # Normalise whatever we have to host[:port]: drop the scheme, then any path.
 GATEWAY_HOST="$URL"
@@ -203,6 +216,18 @@ if [ "$NO_RUN" = "1" ]; then
     echo "cl_salad_deploy: done (no claude, per --no-run). To run Claude Code:" >&2
     echo "cl_salad_deploy:   cl_salad $GATEWAY_HOST" >&2
     exit 0
+fi
+
+# Heartbeat auto-detect: when the group runs with IDLE_SHUTDOWN=heartbeat,
+# the client IS the lifeline — the in-container watchdog self-stops the group
+# HEARTBEAT_TIMEOUT s after keepalive pings stop. Export SALAD_HEARTBEAT=1 so
+# cl_salad (and any chat_salad.sh the user runs against this gateway) pings a
+# 1-token completion every 30 s. A manually-set SALAD_HEARTBEAT is respected
+# for 'idle'/'none' groups (extra keepalive is harmless).
+IDLE_MODE="$(group_idle_mode)"
+if [ "$IDLE_MODE" = "heartbeat" ]; then
+    export SALAD_HEARTBEAT=1
+    echo "cl_salad_deploy: group runs IDLE_SHUTDOWN=heartbeat — keepalive enabled (SALAD_HEARTBEAT=1)" >&2
 fi
 
 # Export the resolved configuration; cl_salad picks it up, re-checks the

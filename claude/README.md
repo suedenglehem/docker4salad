@@ -61,6 +61,13 @@ cl_salad https://<dns> -p "Say hi"        # everything after the URL goes to cla
 - Other overrides: `SALAD_GATEWAY_HOST`, `SALAD_MODEL_ALIAS`
   (default `qwen38-27b` — keep stable across group recreations; clients
   depend on it), `SALAD_KEYFILE`, `CLAUDE_BIN`.
+- **Heartbeat keepalive** (`SALAD_HEARTBEAT=1`, default 0): while the session
+  lives, a background loop posts a **1-token completion** to the gateway every
+  30 s. Needed when the group runs with `IDLE_SHUTDOWN=heartbeat` — the
+  in-container watchdog self-stops the group `HEARTBEAT_TIMEOUT` s after the
+  pings stop, i.e. shortly after a dead connection (closed terminal, lost
+  SSH), instead of billing for hours. `cl_salad_deploy` sets it automatically
+  from the group env; the pinger dies with the session (EXIT trap).
 
 ## cl_salad_deploy — start (if needed) + wait + run
 
@@ -88,6 +95,12 @@ cl_salad_deploy --group qwen38-27b-q5 -- -p "Say hi"   # -- ends option parsing
   `stopped` it bails early (it will never become ready; check the Salad UI).
 - Handoff: exports the resolved config and `exec cl_salad <dns> <claude args>`;
   cl_salad's fast 200 path then takes over.
+- **Heartbeat auto-detect**: before the handoff it reads the group's
+  `IDLE_SHUTDOWN` env from the management API; when it's `heartbeat` it
+  exports `SALAD_HEARTBEAT=1`, so cl_salad (and any `chat_salad.sh` run
+  against this gateway) keeps the group alive with a 1-token call every 30 s
+  — the client follows the docker side. A manually-set `SALAD_HEARTBEAT=1`
+  works on any group (extra keepalive is harmless).
 
 ## salad_proxy.py — the bridge (run by the wrappers, standalone-able)
 
@@ -127,7 +140,11 @@ completions). Defaults to the production `qwen38-27b-q6k` gateway; point it
 elsewhere with `SALAD_UPSTREAM` / `SALAD_PORT` / `SALAD_MODEL` /
 `SALAD_KEYFILE`. It checks `/v1/models` once and dies (exit 2, hint per
 failure code) if the group is not serving; `SALAD_WAIT=1` polls for up to
-5 min instead, for a group mid cold start.
+5 min instead, for a group mid cold start. `SALAD_HEARTBEAT=1` starts the
+same 1-token keepalive loop (every 30 s) for the duration of the chat —
+needed against a group deployed with `IDLE_SHUTDOWN=heartbeat`; the pinger
+is killed by the EXIT trap when the chat ends (the `llm` call runs in the
+foreground, not via `exec`, so the trap fires).
 
 ## Keys — don't mix them up
 

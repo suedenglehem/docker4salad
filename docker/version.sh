@@ -77,6 +77,10 @@ show_var VISION_MODEL     none
 show_var SPEC_TYPE        draft-mtp
 show_var SPEC_DRAFT_N_MAX 5
 show_var EXTRA_ARGS       none
+show_var IDLE_SHUTDOWN    none
+show_var IDLE_TIMEOUT     600
+show_var HEARTBEAT_TIMEOUT 600
+show_var IDLE_GRACE       1800
 show_var HF_TOKEN         __nobaked__
 show_var API_KEY          ""
 show_var GPU_ID           0
@@ -104,7 +108,14 @@ echo "sentinel guards (!= \"none\") in PID1 cmdline: $GUARDS (informational)"
 # Marker-based classification: each generation's CMD contains env var names
 # the previous ones never did, so their presence identifies the build.
 # (The old '>= 3 guards' count misclassified v4, which has exactly 2.)
-if printf '%s' "$CMDLINE" | grep -q 'DRAFT_MODEL_URL'; then
+if printf '%s' "$CMDLINE" | grep -q 'idle_watchdog'; then
+  echo "  -> WATCHDOG generation: + idle/heartbeat self-shutdown"
+  echo "     (idle_watchdog.py started by the CMD; IDLE_SHUTDOWN=none|idle|"
+  echo "     heartbeat, kill llama-server after the timeout -> container exits"
+  echo "     -> group stops when restart_policy=never). Watchdog log:"
+  echo "     \${API_STATE_DIR}/watchdog.log; live check:"
+  echo "     ps -eo pid,args | grep idle_watchdog"
+elif printf '%s' "$CMDLINE" | grep -q 'DRAFT_MODEL_URL'; then
   echo "  -> V3 (wget2) image: draft/vision downloaded at runtime via"
   echo "     DRAFT_MODEL_URL / VISION_MODEL_URL"
 elif printf '%s' "$CMDLINE" | grep -q 'EXTRA_ARGS_ARR'; then

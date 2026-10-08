@@ -104,6 +104,14 @@ READINESS_PROBE = {
 }
 
 
+# Idle/heartbeat self-shutdown (the in-container idle_watchdog.py): "none"
+# (default) = off, today's behavior; "idle" = kill after IDLE_TIMEOUT s of no
+# chat traffic; "heartbeat" = kill after HEARTBEAT_TIMEOUT s of no client
+# keepalive pings (run the client with SALAD_HEARTBEAT=1).
+IDLE_SHUTDOWN = "none"
+IDLE_SHUTDOWN_CHOICES = ("none", "idle", "heartbeat")
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Create container group qwen9b (Qwen3.8-9B on RTX 3090, no draft/vision/template).",
@@ -130,6 +138,22 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--n-gpu-layers", default="99", help="env N_GPU_LAYERS")
     parser.add_argument("--gpu-id", default="0",
                         help="env GPU_ID (SaladCloud exposes one card per container -> index 0)")
+    parser.add_argument("--idle-shutdown", choices=IDLE_SHUTDOWN_CHOICES, default=IDLE_SHUTDOWN,
+                        help="env IDLE_SHUTDOWN — in-container watchdog mode: none (off), "
+                             "idle (self-stop after --idle-timeout s with no chat traffic), "
+                             "heartbeat (self-stop after --heartbeat-timeout s with no client "
+                             "keepalive pings — run cl_salad/chat_salad.sh with "
+                             "SALAD_HEARTBEAT=1). Needs a watchdog-capable image "
+                             "(version.sh prints the WATCHDOG generation). Armed mode sets "
+                             "restart_policy=never so the self-exit STAYS stopped (this "
+                             "deployer is create-only, so the policy is set at creation)")
+    parser.add_argument("--idle-timeout", default="600",
+                        help="env IDLE_TIMEOUT — seconds of flat token counters on /metrics "
+                             "(mode idle) before the watchdog SIGTERMs llama-server and the "
+                             "container exits")
+    parser.add_argument("--heartbeat-timeout", default="600",
+                        help="env HEARTBEAT_TIMEOUT — seconds without a client keepalive call "
+                             "(mode heartbeat) before the watchdog kills the container")
     return parser.parse_args()
 
 
@@ -208,6 +232,12 @@ def main() -> int:
         "CTX_SIZE": args.ctx_size,
         "N_GPU_LAYERS": args.n_gpu_layers,
         "NAME": group,
+        # Idle/heartbeat self-shutdown (in-container idle_watchdog.py):
+        # 'none' = off; 'idle'/'heartbeat' arm the watchdog (see --idle-shutdown).
+        # Harmless on images that predate the watchdog (the env is unread).
+        "IDLE_SHUTDOWN": args.idle_shutdown,
+        "IDLE_TIMEOUT": args.idle_timeout,
+        "HEARTBEAT_TIMEOUT": args.heartbeat_timeout,
     }
     memory_mb = int(round(args.memory_size * 1024))
     storage_amount = int(round(args.disk_size * 1024**3))
@@ -216,7 +246,9 @@ def main() -> int:
         display_name=group,
         autostart_policy=False,
         replicas=1,
-        restart_policy="always",
+        # 'never' when the watchdog is armed: its SIGTERM of PID 1 exits
+        # the container and Salad leaves the group STOPPED (free).
+        restart_policy="never" if args.idle_shutdown != "none" else "always",
         container_image=args.image,
         environment_variables=env,
         cpu=8,

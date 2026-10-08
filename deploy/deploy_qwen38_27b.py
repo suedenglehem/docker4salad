@@ -141,6 +141,12 @@ MODEL_FILE = "Qwen3.8-27B-Uncensored-Q5_K_M.gguf"
 HF_TOKEN_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "hft.txt")
 
 GPU_CHOICES = ("rtx5090", "rtx3090")
+# Idle/heartbeat self-shutdown (the in-container idle_watchdog.py): "none"
+# (default) = off, today's behavior; "idle" = kill after IDLE_TIMEOUT s of no
+# chat traffic; "heartbeat" = kill after HEARTBEAT_TIMEOUT s of no client
+# keepalive pings (run the client with SALAD_HEARTBEAT=1).
+IDLE_SHUTDOWN = "none"
+IDLE_SHUTDOWN_CHOICES = ("none", "idle", "heartbeat")
 
 # Readiness failure window for a cold worker: 30 s delay + 20 x 120 s =
 # 2430 s (~40 min). The spec caps failure_threshold at 20, period at 120,
@@ -194,6 +200,24 @@ def parse_args() -> argparse.Namespace:
                         help="env CLAUDE_TEMPLATE=none — serve the gguf's embedded chat "
                              "template as-is, no Claude Code patch (default CLAUDE_TEMPLATE=1 "
                              "applies the one-line mid-conversation-system patch at startup)")
+    parser.add_argument("--idle-shutdown", choices=IDLE_SHUTDOWN_CHOICES, default=IDLE_SHUTDOWN,
+                        help="env IDLE_SHUTDOWN — in-container watchdog mode: none (off), "
+                             "idle (self-stop after --idle-timeout s with no chat traffic), "
+                             "heartbeat (self-stop after --heartbeat-timeout s with no client "
+                             "keepalive pings — run cl_salad/chat_salad.sh with "
+                             "SALAD_HEARTBEAT=1). Needs a watchdog-capable image "
+                             "(version.sh prints the WATCHDOG generation). Armed mode needs "
+                             "restart_policy=never so the self-exit STAYS stopped — that is "
+                             "CREATE-ONLY (not in the PATCH schema): an existing group with "
+                             "restart_policy=always must be deleted + recreated with a fresh "
+                             "name (names tombstone 10+ min; keep the MODEL_ALIAS stable)")
+    parser.add_argument("--idle-timeout", default="600",
+                        help="env IDLE_TIMEOUT — seconds of flat token counters on /metrics "
+                             "(mode idle) before the watchdog SIGTERMs llama-server and the "
+                             "container exits")
+    parser.add_argument("--heartbeat-timeout", default="600",
+                        help="env HEARTBEAT_TIMEOUT — seconds without a client keepalive call "
+                             "(mode heartbeat) before the watchdog kills the container")
     parser.add_argument("--no-start", action="store_true", help="apply config only, do not start")
     return parser.parse_args()
 
@@ -239,7 +263,9 @@ def load_hf_token(path: str = HF_TOKEN_FILE) -> str | None:
 
 
 def build_env(name: str, ctx_size: str, use_draft_model: str, hf_token: str | None,
-              model_file: str | None = None, claude_template: str = "1") -> dict[str, str]:
+              model_file: str | None = None, claude_template: str = "1",
+              idle_shutdown: str = "none", idle_timeout: str = "600",
+              heartbeat_timeout: str = "600") -> dict[str, str]:
     """Full env for the group (create sets it, PATCH replaces it wholesale).
 
     The baked image drops v3's DRAFT_MODEL_URL / VISION_MODEL_URL: the draft +
@@ -277,6 +303,14 @@ def build_env(name: str, ctx_size: str, use_draft_model: str, hf_token: str | No
         # Any other value -> the image passes --model-draft
         # /models/...draft-Q8_0.gguf (needed for noMTP quants).
         "USE_DRAFT_MODEL": use_draft_model,
+        # Idle/heartbeat self-shutdown (in-container idle_watchdog.py):
+        # 'none' = off; 'idle' = kill after IDLE_TIMEOUT s of no chat
+        # traffic; 'heartbeat' = kill after HEARTBEAT_TIMEOUT s of no client
+        # keepalive pings. Always sent (PATCH replaces the env wholesale);
+        # harmless on images that predate the watchdog (the env is unread).
+        "IDLE_SHUTDOWN": idle_shutdown,
+        "IDLE_TIMEOUT": idle_timeout,
+        "HEARTBEAT_TIMEOUT": heartbeat_timeout,
     }
     if hf_token:
         env["HF_TOKEN"] = hf_token
@@ -358,7 +392,10 @@ def main() -> int:
     hf_token = load_hf_token()
     print(f"      token {'validated' if hf_token else 'UNAVAILABLE — model download will run unauthenticated'}")
     env = build_env(group, args.ctx_size, args.use_draft_model, hf_token, args.model_file,
-                    claude_template="none" if args.no_claude_template else "1")
+                    claude_template="none" if args.no_claude_template else "1",
+                    idle_shutdown=args.idle_shutdown,
+                    idle_timeout=args.idle_timeout,
+                    heartbeat_timeout=args.heartbeat_timeout)
 
     existing = get_group(org, project, group)
     if existing is not None:
@@ -376,6 +413,16 @@ def main() -> int:
             print("      stopped")
         if args.no_start and existing.current_status in ("running", "scaling"):
             print("      NOTE: --no-start while running — the PATCH takes effect on the next start")
+        live_policy = existing.raw.get("restart_policy")
+        if args.idle_shutdown != "none" and live_policy == "always":
+            print(f"      WARNING: --idle-shutdown {args.idle_shutdown!r} arms the in-container "
+                  "watchdog, but this group's restart_policy is 'always' — after the watchdog's "
+                  "self-exit Salad RESTARTS the container and billing continues. restart_policy "
+                  "is CREATE-ONLY (not in the PATCH schema, so this update cannot flip it): to "
+                  "arm, delete the group and recreate it with the same flags — fresh --group "
+                  "name (the deleted name tombstones 10+ min), keep the MODEL_ALIAS stable for "
+                  "clients. The env knobs are applied; the watchdog stays harmless (it kills, "
+                  "the container restarts) — do NOT leave it armed on an 'always' group.")
         result = update_container_group(
             org, project, group,
             UpdateContainerGroupRequest(
@@ -403,7 +450,10 @@ def main() -> int:
             display_name=group,
             autostart_policy=False,
             replicas=1,
-            restart_policy="always",
+            # 'never' when the watchdog is armed: its SIGTERM of PID 1 exits
+            # the container and Salad leaves the group STOPPED (free). With
+            # 'always' the self-exit would just restart the container.
+            restart_policy="never" if args.idle_shutdown != "none" else "always",
             container_image=args.image,
             command=(),
             environment_variables=env,

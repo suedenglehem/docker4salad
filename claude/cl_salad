@@ -28,6 +28,10 @@
 #   SALAD_KEYFILE         default <script dir>/salad_api.txt
 #   SALAD_PROXY_PORT      default 8093
 #   SALAD_ENABLE_THINKING default 0 (1 to enable Qwen thinking)
+#   SALAD_HEARTBEAT       default 0 (1 = send a 1-token keepalive to the
+#                         gateway every 30 s — needed when the group runs with
+#                         IDLE_SHUTDOWN=heartbeat; cl_salad_deploy sets it
+#                         automatically from the group env)
 #   CLAUDE_CODE_MAX_CONTEXT_TOKENS / CLAUDE_CODE_MAX_OUTPUT_TOKENS  token caps
 #
 # NOTE on token caps: the served model has n_ctx = 90112 (CTX_SIZE=90000,
@@ -112,8 +116,10 @@ echo "cl_salad: model ready on $GATEWAY_HOST — starting proxy on 127.0.0.1:$PR
 
 # ---- launch the proxy ----------------------------------------------------
 PROXY_PID=""
+HEARTBEAT_PID=""
 cleanup() {
     [ -n "$PROXY_PID" ] && kill "$PROXY_PID" 2>/dev/null
+    [ -n "$HEARTBEAT_PID" ] && kill "$HEARTBEAT_PID" 2>/dev/null
 }
 trap cleanup EXIT
 
@@ -136,6 +142,30 @@ while [ "$i" -lt 25 ]; do
     sleep 0.2
 done
 
+# ---- heartbeat keepalive (opt-in: SALAD_HEARTBEAT=1) ----------------------
+# When the group runs with IDLE_SHUTDOWN=heartbeat, the in-container watchdog
+# kills the container HEARTBEAT_TIMEOUT s after token counters go flat. This
+# loop posts a 1-token completion through the gateway every 30 s while this
+# session lives, so the group self-stops shortly after a dead connection
+# (closed terminal, lost SSH) instead of billing for hours. Real chat traffic
+# also counts as activity — the pinger is just the floor. cl_salad_deploy
+# exports SALAD_HEARTBEAT=1 automatically when the group env says heartbeat.
+if [ "${SALAD_HEARTBEAT:-0}" = "1" ]; then
+    (
+        while :; do
+            curl -m 10 -s -o /dev/null \
+                -H "Salad-Api-Key: $SALAD_KEY" \
+                -H "Content-Type: application/json" \
+                -X POST "$GATEWAY_BASE/v1/completions" \
+                -d "{\"model\":\"$MODEL_ALIAS\",\"prompt\":\".\",\"max_tokens\":1}" \
+                2>/dev/null
+            sleep 30
+        done
+    ) &
+    HEARTBEAT_PID=$!
+    echo "cl_salad: heartbeat keepalive ON (1-token call every 30 s; the group self-stops when this session dies)" >&2
+fi
+
 # ---- point Claude Code at the proxy and run ------------------------------
 export ANTHROPIC_BASE_URL="http://127.0.0.1:$PROXY_PORT"
 export ANTHROPIC_API_KEY="local"
@@ -144,4 +174,5 @@ export ANTHROPIC_API_KEY="local"
 status=$?
 kill "$PROXY_PID" 2>/dev/null
 wait "$PROXY_PID" 2>/dev/null
+[ -n "$HEARTBEAT_PID" ] && { kill "$HEARTBEAT_PID" 2>/dev/null; wait "$HEARTBEAT_PID" 2>/dev/null; }
 exit "$status"    # claude's own code — don't leak the proxy's TERM status

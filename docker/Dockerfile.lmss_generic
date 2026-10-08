@@ -1,7 +1,7 @@
 # =============================================================================
 # lmss_generic   (name spelling confirmed before push)
 #
-# The GENERIC model image: FROM boris271142/lmss:cuda128-v3 with NO baked
+# The GENERIC model image: FROM boris271142/lmss:cuda128-v4 with NO baked
 # models. At runtime everything is downloaded from HuggingFace via the fast
 # `hf` xet path — the large main model AND the optional MTP draft and vision
 # projector. It is the generic counterpart of lmss_jonathancoletti_qwen38_
@@ -72,7 +72,7 @@
 #   docker push boris271142/lmss_generic:cuda128-v1
 # =============================================================================
 
-FROM boris271142/lmss:cuda128-v3
+FROM boris271142/lmss:cuda128-v4
 
 # Build id for /usr/local/bin/version.sh (same file the v3 image writes).
 # The default lives in the RUN (shell ${ARG:-default}), NOT in the ARG line —
@@ -80,7 +80,7 @@ FROM boris271142/lmss:cuda128-v3
 # first word, e.g. "lmss q6-mtp..." -> "lmss"). Override with
 # --build-arg LMSS_BUILD_ID="..." for a per-push id.
 ARG LMSS_BUILD_ID
-RUN printf '%s\n' "${LMSS_BUILD_ID:-lmss generic-v3 (hf runtime download, claude-template, extra-args) 2026-10-07}" > /etc/llama-image-build
+RUN printf '%s\n' "${LMSS_BUILD_ID:-lmss generic-v4 (hf runtime download, claude-template, extra-args, idle_watchdog + PID1 supervisor) 2026-10-08}" > /etc/llama-image-build
 
 # --- Claude Code template: dump+patch script (repo-root build context) ------
 # Zero dependencies (stdlib Python only); copied in and run at STARTUP, not at
@@ -119,6 +119,15 @@ ENV CLAUDE_TEMPLATE=none
 # duplicate flags = last wins, so these can override the baked base flags).
 # "none" (default) = off. See the EXTRA ARGS header section.
 ENV EXTRA_ARGS=none
+# Idle/heartbeat self-shutdown (idle_watchdog.py from the v3 base, started by
+# the CMD below): "none" (default) = OFF; idle -> kill after IDLE_TIMEOUT s of
+# no chat traffic; heartbeat -> kill after HEARTBEAT_TIMEOUT s of no client
+# pings. Arms only after /health ok; group needs restart_policy=never (set by
+# the deployers when armed) for the self-exit to stay stopped.
+ENV IDLE_SHUTDOWN=none \
+    IDLE_TIMEOUT=600 \
+    HEARTBEAT_TIMEOUT=600 \
+    IDLE_GRACE=1800
 
 # --- Runtime CMD -------------------------------------------------------------
 # The v3 CMD with the wget2 DRAFT_MODEL_URL / VISION_MODEL_URL blocks replaced
@@ -134,6 +143,10 @@ nohup python3 run_api.py >>\"${API_STATE_DIR}/api.log\" 2>&1 & \
 # :8889 -> 127.0.0.1:9999 (status API). TCP6-LISTEN binds [::]:<port>. \
 nohup socat TCP6-LISTEN:8888,fork,reuseaddr TCP4:127.0.0.1:8080 >>\"${API_STATE_DIR}/socat.log\" 2>&1 & \
 nohup socat TCP6-LISTEN:8889,fork,reuseaddr TCP4:127.0.0.1:9999 >>\"${API_STATE_DIR}/socat2.log\" 2>&1 & \
+# Idle/heartbeat self-shutdown watchdog (IDLE_SHUTDOWN=none -> exits at once, \
+# zero effect; see the ENV block above). Arms only after llama-server /health \
+# is ok, so it never kills mid-download. \
+nohup python3 /usr/local/bin/idle_watchdog.py >>\"${API_STATE_DIR}/watchdog.log\" 2>&1 & \
 # Model ref resolver for the optional auxiliary models: ref \"none\"/empty -> \
 # off (returns 1); \"hf://<org>/<repo>/<file>\" -> repo id <org>/<repo> + file \
 # <file...> (subdirectories kept); bare \"<file...>\" -> the file in \
@@ -229,7 +242,7 @@ EXTRA_ARGS_ARR=(); \
 if [ -n \"${EXTRA_ARGS}\" ] && [ \"${EXTRA_ARGS}\" != \"none\" ]; then \
   read -r -a EXTRA_ARGS_ARR <<< \"${EXTRA_ARGS}\"; \
 fi; \
-exec ${LLAMA_CPP_DIR}/build/bin/llama-server \
+${LLAMA_CPP_DIR}/build/bin/llama-server \
   --model \"${MODEL_DIR}/${MODEL_FILE}\" \
   --alias \"${MODEL_ALIAS}\" \
   --host \"${HOST}\" \
@@ -267,4 +280,17 @@ exec ${LLAMA_CPP_DIR}/build/bin/llama-server \
   # cache types, spec params, ...) without a per-tuning image. The [@]+ \
   # guard expands to nothing for an empty array under set -u. \
   ${EXTRA_ARGS_ARR[@]+\"${EXTRA_ARGS_ARR[@]}\"} \
-"]
+  # llama-server runs as a CHILD of this bash (PID 1), NOT via exec: the \
+  # kernel drops every signal — SIGKILL included — sent from inside a PID \
+  # namespace to a PID 1 with no handler installed, so a watchdog inside the \
+  # container can never kill a handler-less init (verified in-container). \
+  # This bash installs a SIGTERM trap (handler installed -> delivered): \
+  # idle_watchdog's kill(1, SIGTERM) lands, bash kills the server (children \
+  # take signals normally), and bash exiting tears down the PID namespace \
+  # (the kernel reaps everything left). docker stop's SIGTERM takes the same \
+  # graceful path. Exit code = the server's, so restart_policy sees reality. \
+  & \
+LLAMA_PID=$!; \
+trap 'kill -TERM \"$LLAMA_PID\" 2>/dev/null; exit 0' TERM INT; \
+wait \"$LLAMA_PID\"; \
+exit $?""]
