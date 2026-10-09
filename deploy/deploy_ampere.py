@@ -133,12 +133,14 @@ MODEL_ALIAS = "atx-swift-27b-opt"
 # airtight lever against the worker image cache (keyed by repo NAME — a tag
 # re-push can serve stale layers on workers that cached the old one, so every
 # delivery here is a NEW digest no worker has seen, pinned verbatim).
-# This is the cuda130-v2 push (2026-10-08, build id 'lmss_generic_ampere-v2
-# (llamAmpere v0.4 fork, cuda 13.0.2, turbo5/turbo4 KV, idle_watchdog + PID1
-# supervisor) 2026-10-08'); the tag form, for humans:
-#   boris271142/lmss_generic_ampere:cuda130-v2
+# This is the cuda130-v3 push (2026-10-09, build id 'lmss_generic_ampere-v3
+# (llamAmpere v0.4 fork, cuda 13.0.2, turbo5/turbo4 KV, idle_watchdog +
+# trapped-child supervisor, exec-form entry.sh CMD) 2026-10-09' — the
+# exec-form entry.sh CMD fix (the v2 inline JSON CMD was malformed -> buildkit
+# shell-form fallback -> dash exit 2 crash-loop)); the tag form, for humans:
+#   boris271142/lmss_generic_ampere:cuda130-v3
 IMAGE = "boris271142/lmss_generic_ampere" \
-        "@sha256:e9cae924b82971aa0e262c4be226236622ce03123aed54d93f36de1cfc8c321c"
+        "@sha256:7b5882f924fb1691a4c25589d2c77aae89195bba20ee414bb874e33c796181f2"
 
 MODEL_REPO = "bjivanovich/ATX-Swift-1.5-Qwen3.8-27B-Uncensored-MTP-GGUF"
 # Q5_K_M — MTP head embedded in the gguf (the 'MTP' in the repo name), so no

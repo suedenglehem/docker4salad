@@ -13,10 +13,22 @@ Models are downloaded on first start into `/models` **inside** the container (no
 
 | Image | Built from | Baked in | Feature env vars (all accept the `none` sentinel = off) |
 |---|---|---|---|
-| `boris271142/lmss:cuda128-v3` | `Dockerfile.multistage` (base; local compose) | nothing — model downloads on first start | `CHAT_TEMPLATE` (jinja **file path**), `DRAFT_MODEL_FILE` / `DRAFT_MODEL_URL`, `VISION_MODEL_URL` |
-| `boris271142/lmss_jonathancoletti_qwen38_q6_mtp_vision` (tag `cuda128-v5`) | `Dockerfile.lmss_q6_mtp_vision` (FROM v3) | 27B MTP draft (Q8_0, 2.95 GiB) + vision mmproj (F16, 0.86 GiB) — only the main model downloads at runtime (fast `hf` path) | `CLAUDE_TEMPLATE`, `USE_DRAFT_MODEL` — vision is always on |
-| `boris271142/lmss_generic` (tag `cuda128-v1`) | `Dockerfile.lmss_generic` (FROM v3) | nothing — model-agnostic; main model + optional draft / vision all download at runtime via `hf` | `CLAUDE_TEMPLATE`, `DRAFT_MODEL`, `VISION_MODEL` (`hf://org/repo/file` or a bare file against `MODEL_REPO`), `SPEC_TYPE` (`draft-mtp` \| `ngram-mod` \| `none`) |
-| `boris271142/lmss_generic_ampere` (tag `cuda130`) | `Dockerfile.lmss_generic_ampere` (2-stage: the **llamAmpere v0.4 fork** compiled in-container on CUDA 13.0.2, sm_86+89) | the fork binary itself + TurboQuant KV flags `--cache-type-k turbo5 --cache-type-v turbo4 --kv-unified --fit off --cache-ram 4096` in the CMD + MTP vocab maps at `/opt/llama.cpp/mtp-vocab/` — still no models | same as `lmss_generic` + `EXTRA_ARGS` (one string of extra args appended LAST, last-wins) |
+| `boris271142/lmss:cuda128-v5` | `Dockerfile.multistage` (base; local compose) | nothing — model downloads on first start | `CHAT_TEMPLATE` (jinja **file path**), `DRAFT_MODEL_FILE` / `DRAFT_MODEL_URL`, `VISION_MODEL_URL` |
+| `boris271142/lmss_jonathancoletti_qwen38_q6_mtp_vision` (tag `cuda128-v7`) | `Dockerfile.lmss_q6_mtp_vision` (FROM v5) | 27B MTP draft (Q8_0, 2.95 GiB) + vision mmproj (F16, 0.86 GiB) — only the main model downloads at runtime (fast `hf` path) | `CLAUDE_TEMPLATE`, `USE_DRAFT_MODEL` — vision is always on |
+| `boris271142/lmss_generic` (tag `cuda128-v5`) | `Dockerfile.lmss_generic` (FROM v5) | nothing — model-agnostic; main model + optional draft / vision all download at runtime via `hf` | `CLAUDE_TEMPLATE`, `DRAFT_MODEL`, `VISION_MODEL` (`hf://org/repo/file` or a bare file against `MODEL_REPO`), `SPEC_TYPE` (`draft-mtp` \| `ngram-mod` \| `none`) |
+| `boris271142/lmss_generic_ampere` (tag `cuda130-v3`) | `Dockerfile.lmss_generic_ampere` (2-stage: the **llamAmpere v0.4 fork** compiled in-container on CUDA 13.0.2, sm_86+89) | the fork binary itself + TurboQuant KV flags `--cache-type-k turbo5 --cache-type-v turbo4 --kv-unified --fit off --cache-ram 4096` in the CMD + MTP vocab maps at `/opt/llama.cpp/mtp-vocab/` — still no models | same as `lmss_generic` + `EXTRA_ARGS` (one string of extra args appended LAST, last-wins) |
+
+> **CMD generation (2026-10-09, the `entry.sh` fix).** Every image's runtime
+> script now lives in a standalone `docker/entry_*.sh` COPYed to
+> `/opt/llama.cpp/entry.sh`, launched by a plain 3-token exec-form CMD
+> `CMD ["/bin/bash", "-l", "/opt/llama.cpp/entry.sh"]`. The previous
+> generation inlined the whole startup script as a multi-line JSON-exec CMD
+> (`CMD ["/bin/bash","-lc","…"]`); that blob was malformed (a stray `"` at the
+> tail), so buildkit's `parseMaybeJSON` **silently** fell back to shell form,
+> re-encoded it as `/bin/sh -c '["/bin/bash",…]'`, and dash choked → **exit 2
+> crash-loop ~1–2 s after "Running"** on every worker. A plain exec-form CMD
+> carries no embedded JSON, so it cannot be mis-parsed. The base is
+> `cuda128-v5`, generic `cuda128-v5`, q6 `cuda128-v7`, ampere `cuda130-v3`.
 
 A Salad group's env **replaces** the image env wholesale, so a plain deployment sets the `none` sentinels explicitly rather than relying on the image defaults (which also future-proofs against an older image whose defaults were real URLs).
 
@@ -181,13 +193,13 @@ Salad bills while a group runs. If a client session dies (lost connection, close
 - **Activity signal**: `llamacpp:prompt_tokens_total` + `llamacpp:tokens_predicted_total` scraped from `/metrics` every 30 s (all CMDs bake `--metrics`). Only chat calls move the counters — `/health` and `/v1/models` polls do NOT count. An in-flight request (`llamacpp:requests_processing` > 0) counts as activity; any counter change (including a reset) resets the timer.
 - **Safety rails**: the watchdog arms only after `/health` is ok — it never kills mid-download (gives up arming after `IDLE_GRACE` s, default 1800); a failed `/metrics` scrape is a skipped tick, never an idle tick.
 - **Group side**: armed mode needs `restart_policy=never` — deployers set it on the CREATE path when `--idle-shutdown` is armed. The policy is **create-only** (not in the PATCH schema): an existing `always` group must be deleted + recreated (fresh name — the deleted name tombstones 10+ min; keep `MODEL_ALIAS` stable). Deployers print this warning on the update path.
-- Log: `${API_STATE_DIR}/watchdog.log` (i.e. `/tmp/llama-api/watchdog.log`); live check `ps -eo pid,args | grep idle_watchdog`. `version.sh` prints the **WATCHDOG generation** from the PID1 cmdline.
+- Log: `${API_STATE_DIR}/watchdog.log` (i.e. `/tmp/llama-api/watchdog.log`); live check `ps -eo pid,args | grep idle_watchdog`. `version.sh` prints the **WATCHDOG generation** — from the PID1 cmdline, or (on the exec-form `entry.sh` images, where PID 1 is just `bash -l /opt/llama.cpp/entry.sh`) by fingerprinting the `entry.sh` script itself.
 
 ### Production 27B group: `qwen38-27b-q6k`
 
 The 27B Claude Code backend: org `ma-casa-in-paris`, project `qwen38-27b`, one **RTX 3090 (24 GB)**, on-demand. Live config (GET-verified 2026-10-06):
 
-- **Image**: baked `boris271142/lmss_jonathancoletti_qwen38_q6_mtp_vision@sha256:4089a457…3839` (tag `cuda128-v5`; tag history in the deploy script: v4 `789ff2b3…`, v3 `a1ab8bd2…`). The MTP draft (Q8_0, 2.95 GiB) and mmproj (F16, 0.86 GiB) are baked in, so at runtime **only the main model** is downloaded from HF (fast `hf` path).
+- **Image**: baked `boris271142/lmss_jonathancoletti_qwen38_q6_mtp_vision` — deployer pins the `cuda128-v7` digest (the `entry.sh` CMD fix, 2026-10-09; tag history in the deploy script: v6 `97aa3d72…`, v5 `4089a457…`, v4 `789ff2b3…`). The MTP draft (Q8_0, 2.95 GiB) and mmproj (F16, 0.86 GiB) are baked in, so at runtime **only the main model** is downloaded from HF (fast `hf` path).
 - **Env**: `MODEL_FILE=Qwen3.8-27B-Uncensored-Q5_K_M.gguf` (18.19 GiB, MTP head embedded), `CTX_SIZE=90000` (served n_ctx **90112** — rounded up to a block multiple), `MODEL_ALIAS=qwen38-27b` (stable — clients reference the alias, not the group name), `CLAUDE_TEMPLATE=1`, `USE_DRAFT_MODEL=none` (self-speculation from the embedded MTP head; the baked draft is only for noMTP quants), `N_GPU_LAYERS=99`, + `HF_TOKEN` when `hft.txt` validates. q8_0 KV, flash-attn, vision on. See [Choosing quant + context length by VRAM](#choosing-quant--context-length-by-vram).
 - **Resources**: cpu 8, 16 GB RAM, 50 GB disk, shm 64, replicas 1, restart always, priority low.
 - **Gateway**: `https://corn-cabbage-2yk4e98r3rx752n0.salad.cloud` (443, `Salad-Api-Key` header).

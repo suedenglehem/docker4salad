@@ -81,12 +81,13 @@ ORGANIZATION_NAME = "ma-casa-in-paris"
 PROJECT_NAME = "qwen38-27b"
 GROUP_NAME = "qwen9b"
 # Digest-pinned (the airtight lever against the worker image cache, keyed by
-# REPO NAME — see deploy_qwen38_9b.py's note). cuda128-v4 (2026-10-08):
-# idle/heartbeat self-shutdown watchdog + the PID1 supervisor that makes its
-# kill land (IDLE_SHUTDOWN=none baked = off by default; arm with
-# --idle-shutdown on the CREATE path). Tag form for humans: boris271142/lmss:cuda128-v4
+# REPO NAME — see deploy_qwen38_9b.py's note). cuda128-v5 (2026-10-09): the
+# exec-form entry.sh CMD fix (the v4 inline JSON CMD was malformed -> buildkit
+# shell-form fallback -> dash exit 2 crash-loop); carries the idle/heartbeat
+# watchdog (IDLE_SHUTDOWN=none baked = off by default; arm with
+# --idle-shutdown on the CREATE path). Tag form for humans: boris271142/lmss:cuda128-v5
 IMAGE = "boris271142/lmss" \
-        "@sha256:248e072032e657cab37f5b439aa1a86f474ae2ede6b63cf179f84577a3ce6b9c"
+        "@sha256:e5340e3919a5d9de8c1bc54c70bf35ad95f0e5777dba4886ac625e101cd95cb6"
 GPU_CLASS_BASE = "rtx3090"  # must match 'RTX 3090 (24 GB)', not a Laptop/variant class
 
 # Mirrored from the live 'qwen38-27b-rtx5090' group (GET, 2026-09-30) — response-only

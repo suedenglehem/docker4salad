@@ -1,7 +1,7 @@
 # =============================================================================
 # lmss_generic   (name spelling confirmed before push)
 #
-# The GENERIC model image: FROM boris271142/lmss:cuda128-v4 with NO baked
+# The GENERIC model image: FROM boris271142/lmss:cuda128-v5 with NO baked
 # models. At runtime everything is downloaded from HuggingFace via the fast
 # `hf` xet path — the large main model AND the optional MTP draft and vision
 # projector. It is the generic counterpart of lmss_jonathancoletti_qwen38_
@@ -72,7 +72,7 @@
 #   docker push boris271142/lmss_generic:cuda128-v1
 # =============================================================================
 
-FROM boris271142/lmss:cuda128-v4
+FROM boris271142/lmss:cuda128-v5
 
 # Build id for /usr/local/bin/version.sh (same file the v3 image writes).
 # The default lives in the RUN (shell ${ARG:-default}), NOT in the ARG line —
@@ -80,12 +80,16 @@ FROM boris271142/lmss:cuda128-v4
 # first word, e.g. "lmss q6-mtp..." -> "lmss"). Override with
 # --build-arg LMSS_BUILD_ID="..." for a per-push id.
 ARG LMSS_BUILD_ID
-RUN printf '%s\n' "${LMSS_BUILD_ID:-lmss generic-v4 (hf runtime download, claude-template, extra-args, idle_watchdog + PID1 supervisor) 2026-10-08}" > /etc/llama-image-build
+RUN printf '%s\n' "${LMSS_BUILD_ID:-lmss generic-v5 (hf runtime download, claude-template, extra-args, idle_watchdog + trapped-child supervisor, exec-form entry.sh CMD) 2026-10-09}" > /etc/llama-image-build
 
 # --- Claude Code template: dump+patch script (repo-root build context) ------
 # Zero dependencies (stdlib Python only); copied in and run at STARTUP, not at
 # build time. COPYed from docker/ (hence the repo-root context).
 COPY docker/claude_template.sh ${LLAMA_CPP_DIR}/claude_template.sh
+# Entrypoint script (see the CMD at the end of this file) — extracted from the
+# old inline `CMD ["/bin/bash","-lc","…"]` blob so a plain 3-token exec-form CMD
+# cannot be mis-parsed by buildkit. Invoked as `bash /opt/llama.cpp/entry.sh`.
+COPY docker/entry_generic.sh ${LLAMA_CPP_DIR}/entry.sh
 
 # --- version.sh: overwrite the stale v3-baked copy --------------------------
 # The v3 base ships an older version.sh (grep-based env dump, '>= 3 guards'
@@ -135,162 +139,5 @@ ENV IDLE_SHUTDOWN=none \
 # derived two-way spec-type replaced by the explicit three-way SPEC_TYPE.
 # Everything else (socat, run_api.py, the CHAT_TEMPLATE + CLAUDE_TEMPLATE
 # CT block, the full llama-server argv) is identical to v3/v5.
-CMD ["/bin/bash", "-lc", "\
-set -euo pipefail; \
-mkdir -p \"${MODEL_DIR}\" \"${API_STATE_DIR}\"; \
-nohup python3 run_api.py >>\"${API_STATE_DIR}/api.log\" 2>&1 & \
-# Forward all IPv6 TCP :8888 -> 127.0.0.1:8080 (llama-server) and \
-# :8889 -> 127.0.0.1:9999 (status API). TCP6-LISTEN binds [::]:<port>. \
-nohup socat TCP6-LISTEN:8888,fork,reuseaddr TCP4:127.0.0.1:8080 >>\"${API_STATE_DIR}/socat.log\" 2>&1 & \
-nohup socat TCP6-LISTEN:8889,fork,reuseaddr TCP4:127.0.0.1:9999 >>\"${API_STATE_DIR}/socat2.log\" 2>&1 & \
-# Idle/heartbeat self-shutdown watchdog (IDLE_SHUTDOWN=none -> exits at once, \
-# zero effect; see the ENV block above). Arms only after llama-server /health \
-# is ok, so it never kills mid-download. \
-nohup python3 /usr/local/bin/idle_watchdog.py >>\"${API_STATE_DIR}/watchdog.log\" 2>&1 & \
-# Model ref resolver for the optional auxiliary models: ref \"none\"/empty -> \
-# off (returns 1); \"hf://<org>/<repo>/<file>\" -> repo id <org>/<repo> + file \
-# <file...> (subdirectories kept); bare \"<file...>\" -> the file in \
-# MODEL_REPO. Sets the globals REPO_REF / FILE_REF; the download itself is \
-# `hf` (same fast xet path + optional token as the main model) — the v3 wget2 \
-# URL mechanism is gone. \
-resolve_model_ref() { \
-  ref=\"${1:-}\"; REPO_REF=\"\"; FILE_REF=\"\"; \
-  case \"$ref\" in \
-    \"\"|none) return 1 ;; \
-    hf://*) \
-      rest=\"${ref#hf://}\"; \
-      REPO_REF=\"${rest%%/*}\"; \
-      rest=\"${rest#*/}\"; \
-      REPO_REF=\"${REPO_REF}/${rest%%/*}\"; \
-      FILE_REF=\"${rest#*/}\"; \
-      ;; \
-    *) \
-      REPO_REF=\"${MODEL_REPO}\"; FILE_REF=\"$ref\"; \
-      ;; \
-  esac; \
-}; \
-# Main model: the big runtime download (fast hf xet path). \
-if [ ! -f \"${MODEL_DIR}/${MODEL_FILE}\" ]; then \
-  # /startup flips to ok from here on (flag is read by api_app.py). \
-  touch \"${API_STATE_DIR}/download_started\"; \
-  hf download \
-    \"${MODEL_REPO}\" \
-    \"${MODEL_FILE}\" \
-    --local-dir \"${MODEL_DIR}\" \
-    ${HF_TOKEN:+--token \"$HF_TOKEN\"}; \
-else \
-  # Main model already present (container restart): mark started, no wait. \
-  touch \"${API_STATE_DIR}/download_started\"; \
-fi; \
-# Optional MTP draft model: DRAFT_MODEL is \"none\" (off), \
-# \"hf://<org>/<repo>/<file>\", or a bare file against MODEL_REPO. Downloaded \
-# with `hf` when missing; a failed download dies loudly (set -euo pipefail). \
-DRAFT_PATH=; \
-if resolve_model_ref \"${DRAFT_MODEL}\"; then \
-  DRAFT_PATH=\"${MODEL_DIR}/${FILE_REF}\"; \
-  if [ ! -f \"${DRAFT_PATH}\" ]; then \
-    hf download \"${REPO_REF}\" \"${FILE_REF}\" --local-dir \"${MODEL_DIR}\" ${HF_TOKEN:+--token \"$HF_TOKEN\"}; \
-  fi; \
-fi; \
-# Optional multimodal projector (vision): VISION_MODEL, same ref syntax. \
-VISION_PATH=; \
-if resolve_model_ref \"${VISION_MODEL}\"; then \
-  VISION_PATH=\"${MODEL_DIR}/${FILE_REF}\"; \
-  if [ ! -f \"${VISION_PATH}\" ]; then \
-    hf download \"${REPO_REF}\" \"${FILE_REF}\" --local-dir \"${MODEL_DIR}\" ${HF_TOKEN:+--token \"$HF_TOKEN\"}; \
-  fi; \
-fi; \
-# Custom chat template: CT holds the effective path (empty when disabled). \
-CT=; \
-if [ -n \"${CHAT_TEMPLATE}\" ] && [ \"${CHAT_TEMPLATE}\" != \"none\" ]; then \
-  CT=\"${CHAT_TEMPLATE}\"; \
-fi; \
-# Claude Code template: when CLAUDE_TEMPLATE is enabled (set, not \"none\"), \
-# dump the chat template from the freshly downloaded gguf and apply the \
-# one-line Claude patch. The script's stdout is the patched file's path and \
-# OVERRIDES CT, so the single --chat-template-file flag below emits exactly \
-# once. Runs AFTER the download block above (the model file must exist) and \
-# re-runs cheaply on container restart (header-only scan). Non-Qwen gguf (no \
-# raise-marker) -> script exits 0 with empty stdout: CT stays as the \
-# CHAT_TEMPLATE block left it (embedded fallback). Hard error -> exit 1 -> \
-# container dies loudly under set -euo pipefail. \
-if [ -n \"${CLAUDE_TEMPLATE}\" ] && [ \"${CLAUDE_TEMPLATE}\" != \"none\" ]; then \
-  CT=\"$(\"${LLAMA_CPP_DIR}/claude_template.sh\" \"${MODEL_DIR}/${MODEL_FILE}\" \"${API_STATE_DIR}/claude_chat_template.jinja\" 2>>\"${API_STATE_DIR}/claude_template.log\")\"; \
-fi; \
-# Speculative decoding mode (SPEC_TYPE, three-way — see the header): \
-#   draft-mtp: embedded MTP head in place, or the separate draft via \
-#     --model-draft when DRAFT_MODEL resolved to a file; \
-#   ngram-mod: n-gram self-speculation (v3 multistage fallback params); \
-#   none:     no speculative decoding. \
-SPEC=; \
-case \"${SPEC_TYPE}\" in \
-  draft-mtp) \
-    SPEC=\"--spec-type draft-mtp --spec-draft-n-max ${SPEC_DRAFT_N_MAX}\"; \
-    if [ -n \"${DRAFT_PATH}\" ]; then SPEC=\"${SPEC} --model-draft ${DRAFT_PATH}\"; fi; \
-    ;; \
-  ngram-mod) \
-    SPEC=\"--spec-type ngram-mod --spec-ngram-mod-n-match 24 --spec-ngram-mod-n-min 48 --spec-ngram-mod-n-max 64\"; \
-    ;; \
-  none) SPEC=; ;; \
-  *) echo \"llama-image: unknown SPEC_TYPE '${SPEC_TYPE}' (want draft-mtp|ngram-mod|none)\" >&2; exit 1; ;; \
-esac; \
-# Extra llama-server args (EXTRA_ARGS, see EXTRA ARGS header): word-split \
-# into EXTRA_ARGS_ARR (default IFS = whitespace) so each token becomes one \
-# argv entry; \"none\"/empty -> empty array, nothing appended. No shell \
-# quoting — a quoted value would land as ONE token, so keep values plain. \
-EXTRA_ARGS_ARR=(); \
-if [ -n \"${EXTRA_ARGS}\" ] && [ \"${EXTRA_ARGS}\" != \"none\" ]; then \
-  read -r -a EXTRA_ARGS_ARR <<< \"${EXTRA_ARGS}\"; \
-fi; \
-${LLAMA_CPP_DIR}/build/bin/llama-server \
-  --model \"${MODEL_DIR}/${MODEL_FILE}\" \
-  --alias \"${MODEL_ALIAS}\" \
-  --host \"${HOST}\" \
-  --port \"${PORT}\" \
-  --ctx-size \"${CTX_SIZE}\" \
-  --jinja \
-  # Custom chat template only when enabled (CT non-empty). CT is a FILE \
-  # PATH -> --chat-template-file (the inline --chat-template flag would \
-  # treat the path as the literal template text: prompt degenerates to the \
-  # path string and the model loops on it). \
-  ${CT:+--chat-template-file \"${CT}\"} \
-  --cache-prompt \
-  # Speculation flags from SPEC_TYPE (empty when SPEC_TYPE=none). \
-  ${SPEC} \
-  # Multimodal projector (vision) only when enabled (see VISION_PATH above). \
-  ${VISION_PATH:+--mmproj \"${VISION_PATH}\"} \
-  --parallel 1 \
-  --cont-batching \
-  --metrics \
-  --temp 0.1 \
-  --top-p 0.95 \
-  --min-p 0.05 \
-  --repeat-penalty 1.0 \
-  --flash-attn on \
-  ${API_KEY:+--api-key \"$API_KEY\"} \
-  --cache-type-k q8_0 \
-  --cache-type-v q8_0 \
-  --main-gpu \"${GPU_ID}\" \
-  --n-gpu-layers \"${N_GPU_LAYERS}\" \
-  --threads \"${THREADS}\" \
-  --batch-size \"${BATCH_SIZE}\" \
-  --ubatch-size \"${UBATCH_SIZE}\" \
-  # EXTRA_ARGS LAST: llama.cpp duplicate flags = last wins, so a group's \
-  # tuning overrides the base flags above (ctx-size, sampling, flash-attn, \
-  # cache types, spec params, ...) without a per-tuning image. The [@]+ \
-  # guard expands to nothing for an empty array under set -u. \
-  ${EXTRA_ARGS_ARR[@]+\"${EXTRA_ARGS_ARR[@]}\"} \
-  # llama-server runs as a CHILD of this bash (PID 1), NOT via exec: the \
-  # kernel drops every signal — SIGKILL included — sent from inside a PID \
-  # namespace to a PID 1 with no handler installed, so a watchdog inside the \
-  # container can never kill a handler-less init (verified in-container). \
-  # This bash installs a SIGTERM trap (handler installed -> delivered): \
-  # idle_watchdog's kill(1, SIGTERM) lands, bash kills the server (children \
-  # take signals normally), and bash exiting tears down the PID namespace \
-  # (the kernel reaps everything left). docker stop's SIGTERM takes the same \
-  # graceful path. Exit code = the server's, so restart_policy sees reality. \
-  & \
-LLAMA_PID=$!; \
-trap 'kill -TERM \"$LLAMA_PID\" 2>/dev/null; exit 0' TERM INT; \
-wait \"$LLAMA_PID\"; \
-exit $?""]
+
+CMD ["/bin/bash", "-l", "/opt/llama.cpp/entry.sh"]

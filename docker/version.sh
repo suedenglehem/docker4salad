@@ -103,38 +103,53 @@ echo
 
 echo "== CMD fingerprint (PID 1 — which sentinel generation) =="
 CMDLINE=$(tr '\0' ' ' < /proc/1/cmdline)
-GUARDS=$(printf '%s' "$CMDLINE" | grep -o '!= "none"' | wc -l)
-echo "sentinel guards (!= \"none\") in PID1 cmdline: $GUARDS (informational)"
-# Marker-based classification: each generation's CMD contains env var names
-# the previous ones never did, so their presence identifies the build.
+# The exec-form CMD (the entry.sh generation) makes PID 1 just
+# `/bin/bash -l /opt/llama.cpp/entry.sh` — the feature markers then live in
+# the entry SCRIPT, not in PID 1's cmdline (llama-server runs as a trapped
+# child, not PID 1). Fingerprint the script when PID 1 is the entry script.
+MARKERS="$CMDLINE"
+if printf '%s' "$CMDLINE" | grep -q 'entry.sh'; then
+  echo "  -> ENTRY generation: exec-form CMD (bash -l /opt/llama.cpp/entry.sh);"
+  echo "     llama-server runs as a TRAPPED CHILD of PID 1, so the watchdog's"
+  echo "     SIGTERM reaches it (a handler-less PID 1 drops in-namespace signals)"
+  if [ -r /opt/llama.cpp/entry.sh ]; then
+    MARKERS=$(cat /opt/llama.cpp/entry.sh)
+  else
+    echo "     !! /opt/llama.cpp/entry.sh unreadable — fingerprinting PID1 cmdline"
+  fi
+fi
+GUARDS=$(printf '%s' "$MARKERS" | grep -o '!= "none"' | wc -l)
+echo "sentinel guards (!= \"none\"): $GUARDS (informational)"
+# Marker-based classification: each generation's CMD/entry script contains env
+# var names the previous ones never did, so their presence identifies the build.
 # (The old '>= 3 guards' count misclassified v4, which has exactly 2.)
-if printf '%s' "$CMDLINE" | grep -q 'idle_watchdog'; then
+if printf '%s' "$MARKERS" | grep -q 'idle_watchdog'; then
   echo "  -> WATCHDOG generation: + idle/heartbeat self-shutdown"
   echo "     (idle_watchdog.py started by the CMD; IDLE_SHUTDOWN=none|idle|"
   echo "     heartbeat, kill llama-server after the timeout -> container exits"
   echo "     -> group stops when restart_policy=never). Watchdog log:"
   echo "     \${API_STATE_DIR}/watchdog.log; live check:"
   echo "     ps -eo pid,args | grep idle_watchdog"
-elif printf '%s' "$CMDLINE" | grep -q 'DRAFT_MODEL_URL'; then
+elif printf '%s' "$MARKERS" | grep -q 'DRAFT_MODEL_URL'; then
   echo "  -> V3 (wget2) image: draft/vision downloaded at runtime via"
   echo "     DRAFT_MODEL_URL / VISION_MODEL_URL"
-elif printf '%s' "$CMDLINE" | grep -q 'EXTRA_ARGS_ARR'; then
+elif printf '%s' "$MARKERS" | grep -q 'EXTRA_ARGS_ARR'; then
   echo "  -> GENERIC v3 image: + EXTRA_ARGS (one string of extra llama-server"
   echo "     args, word-split at startup and appended LAST to the argv —"
   echo "     duplicate flags last-wins, so a group can override the baked"
   echo "     base flags); draft/vision via hf, spec mode from SPEC_TYPE"
-elif printf '%s' "$CMDLINE" | grep -q 'SPEC_TYPE'; then
+elif printf '%s' "$MARKERS" | grep -q 'SPEC_TYPE'; then
   echo "  -> GENERIC image: draft/vision downloaded at runtime via the hf CLI"
   echo "     from"
   echo "     DRAFT_MODEL / VISION_MODEL refs (hf://<org>/<repo>/<file> or a"
   echo "     bare file against MODEL_REPO), speculation mode from SPEC_TYPE"
   echo "     (draft-mtp|ngram-mod|none), Claude template gated on"
   echo "     CLAUDE_TEMPLATE"
-elif printf '%s' "$CMDLINE" | grep -q 'CLAUDE_TEMPLATE'; then
+elif printf '%s' "$MARKERS" | grep -q 'CLAUDE_TEMPLATE'; then
   echo "  -> V5 image: Claude template gated on CLAUDE_TEMPLATE (dumps the"
   echo "     chat template from the downloaded gguf + one-line Claude patch),"
   echo "     draft gated on USE_DRAFT_MODEL, static template on CHAT_TEMPLATE"
-elif printf '%s' "$CMDLINE" | grep -q 'USE_DRAFT_MODEL'; then
+elif printf '%s' "$MARKERS" | grep -q 'USE_DRAFT_MODEL'; then
   echo "  -> SENTINEL image (v4): draft/vision/template OFF unless set to a"
   echo "     real value (CHAT_TEMPLATE takes a static file path)"
 else

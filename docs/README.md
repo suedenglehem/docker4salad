@@ -180,7 +180,9 @@ shell). In seconds it tells you:
   repo *name*, so a worker can serve an older image under the same name; this is
   the only fast way to know for sure).
 - Whether the **sentinel CMD** is live (draft/vision/template OFF unless set).
-- The **effective feature env** and the PID-1 `llama-server` cmdline (sha256).
+- The **effective feature env** and the PID-1 cmdline (sha256). On the exec-form
+  `entry.sh` images PID 1 is `bash -l /opt/llama.cpp/entry.sh` (llama-server runs
+  as a trapped child), so the generation is fingerprinted from `entry.sh`.
 - What's in `/models` and what is **downloading right now** (`wget2` / `hf download`).
 - The **WATCHDOG generation** (idle/heartbeat self-shutdown present) + the running
   `idle_watchdog` process, when the image ships `idle_watchdog.py`.

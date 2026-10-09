@@ -56,7 +56,7 @@
 #   docker push boris271142/lmss_jonathancoletti_qwen38_q6_mtp_vision:<tag>
 # =============================================================================
 
-FROM boris271142/lmss:cuda128-v4
+FROM boris271142/lmss:cuda128-v5
 
 # --- Bake the two small auxiliary models into /models (build time) -----------
 # The v3 runtime image already has the `hf` CLI (huggingface_hub 1.28.0) +
@@ -78,12 +78,16 @@ RUN set -eux; \
 # first word, e.g. "lmss q6-mtp..." -> "lmss"). Override with
 # --build-arg LMSS_BUILD_ID="..." for a per-push id.
 ARG LMSS_BUILD_ID
-RUN printf '%s\n' "${LMSS_BUILD_ID:-lmss q6-mtp-vision-v6 (baked draft+vision, claude-template, idle_watchdog + PID1 supervisor) 2026-10-08}" > /etc/llama-image-build
+RUN printf '%s\n' "${LMSS_BUILD_ID:-lmss q6-mtp-vision-v7 (baked draft+vision, claude-template, idle_watchdog + trapped-child supervisor, exec-form entry.sh CMD) 2026-10-09}" > /etc/llama-image-build
 
 # --- Claude Code template: dump+patch script (repo-root build context) ------
 # Zero dependencies (stdlib Python only); copied in and run at STARTUP, not at
 # build time. COPYed from docker/ (hence the repo-root context).
 COPY docker/claude_template.sh ${LLAMA_CPP_DIR}/claude_template.sh
+# Entrypoint script (see the CMD at the end of this file) — extracted from the
+# old inline `CMD ["/bin/bash","-lc","…"]` blob so a plain 3-token exec-form CMD
+# cannot be mis-parsed by buildkit. Invoked as `bash /opt/llama.cpp/entry.sh`.
+COPY docker/entry_q6.sh ${LLAMA_CPP_DIR}/entry.sh
 
 # --- version.sh: overwrite the stale v3-baked copy --------------------------
 # The v3 base ships an older version.sh (grep-based env dump, '>= 3 guards'
@@ -123,108 +127,5 @@ ENV IDLE_SHUTDOWN=none \
 # draft is gated on USE_DRAFT_MODEL (adds --model-draft when set). Vision is
 # always on. Everything else (socat, run_api.py, the full llama-server argv) is
 # identical to v3.
-CMD ["/bin/bash", "-lc", "\
-set -euo pipefail; \
-mkdir -p \"${MODEL_DIR}\" \"${API_STATE_DIR}\"; \
-nohup python3 run_api.py >>\"${API_STATE_DIR}/api.log\" 2>&1 & \
-# Forward all IPv6 TCP :8888 -> 127.0.0.1:8080 (llama-server) and \
-# :8889 -> 127.0.0.1:9999 (status API). TCP6-LISTEN binds [::]:<port>. \
-nohup socat TCP6-LISTEN:8888,fork,reuseaddr TCP4:127.0.0.1:8080 >>\"${API_STATE_DIR}/socat.log\" 2>&1 & \
-nohup socat TCP6-LISTEN:8889,fork,reuseaddr TCP4:127.0.0.1:9999 >>\"${API_STATE_DIR}/socat2.log\" 2>&1 & \
-# Idle/heartbeat self-shutdown watchdog (IDLE_SHUTDOWN=none -> exits at once, \
-# zero effect; see the ENV block above). Arms only after llama-server /health \
-# is ok, so it never kills mid-download. \
-nohup python3 /usr/local/bin/idle_watchdog.py >>\"${API_STATE_DIR}/watchdog.log\" 2>&1 & \
-# Main model: the ONLY runtime download (fast hf xet path). The draft + vision \
-# models are baked into the image layers, so there is no wget2 for them here. \
-if [ ! -f \"${MODEL_DIR}/${MODEL_FILE}\" ]; then \
-  # /startup flips to ok from here on (flag is read by api_app.py). \
-  touch \"${API_STATE_DIR}/download_started\"; \
-  hf download \
-    \"${MODEL_REPO}\" \
-    \"${MODEL_FILE}\" \
-    --local-dir \"${MODEL_DIR}\" \
-    ${HF_TOKEN:+--token \"$HF_TOKEN\"}; \
-else \
-  # Main model already present (container restart): mark started, no wait. \
-  touch \"${API_STATE_DIR}/download_started\"; \
-fi; \
-# Custom chat template: CT holds the effective path (empty when disabled). \
-CT=; \
-if [ -n \"${CHAT_TEMPLATE}\" ] && [ \"${CHAT_TEMPLATE}\" != \"none\" ]; then \
-  CT=\"${CHAT_TEMPLATE}\"; \
-fi; \
-# Claude Code template: when CLAUDE_TEMPLATE is enabled (set, not "none"), \
-# dump the chat template from the freshly downloaded gguf and apply the \
-# one-line Claude patch. The script's stdout is the patched file's path and \
-# OVERRIDES CT, so the single --chat-template-file flag below picks it up. \
-# Runs AFTER the download block above (the model file must exist) and \
-# re-runs cheaply on container restart (header-only scan). Non-Qwen gguf (no \
-# raise-marker) -> script exits 0 with empty stdout: CT stays as the \
-# CHAT_TEMPLATE block left it (embedded fallback). Hard error -> exit 1 -> \
-# container dies loudly under set -euo pipefail. \
-if [ -n \"${CLAUDE_TEMPLATE}\" ] && [ \"${CLAUDE_TEMPLATE}\" != \"none\" ]; then \
-  CT=\"$(\"${LLAMA_CPP_DIR}/claude_template.sh\" \"${MODEL_DIR}/${MODEL_FILE}\" \"${API_STATE_DIR}/claude_chat_template.jinja\" 2>>\"${API_STATE_DIR}/claude_template.log\")\"; \
-fi; \
-# Baked auxiliary model paths (present in the image layers; never downloaded). \
-DRAFT_BAKED=\"${MODEL_DIR}/Qwen3.8-27B-Uncensored-draft-Q8_0.gguf\"; \
-VISION_BAKED=\"${MODEL_DIR}/mmproj-Qwen3.8-27B-Uncensored-F16.gguf\"; \
-# Vision is ALWAYS on in this _vision image. \
-VISION_PATH=\"${VISION_BAKED}\"; \
-# Draft: resolved only when USE_DRAFT_MODEL is set (not none) — i.e. the gguf \
-# has no embedded MTP head and needs the separate draft file. When none/unset, \
-# DRAFT_PATH stays empty and the gguf's embedded MTP head (load_mtp, set by \
-# --spec-type draft-mtp) is used in place. \
-DRAFT_PATH=; \
-if [ -n \"${USE_DRAFT_MODEL}\" ] && [ \"${USE_DRAFT_MODEL}\" != \"none\" ]; then \
-  DRAFT_PATH=\"${DRAFT_BAKED}\"; \
-fi; \
-${LLAMA_CPP_DIR}/build/bin/llama-server \
-  --model \"${MODEL_DIR}/${MODEL_FILE}\" \
-  --alias \"${MODEL_ALIAS}\" \
-  --host \"${HOST}\" \
-  --port \"${PORT}\" \
-  --ctx-size \"${CTX_SIZE}\" \
-  --jinja \
-  # Custom chat template only when enabled (CT non-empty). CT is a FILE \
-  # PATH -> --chat-template-file (the inline --chat-template flag would \
-  # treat the path as the literal template text: prompt degenerates to the \
-  # path string and the model loops on it). \
-  ${CT:+--chat-template-file \"${CT}\"} \
-  --cache-prompt \
-  # MTP speculative decoding is always on in this image: --spec-type draft-mtp \
-  # (sets load_mtp) + the separate baked draft via --model-draft ONLY when \
-  # USE_DRAFT_MODEL is set. No ngram-mod fallback. \
-  --spec-type draft-mtp --spec-draft-n-max \"${SPEC_DRAFT_N_MAX}\" ${DRAFT_PATH:+--model-draft \"${DRAFT_PATH}\"} \
-  # Vision projector is always on in this _vision image. \
-  ${VISION_PATH:+--mmproj \"${VISION_PATH}\"} \
-  --parallel 1 \
-  --cont-batching \
-  --metrics \
-  --temp 0.1 \
-  --top-p 0.95 \
-  --min-p 0.05 \
-  --repeat-penalty 1.0 \
-  --flash-attn on \
-  ${API_KEY:+--api-key \"$API_KEY\"} \
-  --cache-type-k q8_0 \
-  --cache-type-v q8_0 \
-  --main-gpu \"${GPU_ID}\" \
-  --n-gpu-layers \"${N_GPU_LAYERS}\" \
-  --threads \"${THREADS}\" \
-  --batch-size \"${BATCH_SIZE}\" \
-  --ubatch-size \"${UBATCH_SIZE}\" \
-  # llama-server runs as a CHILD of this bash (PID 1), NOT via exec: the \
-  # kernel drops every signal — SIGKILL included — sent from inside a PID \
-  # namespace to a PID 1 with no handler installed, so a watchdog inside the \
-  # container can never kill a handler-less init (verified in-container). \
-  # This bash installs a SIGTERM trap (handler installed -> delivered): \
-  # idle_watchdog's kill(1, SIGTERM) lands, bash kills the server (children \
-  # take signals normally), and bash exiting tears down the PID namespace \
-  # (the kernel reaps everything left). docker stop's SIGTERM takes the same \
-  # graceful path. Exit code = the server's, so restart_policy sees reality. \
-  & \
-LLAMA_PID=$!; \
-trap 'kill -TERM \"$LLAMA_PID\" 2>/dev/null; exit 0' TERM INT; \
-wait \"$LLAMA_PID\"; \
-exit $?""]
+
+CMD ["/bin/bash", "-l", "/opt/llama.cpp/entry.sh"]

@@ -81,11 +81,14 @@ GROUP_NAME = "qwen38-9b"
 # image ref to a digest no worker has seen (this group was PATCHed to
 # lmss@sha256:... for exactly that reason); with a plain tag, verify the
 # live build with version.sh in the container.
-# cuda128-v4 (2026-10-08): idle/heartbeat self-shutdown watchdog + the PID1
-# supervisor that makes its kill land (IDLE_SHUTDOWN=none baked = off by
-# default; arm it with --idle-shutdown on the CREATE path).
+# cuda128-v5 (2026-10-09): the exec-form entry.sh CMD fix. The v4 inline JSON
+# CMD was malformed (stray quote) so buildkit's parseMaybeJSON silently fell
+# back to shell form and dash exited 2 (crash-loop ~1-2s after "Running").
+# v5 runs `bash -l /opt/llama.cpp/entry.sh` with llama-server as a trapped
+# child. Carries the idle/heartbeat watchdog (IDLE_SHUTDOWN=none baked = off
+# by default; arm it with --idle-shutdown on the CREATE path).
 IMAGE = "boris271142/lmss" \
-        "@sha256:248e072032e657cab37f5b439aa1a86f474ae2ede6b63cf179f84577a3ce6b9c"
+        "@sha256:e5340e3919a5d9de8c1bc54c70bf35ad95f0e5777dba4886ac625e101cd95cb6"
 
 # The 7 card classes the old 'qwen9b' group ran on, by normalized base name
 # (parenthesized VRAM suffix stripped, lowercased, spaces removed).

@@ -122,17 +122,19 @@ MODEL_ALIAS = "qwen38-27b"
 # Digest-pinned: the API accepts the @sha256 ref verbatim, and it is the
 # airtight lever against the worker image cache (keyed by repo NAME — a tag
 # re-push can serve stale layers on workers that cached the old one). This
-# is the cuda128-v6 push (2026-10-08, build id 'lmss q6-mtp-vision-v6 (baked
-# draft+vision, claude-template, idle_watchdog + PID1 supervisor) 2026-10-08'
-# — idle/heartbeat self-shutdown watchdog + the PID1 supervisor that makes
-# its kill land; based on boris271142/lmss:cuda128-v4); the tag form, for
-# humans:
-#   boris271142/lmss_jonathancoletti_qwen38_q6_mtp_vision:cuda128-v6
+# is the cuda128-v7 push (2026-10-09, build id 'lmss q6-mtp-vision-v7 (baked
+# draft+vision, claude-template, idle_watchdog + trapped-child supervisor,
+# exec-form entry.sh CMD) 2026-10-09' — the exec-form entry.sh CMD fix (the
+# v6 inline JSON CMD was malformed -> buildkit shell-form fallback -> dash
+# exit 2 crash-loop) on top of the idle/heartbeat watchdog; based on
+# boris271142/lmss:cuda128-v5); the tag form, for humans:
+#   boris271142/lmss_jonathancoletti_qwen38_q6_mtp_vision:cuda128-v7
 # Previous manifest-list digests, for reference:
+#   cuda128-v6: sha256:97aa3d72bf8e367f74c7e7e6f9e565b662ff06bccb648e7f61d65c47d5686600
 #   cuda128-v5: sha256:4089a457281519033764868d5422786b7c48e0d2e81f7847354ceb5acd953839
 #   cuda128-v4: sha256:789ff2b34000409d13d76c2f51d607502f65d96c739fa3adfc5d04ae6f353a4a
 IMAGE = ("boris271142/lmss_jonathancoletti_qwen38_q6_mtp_vision"
-         "@sha256:97aa3d72bf8e367f74c7e7e6f9e565b662ff06bccb648e7f61d65c47d5686600")
+         "@sha256:b7ea489397ab314313133a6b1f93ea159162df4338fd42083f6ff07b91a3d20e")
 
 MODEL_REPO = "JonathanColetti/Qwen3.8-27B-Uncensored-GGUF"
 # Default = live production quant (2026-10-03): Q5_K_M, MTP head embedded in

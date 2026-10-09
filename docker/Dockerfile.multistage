@@ -177,6 +177,12 @@ RUN echo "${NCCL_ROOT}/lib/x86_64-linux-gnu" > /etc/ld.so.conf.d/nccl.conf && ld
 # Status API app, served by uvicorn on :9999 (started in the CMD below).
 COPY api_app.py ${LLAMA_CPP_DIR}/api_app.py
 COPY run_api.py ${LLAMA_CPP_DIR}/run_api.py
+# Entrypoint script (see the CMD at the end of this file). Extracted from the
+# old inline `CMD ["/bin/bash","-lc","…"]` blob: a standalone file + a plain
+# 3-token exec-form CMD cannot be mis-parsed by buildkit (the inline JSON had a
+# stray quote that silently fell back to shell form -> exit 2). Invoked as
+# `bash /opt/llama.cpp/entry.sh`, so no exec bit is needed.
+COPY entry_base.sh ${LLAMA_CPP_DIR}/entry.sh
 
 # Permissive Jinja chat template, shipped but NOT used by default (see the
 # CHAT_TEMPLATE env below): opt in by pointing CHAT_TEMPLATE at it. It accepts
@@ -329,103 +335,4 @@ ENV IDLE_SHUTDOWN=none \
 
 WORKDIR ${LLAMA_CPP_DIR}
 
-CMD ["/bin/bash", "-lc", "\
-set -euo pipefail; \
-mkdir -p \"${MODEL_DIR}\" \"${DRAFT_MODEL_DIR}\" \"${VISION_MODEL_DIR}\" \"${API_STATE_DIR}\"; \
-nohup python3 run_api.py >>\"${API_STATE_DIR}/api.log\" 2>&1 & \
-# Forward all IPv6 TCP :8888 -> 127.0.0.1:8080 (llama-server). TCP6-LISTEN binds \
-# [::]:8888, i.e. every IPv6 interface; fork handles concurrent connections. \
-nohup socat TCP6-LISTEN:8888,fork,reuseaddr TCP4:127.0.0.1:8080 >>\"${API_STATE_DIR}/socat.log\" 2>&1 & \
-nohup socat TCP6-LISTEN:8889,fork,reuseaddr TCP4:127.0.0.1:9999 >>\"${API_STATE_DIR}/socat2.log\" 2>&1 & \
-# Idle/heartbeat self-shutdown watchdog (IDLE_SHUTDOWN=none -> exits at once, \
-# zero effect; see the ENV block above). Arms only after llama-server /health \
-# is ok, so it never kills mid-download. \
-nohup python3 /usr/local/bin/idle_watchdog.py >>\"${API_STATE_DIR}/watchdog.log\" 2>&1 & \
-if [ ! -f \"${MODEL_DIR}/${MODEL_FILE}\" ]; then \
-  # /startup flips to ok from here on (flag is read by api_app.py). \
-  touch \"${API_STATE_DIR}/download_started\"; \
-  hf download \
-    \"${MODEL_REPO}\" \
-    \"${MODEL_FILE}\" \
-    --local-dir \"${MODEL_DIR}\" \
-    ${HF_TOKEN:+--token \"$HF_TOKEN\"}; \
-else \
-  # Model already present (container restart): nothing to wait for, mark started. \
-  touch \"${API_STATE_DIR}/download_started\"; \
-fi; \
-# Optional features use the \"none\" sentinel (see the env comments above): \
-# empty or \"none\" -> the feature stays off and the CMD does nothing with it; \
-# any other value enables it. \
-# Custom chat template: CT holds the effective path (empty when disabled). \
-CT=; \
-if [ -n \"${CHAT_TEMPLATE}\" ] && [ \"${CHAT_TEMPLATE}\" != \"none\" ]; then \
-  CT=\"${CHAT_TEMPLATE}\"; \
-fi; \
-# Optional MTP draft model for speculative decoding: DRAFT_MODEL_URL is the \
-# sole source — a full URL downloaded with wget2, whose last path segment is \
-# the local filename. Empty or "none" -> no draft, n-gram self-speculation \
-# below. \
-DRAFT_PATH=; \
-if [ -n \"${DRAFT_MODEL_URL}\" ] && [ \"${DRAFT_MODEL_URL}\" != \"none\" ]; then \
-  DRAFT_PATH=\"${DRAFT_MODEL_DIR}/${DRAFT_MODEL_URL##*/}\"; \
-  if [ ! -f \"${DRAFT_PATH}\" ]; then \
-    wget2 -c -O \"${DRAFT_PATH}\" \"${DRAFT_MODEL_URL}\"; \
-  fi; \
-fi; \
-# Optional multimodal projector (VISION_MODEL_URL, full URL, wget2) for vision. \
-VISION_PATH=; \
-if [ -n \"${VISION_MODEL_URL}\" ] && [ \"${VISION_MODEL_URL}\" != \"none\" ]; then \
-  VISION_PATH=\"${VISION_MODEL_DIR}/${VISION_MODEL_URL##*/}\"; \
-  if [ ! -f \"${VISION_PATH}\" ]; then \
-    wget2 -c -O \"${VISION_PATH}\" \"${VISION_MODEL_URL}\"; \
-  fi; \
-fi; \
-${LLAMA_CPP_DIR}/build/bin/llama-server \
-  --model \"${MODEL_DIR}/${MODEL_FILE}\" \
-  --alias \"${MODEL_ALIAS}\" \
-  --host \"${HOST}\" \
-  --port \"${PORT}\" \
-  --ctx-size \"${CTX_SIZE}\" \
-  --jinja \
-  # Custom chat template only when enabled (CT non-empty); otherwise the \
-  # template embedded in the GGUF is used (see the env comment above). \
-  # CT is a FILE PATH -> --chat-template-file (the inline --chat-template \
-  # flag would treat the path as the literal template text). \
-  ${CT:+--chat-template-file \"${CT}\"} \
-  --cache-prompt \
-  # Speculative decoding: a separate MTP draft model when a draft was \
-  # resolved (see DRAFT_PATH above), otherwise n-gram self-speculation. \
-  ${DRAFT_PATH:+--spec-type draft-mtp --spec-draft-n-max \"${SPEC_DRAFT_N_MAX}\" --model-draft \"${DRAFT_PATH}\"} \
-  ${DRAFT_PATH:---spec-type ngram-mod --spec-ngram-mod-n-match 24 --spec-ngram-mod-n-min 48 --spec-ngram-mod-n-max 64} \
-  # Multimodal projector (vision) only when enabled (see VISION_PATH above). \
-  ${VISION_PATH:+--mmproj \"${VISION_PATH}\"} \
-  --parallel 1 \
-  --cont-batching \
-  --metrics \
-  --temp 0.1 \
-  --top-p 0.95 \
-  --min-p 0.05 \
-  --repeat-penalty 1.0 \
-  --flash-attn on \
-  ${API_KEY:+--api-key \"$API_KEY\"} \
-  --cache-type-k q8_0 \
-  --cache-type-v q8_0 \
-  --main-gpu \"${GPU_ID}\" \
-  --n-gpu-layers \"${N_GPU_LAYERS}\" \
-  --threads \"${THREADS}\" \
-  --batch-size \"${BATCH_SIZE}\" \
-  --ubatch-size \"${UBATCH_SIZE}\" \
-  # llama-server runs as a CHILD of this bash (PID 1), NOT via exec: the \
-  # kernel drops every signal — SIGKILL included — sent from inside a PID \
-  # namespace to a PID 1 with no handler installed, so a watchdog inside the \
-  # container can never kill a handler-less init (verified in-container). \
-  # This bash installs a SIGTERM trap (handler installed -> delivered): \
-  # idle_watchdog's kill(1, SIGTERM) lands, bash kills the server (children \
-  # take signals normally), and bash exiting tears down the PID namespace \
-  # (the kernel reaps everything left). docker stop's SIGTERM takes the same \
-  # graceful path. Exit code = the server's, so restart_policy sees reality. \
-  & \
-LLAMA_PID=$!; \
-trap 'kill -TERM \"$LLAMA_PID\" 2>/dev/null; exit 0' TERM INT; \
-wait \"$LLAMA_PID\"; \
-exit $?""]
+CMD ["/bin/bash", "-l", "/opt/llama.cpp/entry.sh"]
