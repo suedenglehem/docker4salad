@@ -133,6 +133,12 @@ if printf '%s' "$MARKERS" | grep -q 'idle_watchdog'; then
   echo "     ps -eo pid,args | grep idle_watchdog"
   if grep -q 'SALAD_STOP_KEY' /usr/local/bin/idle_watchdog.py 2>/dev/null; then
     echo "     -> watchdog v2: arms on /ready + group /stop POST (SALAD_STOP_KEY)"
+    if grep -q 'b64:' /usr/local/bin/idle_watchdog.py 2>/dev/null; then
+      echo "     -> watchdog v2.1: SALAD_STOP_KEY accepts b64:<base64> (obfuscated"
+      echo "        storage, decoded at startup); key 'none'/missing/undecodable"
+      echo "        DISABLES the watchdog (no self-shutdown — a keyless self-exit"
+      echo "        gets rescheduled and keeps billing)"
+    fi
   fi
 elif printf '%s' "$MARKERS" | grep -q 'DRAFT_MODEL_URL'; then
   echo "  -> V3 (wget2) image: draft/vision downloaded at runtime via"

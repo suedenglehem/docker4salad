@@ -55,6 +55,7 @@ Usage:
 """
 
 import argparse
+import base64
 import json
 import os
 import sys
@@ -81,15 +82,18 @@ ORGANIZATION_NAME = "ma-casa-in-paris"
 PROJECT_NAME = "qwen38-27b"
 GROUP_NAME = "qwen9b"
 # Digest-pinned (the airtight lever against the worker image cache, keyed by
-# REPO NAME — see deploy_qwen38_9b.py's note). cuda128-v6 (2026-10-09):
-# watchdog v2 (arms on the group /ready endpoint, kills by POSTing the Salad
-# group /stop with SALAD_STOP_KEY from --stop-key, then SIGTERM — a bare
-# self-exit gets RESCHEDULED, not stopped, paid test 2026-10-09) on top of
-# cuda128-v5's exec-form entry.sh CMD fix (v4's inline JSON CMD was malformed
-# -> buildkit shell-form fallback -> dash exit 2 crash-loop). IDLE_SHUTDOWN=
-# none baked = off by default. Tag form for humans: boris271142/lmss:cuda128-v6
+# REPO NAME — see deploy_qwen38_9b.py's note). cuda128-v7 (2026-10-09):
+# watchdog v2.1 (arms on the group /ready endpoint, kills by POSTing the Salad
+# group /stop with SALAD_STOP_KEY from --stop-key — stored b64-obfuscated,
+# decoded at startup — then SIGTERM; a bare self-exit gets RESCHEDULED, not
+# stopped, paid test 2026-10-09; key 'none'/missing/undecodable DISABLES the
+# watchdog) on top of cuda128-v5's exec-form entry.sh CMD fix (v4's inline
+# JSON CMD was malformed -> buildkit shell-form fallback -> dash exit 2
+# crash-loop). IDLE_SHUTDOWN=
+# none baked = off by default. Tag form for humans: boris271142/lmss:cuda128-v7
+#   cuda128-v6: sha256:c1a671ab6e75e11af85203a4ffea9863a0cf7e7059af9f2c37319392ea69dc11
 IMAGE = "boris271142/lmss" \
-        "@sha256:c1a671ab6e75e11af85203a4ffea9863a0cf7e7059af9f2c37319392ea69dc11"
+        "@sha256:3db2ab311ed5c43b83f2c612966009524957f5fd3941dfdbaef0b263b3baa35d"
 GPU_CLASS_BASE = "rtx3090"  # must match 'RTX 3090 (24 GB)', not a Laptop/variant class
 
 # Mirrored from the live 'qwen38-27b-rtx5090' group (GET, 2026-09-30) — response-only
@@ -180,12 +184,14 @@ def parse_args() -> argparse.Namespace:
                              "client pinger fires every ~30 s, so keep this at ~2x the pinger "
                              "period or more (60 s minimum) or pinger jitter can false-kill")
     parser.add_argument("--stop-key", default=None, metavar="FILE",
-                        help="file holding a PER-GROUP scoped Salad API key for the watchdog's "
-                             "group /stop call (create it in the Salad web UI, scoped to THIS "
-                             "group only — never the org-wide key). Injected as env "
-                             "SALAD_STOP_KEY with SALAD_ORG/SALAD_PROJECT/SALAD_GROUP; the key "
-                             "is never printed. Without it the watchdog SIGTERMs only and the "
-                             "group RESCHEDULES — do not arm --idle-shutdown without it")
+                        help="file holding the Salad API key for the watchdog's group /stop "
+                             "call (Salad keys are per-user and account-wide — no group-"
+                             "scoped keys exist). Stored in group env as SALAD_STOP_KEY="
+                             "b64:<base64> (basic obfuscation, not encryption: keeps the "
+                             "plaintext out of the env visible via API GET; the watchdog "
+                             "decodes it). The key is never printed. Without it the watchdog "
+                             "DISABLES itself (no self-shutdown) — do not arm --idle-shutdown "
+                             "without it")
     parser.add_argument("--priority", choices=PRIORITY_CHOICES, default=PRIORITY,
                         help="placement priority (create-only): high > medium > low > batch. "
                              "Default medium — low/batch instances are placed best-effort and "
@@ -244,6 +250,10 @@ def main() -> int:
         if not stop_key:
             print(f"      --stop-key file {args.stop_key!r} is empty")
             return 2
+        # Basic obfuscation: store the key in group env as b64:<base64> so a GET
+        # on the group doesn't expose the plaintext (idle_watchdog decodes the
+        # sentinel; NOT encryption — the env itself is the exposure surface).
+        stop_key = "b64:" + base64.b64encode(stop_key.encode()).decode()
 
     print(f"[1/5] resolving GPU class {GPU_CLASS_BASE!r} in org {org!r}")
     gpu_uuid = resolve_rtx3090(org)
@@ -296,9 +306,10 @@ def main() -> int:
         # Group /stop kill (watchdog v2): the ONLY action that truly stops a
         # group is the Salad group /stop endpoint — self-exit gets RESCHEDULED
         # (paid test 2026-10-09). SALAD_STOP_KEY = account-wide key from
-        # --stop-key ('none' = watchdog SIGTERMs only, group reschedules —
-        # do not arm armed mode without a key). Path components ride along;
-        # never empty (the API rejects empty env values).
+        # --stop-key, stored obfuscated as b64:<base64> (basic obfuscation, not
+        # encryption; the watchdog decodes it). 'none' = watchdog DISABLES
+        # itself — no self-shutdown; do not arm without a key. Path components
+        # ride along; never empty (the API rejects empty env values).
         "SALAD_STOP_KEY": stop_key,
         "SALAD_ORG": org,
         "SALAD_PROJECT": project,

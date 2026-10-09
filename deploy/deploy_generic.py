@@ -82,6 +82,7 @@ Usage:
 """
 
 import argparse
+import base64
 import os
 import sys
 import time
@@ -122,17 +123,20 @@ MODEL_ALIAS = "atx-swift-27b"
 # Digest-pinned: the API accepts the @sha256 ref verbatim, and it is the
 # airtight lever against the worker image cache (keyed by repo NAME — a tag
 # re-push can serve stale layers on workers that cached the old one). This
-# is the cuda128-v6 push (2026-10-09, build id 'lmss generic-v6 (hf runtime
-# download, claude-template, extra-args, idle_watchdog v2 [arm on /ready +
-# group /stop POST] + trapped-child supervisor, exec-form entry.sh CMD)
-# 2026-10-09' — watchdog v2 (arms on the group /ready endpoint, kills by
-# POSTing the Salad group /stop with SALAD_STOP_KEY from --stop-key, then
-# SIGTERM — a bare self-exit gets RESCHEDULED, not stopped, paid test
-# 2026-10-09) on top of the exec-form entry.sh CMD fix; based on
-# boris271142/lmss:cuda128-v6); the tag form, for humans:
-#   boris271142/lmss_generic:cuda128-v6
+# is the cuda128-v7 push (2026-10-09, build id 'lmss generic-v7 (hf runtime
+# download, claude-template, extra-args, idle_watchdog v2.1 [b64 key decode +
+# key=none disables watchdog] + trapped-child supervisor, exec-form entry.sh
+# CMD) 2026-10-09' — watchdog v2.1 (arms on the group /ready endpoint, kills
+# by POSTing the Salad group /stop with SALAD_STOP_KEY from --stop-key,
+# stored b64-obfuscated and decoded at startup, then SIGTERM — a bare
+# self-exit gets RESCHEDULED, not stopped, paid test 2026-10-09; key
+# 'none'/missing/undecodable DISABLES the watchdog) on top of the exec-form
+# entry.sh CMD fix; based on boris271142/lmss:cuda128-v7); the tag form, for
+# humans:
+#   boris271142/lmss_generic:cuda128-v7
+#   cuda128-v6: sha256:d7a0a327cd70bd6b7617feb6ebb09ae11b1403681635bcac07b369ee281fc0e5
 IMAGE = "boris271142/lmss_generic" \
-        "@sha256:d7a0a327cd70bd6b7617feb6ebb09ae11b1403681635bcac07b369ee281fc0e5"
+        "@sha256:43206e0a231ff60c7228ff7ca2894f6e80e995c6f5994f98d37067018e4fe576"
 
 MODEL_REPO = "bjivanovich/ATX-Swift-1.5-Qwen3.8-27B-Uncensored-MTP-GGUF"
 # Q5_K_M — MTP head embedded in the gguf (the 'MTP' in the repo name), so no
@@ -261,12 +265,14 @@ def parse_args() -> argparse.Namespace:
                              "client pinger fires every ~30 s, so keep this at ~2x the pinger "
                              "period or more (60 s minimum) or pinger jitter can false-kill")
     parser.add_argument("--stop-key", default=None, metavar="FILE",
-                        help="file holding a PER-GROUP scoped Salad API key for the watchdog's "
-                             "group /stop call (create it in the Salad web UI, scoped to THIS "
-                             "group only — never the org-wide key). Injected as env "
-                             "SALAD_STOP_KEY with SALAD_ORG/SALAD_PROJECT/SALAD_GROUP; the key "
-                             "is never printed. Without it the watchdog SIGTERMs only and the "
-                             "group RESCHEDULES — do not arm --idle-shutdown without it")
+                        help="file holding the Salad API key for the watchdog's group /stop "
+                             "call (Salad keys are per-user and account-wide — no group-"
+                             "scoped keys exist). Stored in group env as SALAD_STOP_KEY="
+                             "b64:<base64> (basic obfuscation, not encryption: keeps the "
+                             "plaintext out of the env visible via API GET; the watchdog "
+                             "decodes it). The key is never printed. Without it the watchdog "
+                             "DISABLES itself (no self-shutdown) — do not arm --idle-shutdown "
+                             "without it")
     parser.add_argument("--priority", choices=PRIORITY_CHOICES, default=PRIORITY,
                         help="placement priority (create-only): high > medium > low > batch. "
                              "Default medium — low/batch instances are placed best-effort and "
@@ -383,9 +389,10 @@ def build_env(name: str, ctx_size: str, model_repo: str, model_file: str,
         # Group /stop kill (watchdog v2): the ONLY action that truly stops a
         # group is the Salad group /stop endpoint — self-exit gets RESCHEDULED
         # (paid test 2026-10-09). SALAD_STOP_KEY = account-wide key from
-        # --stop-key ('none' = watchdog SIGTERMs only, group reschedules —
-        # do not arm armed mode without a key). Path components ride along;
-        # never empty (the API rejects empty env values).
+        # --stop-key, stored obfuscated as b64:<base64> (basic obfuscation, not
+        # encryption; the watchdog decodes it). 'none' = watchdog DISABLES
+        # itself — no self-shutdown; do not arm without a key. Path components
+        # ride along; never empty (the API rejects empty env values).
         "SALAD_STOP_KEY": stop_key,
         "SALAD_ORG": org,
         "SALAD_PROJECT": project,
@@ -482,7 +489,11 @@ def main() -> int:
         if not stop_key:
             print(f"      --stop-key file {args.stop_key!r} is empty")
             return 2
-        print("      stop key loaded (account-wide key, never printed)")
+        # Basic obfuscation: store the key in group env as b64:<base64> so a GET
+        # on the group doesn't expose the plaintext (idle_watchdog decodes the
+        # sentinel; NOT encryption — the env itself is the exposure surface).
+        stop_key = "b64:" + base64.b64encode(stop_key.encode()).decode()
+        print("      stop key loaded (account-wide key, stored b64-obfuscated, never printed)")
     env = build_env(group, args.ctx_size, args.model_repo, args.model_file,
                     args.model_alias, args.draft_model, args.vision_model,
                     args.spec_type, hf_token,
@@ -511,13 +522,13 @@ def main() -> int:
             print("      NOTE: --no-start while running — the PATCH takes effect on the next start")
         live_policy = existing.raw.get("restart_policy")
         if args.idle_shutdown != "none" and stop_key == "none":
-            print(f"      WARNING: --idle-shutdown {args.idle_shutdown!r} arms the in-container "
-                  "watchdog WITHOUT --stop-key — the watchdog can then only SIGTERM, and "
-                  "self-exit does NOT stop a group: Salad reschedules a new instance "
-                  "(restart_policy='never') or restarts the container (restart_policy='always', "
-                  f"live here: {live_policy!r}) — billing continues. Pass --stop-key <per-group "
-                  "key file> so the watchdog POSTs the group /stop endpoint (the only real "
-                  "stop). Do NOT leave a group armed without it.")
+            print(f"      WARNING: --idle-shutdown {args.idle_shutdown!r} WITHOUT --stop-key — "
+                  "the in-container watchdog DISABLES itself when SALAD_STOP_KEY='none' (no "
+                  "self-shutdown at all): the group runs until stopped externally — billing "
+                  "continues. (Self-exit without the /stop call is worse than nothing: Salad "
+                  f"reschedules a new instance — live restart_policy here: {live_policy!r}.) "
+                  "Pass --stop-key <key file> so the watchdog can POST the group /stop — the "
+                  "only real stop.")
         elif args.idle_shutdown != "none" and live_policy == "always":
             print("      NOTE: armed with --stop-key — the watchdog's group /stop call stops "
                   f"the group at GROUP level, so the live restart_policy={live_policy!r} is "

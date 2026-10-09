@@ -29,7 +29,7 @@ The two keys to the whole setup:
 | **`cl_salad_deploy`** | `claude/` | **The deploy half.** Looks up the group's status, starts it if stopped (costs), waits for the model, then hands off to `cl_salad`. |
 | **`salad_proxy.py`** | `claude/` | Stdlib Anthropic↔OpenAI bridge. Injects `Salad-Api-Key`, translates requests + streaming SSE + tool calls. Run by `cl_salad`. |
 | `version.sh` | `docker/` | Run **inside a running instance** (via SSH) to confirm *which build* is actually live and what it's downloading. |
-| `idle_watchdog.py` | `docker/` (installed in the image) | In-container **idle/heartbeat self-shutdown (v2)**: arms on the group `/ready` endpoint (the probe's own), holds `IDLE_ARM_GRACE`, then after `IDLE_TIMEOUT`/`HEARTBEAT_TIMEOUT` s of no traffic **POSTs the Salad group `/stop`** (per-group scoped `SALAD_STOP_KEY`) and SIGTERMs the container — the only kill that truly stops billing (a bare self-exit gets RESCHEDULED, paid test 2026-10-09). Deployers: `--idle-shutdown none|idle|heartbeat` + `--stop-key <file>`. |
+| `idle_watchdog.py` | `docker/` (installed in the image) | In-container **idle/heartbeat self-shutdown (v2.1)**: arms on the group `/ready` endpoint (the probe's own), holds `IDLE_ARM_GRACE`, then after `IDLE_TIMEOUT`/`HEARTBEAT_TIMEOUT` s of no traffic **POSTs the Salad group `/stop`** (account-wide key, `SALAD_STOP_KEY=b64:<base64>` obfuscated storage, decoded at startup) and SIGTERMs the container — the only kill that truly stops billing (a bare self-exit gets RESCHEDULED, paid test 2026-10-09). Key `none`/missing/undecodable **disables the watchdog**. Deployers: `--idle-shutdown none|idle|heartbeat` + `--stop-key <file>`. |
 | `stats.sh` | `docker/` | Run **inside a running instance**: llama-server stats — tps, queue, token totals (scrapes the local `/metrics`). |
 | `utils/llama_stats.py` | `utils/` | Same stats **from the host**, against a Salad gateway URL (key auto-loaded) or a local server. |
 | `curl_salad.sh` | `claude/` | Quick smoke test — asks the running model 2-3 simple questions through the gateway. |
@@ -264,14 +264,17 @@ never printed).
   the default). `--ctx-size`, `--disk-size`.
 - **All five — idle/heartbeat self-shutdown**: `--idle-shutdown none|idle|heartbeat`
   (default `none`), `--idle-timeout 600`, `--heartbeat-timeout 600`, **`--stop-key <file>`**
-  (per-group scoped Salad stop key, web-UI-created) → sent as `IDLE_SHUTDOWN` /
+  (the account-wide per-user Salad API key — group-scoped keys don't exist; stored in
+  the group env b64-obfuscated as `SALAD_STOP_KEY=b64:<base64>`, decoded by the
+  watchdog at startup) → sent as `IDLE_SHUTDOWN` /
   `IDLE_TIMEOUT` / `HEARTBEAT_TIMEOUT` / `SALAD_STOP_KEY` + `SALAD_ORG`/`SALAD_PROJECT`/
   `SALAD_GROUP` env (always, since PATCH replaces env wholesale). The in-container
   `idle_watchdog.py` arms on the group `/ready` endpoint, holds `IDLE_ARM_GRACE`, then
   stops the group when chat traffic (idle) or client keepalive pings (heartbeat) go
   flat — by **POSTing the group `/stop`** (the only true stop; a bare self-exit gets
-  RESCHEDULED, not stopped — paid test 2026-10-09), so arming without `--stop-key`
-  bills and the deployers warn. Armed mode creates with `restart_policy=never`
+  RESCHEDULED, not stopped — paid test 2026-10-09). Key `none`/missing/undecodable
+  **DISABLES the watchdog** (a keyless self-exit would just get rescheduled and keep
+  billing), and the deployers warn when arming without a key. Armed mode creates with `restart_policy=never`
   (create-only; kills crash-loop billing on self-exit — the group-level stop wins
   over the policy, so an existing `always` group needs no delete+recreate). See
   `docker/README.md` → *Idle/heartbeat self-shutdown*.

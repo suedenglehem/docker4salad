@@ -56,7 +56,7 @@
 #   docker push boris271142/lmss_jonathancoletti_qwen38_q6_mtp_vision:<tag>
 # =============================================================================
 
-FROM boris271142/lmss:cuda128-v6
+FROM boris271142/lmss:cuda128-v7
 
 # --- Bake the two small auxiliary models into /models (build time) -----------
 # The v3 runtime image already has the `hf` CLI (huggingface_hub 1.28.0) +
@@ -78,7 +78,7 @@ RUN set -eux; \
 # first word, e.g. "lmss q6-mtp..." -> "lmss"). Override with
 # --build-arg LMSS_BUILD_ID="..." for a per-push id.
 ARG LMSS_BUILD_ID
-RUN printf '%s\n' "${LMSS_BUILD_ID:-lmss q6-mtp-vision-v8 (baked draft+vision, claude-template, idle_watchdog v2 [arm on /ready + group /stop POST] + trapped-child supervisor, exec-form entry.sh CMD) 2026-10-09}" > /etc/llama-image-build
+RUN printf '%s\n' "${LMSS_BUILD_ID:-lmss q6-mtp-vision-v9 (baked draft+vision, claude-template, idle_watchdog v2.1 [b64 key decode + key=none disables watchdog] + trapped-child supervisor, exec-form entry.sh CMD) 2026-10-09}" > /etc/llama-image-build
 
 # --- Claude Code template: dump+patch script (repo-root build context) ------
 # Zero dependencies (stdlib Python only); copied in and run at STARTUP, not at

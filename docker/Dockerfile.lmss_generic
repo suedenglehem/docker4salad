@@ -1,7 +1,7 @@
 # =============================================================================
 # lmss_generic   (name spelling confirmed before push)
 #
-# The GENERIC model image: FROM boris271142/lmss:cuda128-v6 with NO baked
+# The GENERIC model image: FROM boris271142/lmss:cuda128-v7 with NO baked
 # models. At runtime everything is downloaded from HuggingFace via the fast
 # `hf` xet path — the large main model AND the optional MTP draft and vision
 # projector. It is the generic counterpart of lmss_jonathancoletti_qwen38_
@@ -72,7 +72,7 @@
 #   docker push boris271142/lmss_generic:cuda128-v1
 # =============================================================================
 
-FROM boris271142/lmss:cuda128-v6
+FROM boris271142/lmss:cuda128-v7
 
 # Build id for /usr/local/bin/version.sh (same file the v3 image writes).
 # The default lives in the RUN (shell ${ARG:-default}), NOT in the ARG line —
@@ -80,7 +80,7 @@ FROM boris271142/lmss:cuda128-v6
 # first word, e.g. "lmss q6-mtp..." -> "lmss"). Override with
 # --build-arg LMSS_BUILD_ID="..." for a per-push id.
 ARG LMSS_BUILD_ID
-RUN printf '%s\n' "${LMSS_BUILD_ID:-lmss generic-v6 (hf runtime download, claude-template, extra-args, idle_watchdog v2 [arm on /ready + group /stop POST] + trapped-child supervisor, exec-form entry.sh CMD) 2026-10-09}" > /etc/llama-image-build
+RUN printf '%s\n' "${LMSS_BUILD_ID:-lmss generic-v7 (hf runtime download, claude-template, extra-args, idle_watchdog v2.1 [b64 key decode + key=none disables watchdog] + trapped-child supervisor, exec-form entry.sh CMD) 2026-10-09}" > /etc/llama-image-build
 
 # --- Claude Code template: dump+patch script (repo-root build context) ------
 # Zero dependencies (stdlib Python only); copied in and run at STARTUP, not at

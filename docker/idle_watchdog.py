@@ -15,7 +15,8 @@ new instance and the group stays `running`, i.e. a self-restart loop that
 bills ~6 min of GPU per cycle. restart_policy governs container restarts
 WITHIN an instance, not group-level rescheduling. Only the /stop endpoint
 actually stops the group. Without SALAD_STOP_KEY configured the watchdog
-still SIGTERMs (old behavior) and logs that the group will reschedule.
+EXITS (feature disabled) — the old SIGTERM-only behavior was a reschedule
+loop that bills, so arming without a key is pointless.
 
 Modes (env IDLE_SHUTDOWN, sentinel "none" = OFF, the baked default — every
 existing group keeps today's behavior):
@@ -65,12 +66,19 @@ Safety rails:
     trap (handler installed -> delivered), kills the child, and exits; PID
     -namespace teardown then reaps everything left.
   - IDLE_SHUTDOWN=none (default) -> exits immediately, does nothing.
+  - No usable group /stop config (SALAD_STOP_KEY is "none"/missing/
+    undecodable, or SALAD_ORG/SALAD_PROJECT/SALAD_GROUP incomplete) -> the
+    watchdog exits immediately, feature DISABLED: a self-exit without the
+    /stop call gets rescheduled by Salad and keeps billing, so arming
+    without a key is pointless (cleaner than firing a useless kill).
 
 Group stop API (stdlib urllib POST, no body, 202 Accepted):
   https://api.salad.com/api/public/organizations/${SALAD_ORG}/projects/
   ${SALAD_PROJECT}/containers/${SALAD_GROUP}/stop  with header Salad-Api-Key.
-  Use a PER-GROUP scoped key (web-UI-created, scoped to this one group) —
-  never the org-wide key. The key is never logged.
+  Salad has NO group-scoped keys — the API token is per-user and account-wide
+  (docs/salad/reference/api-usage.mdx); the deployer injects the account key
+  (user-approved) stored obfuscated as "b64:<base64>" (see SALAD_STOP_KEY).
+  The key is never logged.
 
 Env knobs (all baked defaults, group-overridable via the deployers):
   IDLE_SHUTDOWN   none (off) | idle | heartbeat
@@ -82,8 +90,13 @@ Env knobs (all baked defaults, group-overridable via the deployers):
   PORT            llama-server port (default 8080)
   API_KEY         llama-server auth key; sent as Bearer when set (local runs
                   pass it; Salad groups run llama-server without auth)
-  SALAD_STOP_KEY  per-group scoped Salad API key for the /stop call
-                  (sentinel "none" = skip the API call, SIGTERM only)
+  SALAD_STOP_KEY  Salad API key for the /stop call (account-wide — Salad has
+                  no group-scoped keys). Deployers store it obfuscated as
+                  "b64:<base64>" (decoded here; basic obfuscation to keep the
+                  plaintext out of the group env, NOT encryption — anyone who
+                  can read the env can decode it). Plain keys keep working
+                  (legacy groups); sentinel "none" = skip the API call,
+                  SIGTERM only.
   SALAD_ORG / SALAD_PROJECT / SALAD_GROUP   stop-endpoint path components
   SALAD_API_BASE  API server override (default https://api.salad.com/api/public;
                   stub tests point it at localhost)
@@ -94,6 +107,7 @@ Logs go to ${API_STATE_DIR}/watchdog.log via the CMD's nohup redirect.
 
 from __future__ import annotations
 
+import base64
 import os
 import signal
 import sys
@@ -117,15 +131,6 @@ API_KEY = os.environ.get("API_KEY") or None
 READY_URL = f"http://127.0.0.1:{READY_PORT}/ready"
 METRICS_URL = f"http://127.0.0.1:{PORT}/metrics"
 
-# Group /stop config (deployer-injected; sentinel "none" for the key = skip).
-STOP_KEY = os.environ.get("SALAD_STOP_KEY")
-if STOP_KEY in ("", "none"):
-    STOP_KEY = None
-STOP_PATH = ""
-if all(os.environ.get(k) for k in ("SALAD_ORG", "SALAD_PROJECT", "SALAD_GROUP")):
-    STOP_PATH = (f"/organizations/{os.environ['SALAD_ORG']}/projects/"
-                 f"{os.environ['SALAD_PROJECT']}/containers/{os.environ['SALAD_GROUP']}/stop")
-
 # Activity counters (names verified against llama.cpp b10572, see llama_stats.py).
 _PROMPT_TOKENS = "llamacpp:prompt_tokens_total"
 _PREDICTED_TOKENS = "llamacpp:tokens_predicted_total"
@@ -135,6 +140,30 @@ _REQ_PROCESSING = "llamacpp:requests_processing"
 def log(msg: str) -> None:
     print(f"[idle_watchdog] {time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())} {msg}",
           flush=True)
+
+
+# Group /stop config (deployer-injected). SALAD_STOP_KEY forms:
+#   "b64:<base64>" - obfuscated key (deployer default; keeps the plaintext out
+#                    of the group env, visible via API GET). Basic obfuscation,
+#                    NOT encryption — anyone who can read the env can decode it.
+#   "<key>"        - plain key (legacy groups keep working).
+#   "none"/""/unset - no key: the watchdog DISABLES itself (see main()).
+STOP_KEY = os.environ.get("SALAD_STOP_KEY")
+if STOP_KEY in ("", "none"):
+    STOP_KEY = None
+elif STOP_KEY.startswith("b64:"):
+    try:
+        STOP_KEY = base64.b64decode(STOP_KEY[4:], validate=True).decode("ascii")
+        if not STOP_KEY:
+            raise ValueError("empty after decode")
+    except Exception as e:  # noqa: BLE001 - malformed sentinel: disable, never crash
+        log(f"SALAD_STOP_KEY has the 'b64:' prefix but failed to decode "
+            f"({e.__class__.__name__}: {e}) — treating as no stop key")
+        STOP_KEY = None
+STOP_PATH = ""
+if all(os.environ.get(k) for k in ("SALAD_ORG", "SALAD_PROJECT", "SALAD_GROUP")):
+    STOP_PATH = (f"/organizations/{os.environ['SALAD_ORG']}/projects/"
+                 f"{os.environ['SALAD_PROJECT']}/containers/{os.environ['SALAD_GROUP']}/stop")
 
 
 def http_get(url: str, timeout: float) -> bytes:
@@ -283,6 +312,13 @@ def main() -> int:
         return 0
     if mode not in ("idle", "heartbeat"):
         log(f"unknown IDLE_SHUTDOWN={mode!r} (want none|idle|heartbeat) — feature off, exiting")
+        return 0
+    if not (STOP_KEY and STOP_PATH):
+        log("no usable group /stop config (SALAD_STOP_KEY is 'none'/missing/"
+            "undecodable, or SALAD_ORG/SALAD_PROJECT/SALAD_GROUP incomplete) — "
+            "watchdog DISABLED: a self-exit without the /stop call gets "
+            "rescheduled by Salad and keeps billing, so arming without a key "
+            "is pointless. Exiting, feature off (no kill)")
         return 0
 
     def seconds(name: str, default: int) -> int:
