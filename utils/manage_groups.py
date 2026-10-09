@@ -532,7 +532,8 @@ def _bw_read(inst: sc.ContainerGroupInstanceInfo) -> "tuple[list[tuple[int, int]
     """Read the tail of the instance's bw.log over SSH. Salad's SSH exec is
     shell-less (one plain command per call — no pipes/;/quotes), so the probe
     is exactly `tail -n N <path>`. Returns (pairs, None) on success (pairs
-    may be empty), or (None, kind) where kind is "missing" (file absent —
+    non-empty — the relay gives no exit-code signal), or (None, kind) where
+    kind is "missing" (file absent —
     the image predates bw_reporter) or a connection description (strike)."""
     cmd = [
         "ssh", *BW_SSH_OPTS, "-p", str(inst.ssh_port), f"root@{inst.ssh_ip}",
@@ -542,16 +543,26 @@ def _bw_read(inst: sc.ContainerGroupInstanceInfo) -> "tuple[list[tuple[int, int]
         p = subprocess.run(cmd, capture_output=True, text=True, timeout=BW_SSH_TIMEOUT)
     except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as e:
         return None, f"conn ({e.__class__.__name__})"
-    if p.returncode == 0:
-        pairs: list[tuple[int, int]] = []
-        for line in p.stdout.splitlines():
-            parts = line.split()
-            if len(parts) == 2 and parts[0].isdigit() and parts[1].isdigit():
-                pairs.append((int(parts[0]), int(parts[1])))
+    pairs: list[tuple[int, int]] = []
+    for line in p.stdout.splitlines():
+        parts = line.split()
+        if len(parts) == 2 and parts[0].isdigit() and parts[1].isdigit():
+            pairs.append((int(parts[0]), int(parts[1])))
+    # Salad's SSH is an OCI exec behind a relay: it forwards stdout/stderr but
+    # ALWAYS exits 1 — success and failure are indistinguishable by exit code
+    # (live-probed 2026-10-09: `ls /tmp/llama-api` printed the listing and
+    # exited 1). Only ssh's own transport failures exit 255. So the payload
+    # decides, not the code: pairs ⇒ success; "cannot open" (tail's own
+    # stderr) ⇒ the log is absent; anything else ⇒ connection strike.
+    # The relay's "Connecting to container <id>" banner lands on stdout and is
+    # skipped by the digit-pair filter.
+    if p.returncode == 255:
+        return None, f"conn (ssh: {p.stderr.strip()[:120]})"
+    if pairs:
         return pairs, None
-    if p.returncode == 1 and "cannot open" in p.stderr:
+    if "cannot open" in p.stderr:
         return None, "missing"
-    return None, f"conn (exit {p.returncode}: {p.stderr.strip()[:120]})"
+    return None, f"conn (no samples, exit {p.returncode}: {p.stderr.strip()[:120]})"
 
 
 def _bw_rates(pairs: "list[tuple[int, int]]") -> "list[tuple[int, float]]":
