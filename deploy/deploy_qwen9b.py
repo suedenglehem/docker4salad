@@ -183,6 +183,13 @@ def parse_args() -> argparse.Namespace:
                              "(mode heartbeat) before the watchdog kills the container. The "
                              "client pinger fires every ~30 s, so keep this at ~2x the pinger "
                              "period or more (60 s minimum) or pinger jitter can false-kill")
+    parser.add_argument("--idle-grace", default="1800",
+                        help="env IDLE_GRACE — max seconds the watchdog waits for the FIRST "
+                             "/ready ok before giving up (no kill). A cold start that "
+                             "download+loads the model can blow past the 1800 s default "
+                             "(2026-10-09: atx-hb-test2's 27B took ~37 min, the watchdog gave "
+                             "up at 30 min and the group ran the whole session UNARMED) — use "
+                             "3600 for big-quant groups")
     parser.add_argument("--stop-key", default=None, metavar="FILE",
                         help="file holding the Salad API key for the watchdog's group /stop "
                              "call (Salad keys are per-user and account-wide — no group-"
@@ -303,6 +310,10 @@ def main() -> int:
         "IDLE_SHUTDOWN": args.idle_shutdown,
         "IDLE_TIMEOUT": args.idle_timeout,
         "HEARTBEAT_TIMEOUT": args.heartbeat_timeout,
+        # Watchdog arming window: max seconds to wait for the first /ready ok
+        # before it gives up (no kill). Big-quant cold starts exceed the 1800
+        # default — the watchdog then exits and the group runs UNARMED.
+        "IDLE_GRACE": args.idle_grace,
         # Group /stop kill (watchdog v2): the ONLY action that truly stops a
         # group is the Salad group /stop endpoint — self-exit gets RESCHEDULED
         # (paid test 2026-10-09). SALAD_STOP_KEY = account-wide key from
