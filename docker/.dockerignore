@@ -7,6 +7,9 @@ v1/
 api.txt
 # tests/api.txt is a symlink to the same key (used by curl1.sh / curl2.sh).
 tests/api.txt
+# hft.txt holds the HuggingFace token (passed at runtime via -e / env file,
+# never COPYed by any Dockerfile) — same reason: keep it out of the context.
+hft.txt
 
 # comfy/ is a separate project that happens to live here; it has its own
 # Dockerfile/compose with its own build context, so excluding it only keeps

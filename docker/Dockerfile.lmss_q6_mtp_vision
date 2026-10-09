@@ -56,7 +56,7 @@
 #   docker push boris271142/lmss_jonathancoletti_qwen38_q6_mtp_vision:<tag>
 # =============================================================================
 
-FROM boris271142/lmss:cuda128-v5
+FROM boris271142/lmss:cuda128-v6
 
 # --- Bake the two small auxiliary models into /models (build time) -----------
 # The v3 runtime image already has the `hf` CLI (huggingface_hub 1.28.0) +
@@ -78,7 +78,7 @@ RUN set -eux; \
 # first word, e.g. "lmss q6-mtp..." -> "lmss"). Override with
 # --build-arg LMSS_BUILD_ID="..." for a per-push id.
 ARG LMSS_BUILD_ID
-RUN printf '%s\n' "${LMSS_BUILD_ID:-lmss q6-mtp-vision-v7 (baked draft+vision, claude-template, idle_watchdog + trapped-child supervisor, exec-form entry.sh CMD) 2026-10-09}" > /etc/llama-image-build
+RUN printf '%s\n' "${LMSS_BUILD_ID:-lmss q6-mtp-vision-v8 (baked draft+vision, claude-template, idle_watchdog v2 [arm on /ready + group /stop POST] + trapped-child supervisor, exec-form entry.sh CMD) 2026-10-09}" > /etc/llama-image-build
 
 # --- Claude Code template: dump+patch script (repo-root build context) ------
 # Zero dependencies (stdlib Python only); copied in and run at STARTUP, not at
@@ -114,12 +114,17 @@ ENV CLAUDE_TEMPLATE=none
 # Idle/heartbeat self-shutdown (idle_watchdog.py from the v3 base, started by
 # the CMD below): "none" (default) = OFF; idle -> kill after IDLE_TIMEOUT s of
 # no chat traffic; heartbeat -> kill after HEARTBEAT_TIMEOUT s of no client
-# pings. Arms only after /health ok; group needs restart_policy=never (set by
-# the deployers when armed) for the self-exit to stay stopped.
+# pings. Arms on the group /ready endpoint (api_app :9999, the probe's own
+# endpoint), holds IDLE_ARM_GRACE s, then kills = POST the Salad group /stop
+# (SALAD_STOP_KEY = per-group scoped key from the deployer's --stop-key;
+# "none" = skip) THEN SIGTERM — self-exit alone gets RESCHEDULED, not stopped.
 ENV IDLE_SHUTDOWN=none \
     IDLE_TIMEOUT=600 \
     HEARTBEAT_TIMEOUT=600 \
-    IDLE_GRACE=1800
+    IDLE_GRACE=1800 \
+    IDLE_ARM_GRACE=150 \
+    READY_PORT=9999 \
+    SALAD_STOP_KEY=none
 
 # --- Runtime CMD -------------------------------------------------------------
 # Faithful copy of the v3 CMD with exactly two changes: (1) no wget2 for the

@@ -215,7 +215,7 @@ RUN chmod +x /usr/local/bin/llm.sh /usr/local/bin/question.sh /usr/local/bin/ver
 # default lives in the RUN (shell ${ARG:-default}), NOT in the ARG line - a
 # Dockerfile ARG default cannot carry unquoted spaces.
 ARG LMSS_BUILD_ID
-RUN printf '%s\n' "${LMSS_BUILD_ID:-lmss_generic_ampere-v3 (llamAmpere v0.4 fork, cuda 13.0.2, turbo5/turbo4 KV, idle_watchdog + trapped-child supervisor, exec-form entry.sh CMD) 2026-10-09}" > /etc/llama-image-build
+RUN printf '%s\n' "${LMSS_BUILD_ID:-lmss_generic_ampere-v4 (llamAmpere v0.4 fork, cuda 13.0.2, turbo5/turbo4 KV, idle_watchdog v2 [arm on /ready + group /stop POST] + trapped-child supervisor, exec-form entry.sh CMD) 2026-10-09}" > /etc/llama-image-build
 
 # Model + runtime env (lmss_generic's surface). The defaults are the family's
 # (JonathanColetti 27B) so a bare docker run behaves like the rest of the
@@ -270,12 +270,17 @@ ENV API_KEY=
 # Idle/heartbeat self-shutdown (idle_watchdog.py, started by the CMD below):
 # "none" (default) = OFF; idle -> kill after IDLE_TIMEOUT s of no chat
 # traffic; heartbeat -> kill after HEARTBEAT_TIMEOUT s of no client pings.
-# Arms only after /health ok; group needs restart_policy=never (set by the
-# deployers when armed) for the self-exit to stay stopped.
+# Arms on the group /ready endpoint (api_app :9999, the probe's own endpoint),
+# holds IDLE_ARM_GRACE s, then kills = POST the Salad group /stop
+# (SALAD_STOP_KEY = per-group scoped key from the deployer's --stop-key;
+# "none" = skip) THEN SIGTERM — self-exit alone gets RESCHEDULED, not stopped.
 ENV IDLE_SHUTDOWN=none \
     IDLE_TIMEOUT=600 \
     HEARTBEAT_TIMEOUT=600 \
-    IDLE_GRACE=1800
+    IDLE_GRACE=1800 \
+    IDLE_ARM_GRACE=150 \
+    READY_PORT=9999 \
+    SALAD_STOP_KEY=none
 
 WORKDIR ${LLAMA_CPP_DIR}
 

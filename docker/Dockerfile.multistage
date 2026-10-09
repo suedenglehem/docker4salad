@@ -324,14 +324,22 @@ ENV API_KEY=
 #                IDLE_TIMEOUT seconds with no chat traffic.
 #   heartbeat -> same, after HEARTBEAT_TIMEOUT seconds with no client pings
 #                (the cl_salad/chat_salad.sh keepalive pingers).
-# The watchdog arms only after /health is ok (never kills mid-download) and
-# gives up after IDLE_GRACE seconds of never-healthy. The group must run with
-# restart_policy=never for the self-exit to STAY stopped (the deployers set it
-# when the feature is armed; it is create-only in the Salad API).
+# The watchdog arms only after the group's /ready endpoint (api_app :9999 —
+# the exact endpoint the Salad probe polls) is ok, never mid-download, and
+# gives up after IDLE_GRACE seconds of never-ready; it then holds
+# IDLE_ARM_GRACE seconds so the probe flips the group running before the
+# countdown starts. Kill = POST the Salad group /stop endpoint (needs
+# SALAD_STOP_KEY: a PER-GROUP scoped key, web-UI-created, injected by the
+# deployer's --stop-key; sentinel "none" = skip) THEN SIGTERM — self-exit
+# alone does NOT stop the group: Salad reschedules a new instance
+# (restart_policy=never governs container restarts within an instance only).
 ENV IDLE_SHUTDOWN=none \
     IDLE_TIMEOUT=600 \
     HEARTBEAT_TIMEOUT=600 \
-    IDLE_GRACE=1800
+    IDLE_GRACE=1800 \
+    IDLE_ARM_GRACE=150 \
+    READY_PORT=9999 \
+    SALAD_STOP_KEY=none
 
 WORKDIR ${LLAMA_CPP_DIR}
 

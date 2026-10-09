@@ -81,13 +81,15 @@ ORGANIZATION_NAME = "ma-casa-in-paris"
 PROJECT_NAME = "qwen38-27b"
 GROUP_NAME = "qwen9b"
 # Digest-pinned (the airtight lever against the worker image cache, keyed by
-# REPO NAME — see deploy_qwen38_9b.py's note). cuda128-v5 (2026-10-09): the
-# exec-form entry.sh CMD fix (the v4 inline JSON CMD was malformed -> buildkit
-# shell-form fallback -> dash exit 2 crash-loop); carries the idle/heartbeat
-# watchdog (IDLE_SHUTDOWN=none baked = off by default; arm with
-# --idle-shutdown on the CREATE path). Tag form for humans: boris271142/lmss:cuda128-v5
+# REPO NAME — see deploy_qwen38_9b.py's note). cuda128-v6 (2026-10-09):
+# watchdog v2 (arms on the group /ready endpoint, kills by POSTing the Salad
+# group /stop with SALAD_STOP_KEY from --stop-key, then SIGTERM — a bare
+# self-exit gets RESCHEDULED, not stopped, paid test 2026-10-09) on top of
+# cuda128-v5's exec-form entry.sh CMD fix (v4's inline JSON CMD was malformed
+# -> buildkit shell-form fallback -> dash exit 2 crash-loop). IDLE_SHUTDOWN=
+# none baked = off by default. Tag form for humans: boris271142/lmss:cuda128-v6
 IMAGE = "boris271142/lmss" \
-        "@sha256:e5340e3919a5d9de8c1bc54c70bf35ad95f0e5777dba4886ac625e101cd95cb6"
+        "@sha256:c1a671ab6e75e11af85203a4ffea9863a0cf7e7059af9f2c37319392ea69dc11"
 GPU_CLASS_BASE = "rtx3090"  # must match 'RTX 3090 (24 GB)', not a Laptop/variant class
 
 # Mirrored from the live 'qwen38-27b-rtx5090' group (GET, 2026-09-30) — response-only
@@ -161,9 +163,13 @@ def parse_args() -> argparse.Namespace:
                              "heartbeat (self-stop after --heartbeat-timeout s with no client "
                              "keepalive pings — run cl_salad/chat_salad.sh with "
                              "SALAD_HEARTBEAT=1). Needs a watchdog-capable image "
-                             "(version.sh prints the WATCHDOG generation). Armed mode sets "
-                             "restart_policy=never so the self-exit STAYS stopped (this "
-                             "deployer is create-only, so the policy is set at creation)")
+                             "(version.sh prints the WATCHDOG generation). The watchdog arms "
+                             "on the group's /ready endpoint and kills by POSTing the group "
+                             "/stop endpoint — pass --stop-key (account-wide key): "
+                             "self-exit alone does NOT stop a group (Salad reschedules a new "
+                             "instance — paid test 2026-10-09), so arming without --stop-key "
+                             "bills. Armed mode also sets restart_policy=never (this deployer "
+                             "is create-only, so the policy is set at creation)")
     parser.add_argument("--idle-timeout", default="600",
                         help="env IDLE_TIMEOUT — seconds of flat token counters on /metrics "
                              "(mode idle) before the watchdog SIGTERMs llama-server and the "
@@ -173,6 +179,13 @@ def parse_args() -> argparse.Namespace:
                              "(mode heartbeat) before the watchdog kills the container. The "
                              "client pinger fires every ~30 s, so keep this at ~2x the pinger "
                              "period or more (60 s minimum) or pinger jitter can false-kill")
+    parser.add_argument("--stop-key", default=None, metavar="FILE",
+                        help="file holding a PER-GROUP scoped Salad API key for the watchdog's "
+                             "group /stop call (create it in the Salad web UI, scoped to THIS "
+                             "group only — never the org-wide key). Injected as env "
+                             "SALAD_STOP_KEY with SALAD_ORG/SALAD_PROJECT/SALAD_GROUP; the key "
+                             "is never printed. Without it the watchdog SIGTERMs only and the "
+                             "group RESCHEDULES — do not arm --idle-shutdown without it")
     parser.add_argument("--priority", choices=PRIORITY_CHOICES, default=PRIORITY,
                         help="placement priority (create-only): high > medium > low > batch. "
                              "Default medium — low/batch instances are placed best-effort and "
@@ -210,11 +223,27 @@ def _http_get(path: str):
     return _http("GET", path, load_api_key())
 
 
+def redact(env: dict[str, str]) -> dict[str, str]:
+    """Mask secrets for printing (SALAD_STOP_KEY is a secret)."""
+    return {k: "<REDACTED>" if k == "SALAD_STOP_KEY" else v for k, v in env.items()}
+
+
 def main() -> int:
     args = parse_args()
     org = args.org
     project = args.project
     group = args.group
+    stop_key = "none"
+    if args.stop_key:
+        try:
+            with open(args.stop_key) as f:
+                stop_key = f.read().strip()
+        except OSError as e:
+            print(f"      cannot read --stop-key file {args.stop_key!r}: {e}")
+            return 2
+        if not stop_key:
+            print(f"      --stop-key file {args.stop_key!r} is empty")
+            return 2
 
     print(f"[1/5] resolving GPU class {GPU_CLASS_BASE!r} in org {org!r}")
     gpu_uuid = resolve_rtx3090(org)
@@ -264,6 +293,16 @@ def main() -> int:
         "IDLE_SHUTDOWN": args.idle_shutdown,
         "IDLE_TIMEOUT": args.idle_timeout,
         "HEARTBEAT_TIMEOUT": args.heartbeat_timeout,
+        # Group /stop kill (watchdog v2): the ONLY action that truly stops a
+        # group is the Salad group /stop endpoint — self-exit gets RESCHEDULED
+        # (paid test 2026-10-09). SALAD_STOP_KEY = account-wide key from
+        # --stop-key ('none' = watchdog SIGTERMs only, group reschedules —
+        # do not arm armed mode without a key). Path components ride along;
+        # never empty (the API rejects empty env values).
+        "SALAD_STOP_KEY": stop_key,
+        "SALAD_ORG": org,
+        "SALAD_PROJECT": project,
+        "SALAD_GROUP": group,
     }
     memory_mb = int(round(args.memory_size * 1024))
     storage_amount = int(round(args.disk_size * 1024**3))
@@ -272,8 +311,10 @@ def main() -> int:
         display_name=group,
         autostart_policy=False,
         replicas=1,
-        # 'never' when the watchdog is armed: its SIGTERM of PID 1 exits
-        # the container and Salad leaves the group STOPPED (free).
+        # 'never' when the watchdog is armed: the watchdog's real kill is
+        # the group /stop POST (--stop-key), and 'never' additionally
+        # stops crash-loop billing on any self-exit — self-exit alone
+        # gets RESCHEDULED, not stopped (paid test 2026-10-09).
         restart_policy="never" if args.idle_shutdown != "none" else "always",
         container_image=args.image,
         environment_variables=env,
@@ -291,7 +332,7 @@ def main() -> int:
     print(f"[4/5] creating container group {group!r} in project {project!r}")
     print(f"      image={args.image!r} replicas=1 cpu=8 memory={memory_mb} MB "
           f"disk={storage_amount} bytes shm={64} MB priority={args.priority}")
-    print(f"      env={json.dumps(env)}")
+    print(f"      env={json.dumps(redact(env))}")
     result = create_container_group(org, project, request)
     print(f"      HTTP {result.status_code} {result.reason_phrase} "
           f"id={result.id!r} status={result.current_status!r} location={result.location!r}")
@@ -306,7 +347,7 @@ def main() -> int:
     print(f"      image={c['image']!r} gpu_classes={r['gpu_classes']} "
           f"cpu={r['cpu']} memory={r['memory']} MB storage={r['storage_amount']} B "
           f"shm={r['shm_size']}")
-    print(f"      env={c.get('environment_variables')}")
+    print(f"      env={redact(c.get('environment_variables') or {})}")
     print(f"      replicas={after.raw['replicas']} restart_policy={after.raw['restart_policy']} "
           f"priority={after.raw.get('priority')} autostart={after.raw.get('autostart_policy')} "
           f"scheduled_scaling={after.raw.get('scheduled-scaling-enabled')} "

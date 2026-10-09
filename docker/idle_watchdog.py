@@ -3,12 +3,19 @@
 
 Started as a background helper by every image CMD (the 4th `nohup … &` line,
 before `exec llama-server`). Its ONLY job: when the group has been configured
-for idle-shutdown, terminate llama-server (PID 1) after a configurable window
-of inactivity. llama-server is PID 1, so killing it exits the container, and
-with the group's restart_policy=never (set by the deployers whenever the
-feature is armed) Salad leaves the group STOPPED — free. This is the billing
-hygiene: a lost client connection can no longer leave a GPU group idling for
-hours.
+for idle-shutdown, stop the GROUP after a configurable window of inactivity.
+Kill = POST the Salad group /stop endpoint (the group stops — free), then
+SIGTERM PID 1 (the container exits; belt-and-suspenders if the API call
+failed). This is the billing hygiene: a lost client connection can no longer
+leave a GPU group idling for hours.
+
+WHY THE API CALL IS MANDATORY (paid test, 2026-10-09): container exit under
+restart_policy=never does NOT leave the group STOPPED — Salad RESCHEDULES a
+new instance and the group stays `running`, i.e. a self-restart loop that
+bills ~6 min of GPU per cycle. restart_policy governs container restarts
+WITHIN an instance, not group-level rescheduling. Only the /stop endpoint
+actually stops the group. Without SALAD_STOP_KEY configured the watchdog
+still SIGTERMs (old behavior) and logs that the group will reschedule.
 
 Modes (env IDLE_SHUTDOWN, sentinel "none" = OFF, the baked default — every
 existing group keeps today's behavior):
@@ -33,30 +40,53 @@ timeout (30 s) fires within ~timeout instead of up to timeout + 30 s late,
 while the default 600 s keeps the 30 s period.
 
 Safety rails:
-  - The timer ARMS ONLY after llama-server's /health reports ok. Model
-    download takes hours on slow workers; the watchdog never kills mid-boot.
-  - If /health never comes up within IDLE_GRACE seconds, the watchdog gives
+  - The timer ARMS ONLY after the group's readiness endpoint answers ok:
+    api_app's `http://127.0.0.1:${READY_PORT}/ready` — the EXACT endpoint the
+    Salad probe polls (probe :8889/ready -> socat -> api_app :9999/ready).
+    NOT llama-server /health: that comes up minutes before the probe (period
+    120 s) marks the group ready, and arming on it killed the group before
+    clients waiting for "ready" ever got a window (proven by the 2026-10-09
+    paid test). Model download takes hours; the watchdog never kills mid-boot.
+  - After /ready first answers ok, the watchdog HOLDS IDLE_ARM_GRACE seconds
+    (default 150 >= probe period 120 s) before starting the idle countdown:
+    the probe needs a full tick to flip the group to running/ready, and
+    clients polling for readiness must see it before the kill window opens.
+  - If /ready never comes up within IDLE_GRACE seconds, the watchdog gives
     up (exit 0, no kill) — a broken boot is the readiness probe's problem,
     not the watchdog's.
   - A failed /metrics scrape is a skipped tick, never an "idle" tick: only
     confirmed no-activity advances the kill timer.
-  - Kill = SIGTERM to PID 1. VERIFIED (container test, 2026-10-08): the kernel
-    drops EVERY signal — SIGKILL included — sent from inside a PID namespace to
-    PID 1 when PID 1 has no handler installed. A watchdog inside the container
-    can therefore never kill a handler-less PID 1. The image CMDs make PID 1
-    killable by construction: llama-server runs as a CHILD of the CMD bash,
-    which installs a SIGTERM trap (handler installed -> delivered), kills the
-    child, and exits; PID-namespace teardown then reaps everything left.
+  - Kill = group /stop POST, THEN SIGTERM to PID 1. VERIFIED (container
+    test, 2026-10-08): the kernel drops EVERY signal — SIGKILL included —
+    sent from inside a PID namespace to PID 1 when PID 1 has no handler
+    installed. A watchdog inside the container can therefore never kill a
+    handler-less PID 1. The image CMDs make PID 1 killable by construction:
+    llama-server runs as a CHILD of the CMD bash, which installs a SIGTERM
+    trap (handler installed -> delivered), kills the child, and exits; PID
+    -namespace teardown then reaps everything left.
   - IDLE_SHUTDOWN=none (default) -> exits immediately, does nothing.
+
+Group stop API (stdlib urllib POST, no body, 202 Accepted):
+  https://api.salad.com/api/public/organizations/${SALAD_ORG}/projects/
+  ${SALAD_PROJECT}/containers/${SALAD_GROUP}/stop  with header Salad-Api-Key.
+  Use a PER-GROUP scoped key (web-UI-created, scoped to this one group) —
+  never the org-wide key. The key is never logged.
 
 Env knobs (all baked defaults, group-overridable via the deployers):
   IDLE_SHUTDOWN   none (off) | idle | heartbeat
   IDLE_TIMEOUT    seconds of no chat traffic -> kill (mode idle)
   HEARTBEAT_TIMEOUT seconds of no pings      -> kill (mode heartbeat)
-  IDLE_GRACE      max seconds to wait for the first /health ok before giving up
+  IDLE_GRACE      max seconds to wait for the first /ready ok before giving up
+  IDLE_ARM_GRACE  seconds to hold after /ready ok before the countdown starts
+  READY_PORT      api_app port serving /ready (default 9999)
   PORT            llama-server port (default 8080)
   API_KEY         llama-server auth key; sent as Bearer when set (local runs
                   pass it; Salad groups run llama-server without auth)
+  SALAD_STOP_KEY  per-group scoped Salad API key for the /stop call
+                  (sentinel "none" = skip the API call, SIGTERM only)
+  SALAD_ORG / SALAD_PROJECT / SALAD_GROUP   stop-endpoint path components
+  SALAD_API_BASE  API server override (default https://api.salad.com/api/public;
+                  stub tests point it at localhost)
 
 Stdlib only (urllib), matching the repo convention (api_app.py, llama_stats.py).
 Logs go to ${API_STATE_DIR}/watchdog.log via the CMD's nohup redirect.
@@ -64,7 +94,6 @@ Logs go to ${API_STATE_DIR}/watchdog.log via the CMD's nohup redirect.
 
 from __future__ import annotations
 
-import json
 import os
 import signal
 import sys
@@ -74,14 +103,28 @@ import urllib.request
 
 POLL_S = 30.0            # default metrics scrape period (small timeouts poll faster)
 POLL_MIN_S = 5.0         # floor on the adaptive scrape period (never hammer /metrics)
-HEALTH_PROBE_S = 30.0    # /health poll period while arming
+READY_PROBE_S = 30.0     # /ready poll period while arming
 STATUS_EVERY_TICKS = 10  # log a heartbeat line every ~5 min
 SIGKILL_GRACE_S = 10     # SIGTERM grace before escalating to SIGKILL
+STOP_ATTEMPTS = 2        # group /stop POST attempts (the API is the real kill)
+STOP_RETRY_S = 5.0       # pause between stop attempts
+# Overridable for stub tests / staging; production uses the spec server.
+SALAD_API_BASE = os.environ.get("SALAD_API_BASE") or "https://api.salad.com/api/public"
 
 PORT = int(os.environ.get("PORT", "8080"))
+READY_PORT = int(os.environ.get("READY_PORT", "9999"))
 API_KEY = os.environ.get("API_KEY") or None
-HEALTH_URL = f"http://127.0.0.1:{PORT}/health"
+READY_URL = f"http://127.0.0.1:{READY_PORT}/ready"
 METRICS_URL = f"http://127.0.0.1:{PORT}/metrics"
+
+# Group /stop config (deployer-injected; sentinel "none" for the key = skip).
+STOP_KEY = os.environ.get("SALAD_STOP_KEY")
+if STOP_KEY in ("", "none"):
+    STOP_KEY = None
+STOP_PATH = ""
+if all(os.environ.get(k) for k in ("SALAD_ORG", "SALAD_PROJECT", "SALAD_GROUP")):
+    STOP_PATH = (f"/organizations/{os.environ['SALAD_ORG']}/projects/"
+                 f"{os.environ['SALAD_PROJECT']}/containers/{os.environ['SALAD_GROUP']}/stop")
 
 # Activity counters (names verified against llama.cpp b10572, see llama_stats.py).
 _PROMPT_TOKENS = "llamacpp:prompt_tokens_total"
@@ -103,13 +146,49 @@ def http_get(url: str, timeout: float) -> bytes:
         return resp.read()
 
 
-def health_ok() -> bool:
-    """/health is exempt from llama-server auth; {"status":"ok"} = serving."""
+def ready_ok() -> bool:
+    """api_app /ready is the endpoint the Salad probe polls; HTTP 200 = the
+    group is ready (llama-server up AND model loaded). urllib raises
+    HTTPError on 404/503, so any 2xx here means ready."""
     try:
-        body = json.loads(http_get(HEALTH_URL, 5).decode("utf-8", "replace"))
-        return body.get("status") == "ok"
+        http_get(READY_URL, 5)
+        return True
     except Exception:  # noqa: BLE001 - any failure = not ready yet
         return False
+
+
+def stop_group() -> bool:
+    """POST the Salad group /stop endpoint — the ONLY thing that truly stops
+    a group (self-exit gets rescheduled; see module docstring). Key never
+    logged. Best-effort: on failure the caller still SIGTERMs, and the log
+    says the group will reschedule."""
+    if not STOP_KEY or not STOP_PATH:
+        log("no stop-API config (SALAD_STOP_KEY / SALAD_ORG / SALAD_PROJECT / "
+            "SALAD_GROUP) — skipping group stop; SIGTERM only (Salad will "
+            "reschedule a new instance — the group keeps billing)")
+        return False
+    for attempt in range(1, STOP_ATTEMPTS + 1):
+        req = urllib.request.Request(SALAD_API_BASE + STOP_PATH, method="POST")
+        req.add_header("Salad-Api-Key", STOP_KEY)
+        req.add_header("User-Agent", "idle-watchdog/1.0")
+        try:
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                if 200 <= resp.status < 300:
+                    log(f"group /stop accepted (HTTP {resp.status}) — group stops, "
+                        f"no reschedule")
+                    return True
+                log(f"group /stop attempt {attempt}: HTTP {resp.status} "
+                    f"{resp.reason}")
+        except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError,
+                ConnectionError, OSError) as e:
+            log(f"group /stop attempt {attempt} failed "
+                f"({e.__class__.__name__}: {e})")
+        if attempt < STOP_ATTEMPTS:
+            time.sleep(STOP_RETRY_S)
+    log("group /stop FAILED after all attempts — SIGTERM self-exit only; "
+        "Salad will reschedule a new instance (group keeps billing until "
+        "stopped externally)")
+    return False
 
 
 def activity() -> "float | None":
@@ -216,22 +295,28 @@ def main() -> int:
 
     timeout = seconds("HEARTBEAT_TIMEOUT", 600) if mode == "heartbeat" else seconds("IDLE_TIMEOUT", 600)
     grace = seconds("IDLE_GRACE", 1800)
+    arm_grace = seconds("IDLE_ARM_GRACE", 150)
     # Adaptive scrape period: at least 3 scrapes per timeout window, so a
     # small timeout (e.g. 30 s in testing) fires within ~timeout, not up to
     # timeout + 30 s late. The default 600 s keeps the 30 s period
     # (min() caps at POLL_S); a 5 s floor keeps /metrics unharmed.
     poll_s = min(POLL_S, max(timeout / 3.0, POLL_MIN_S))
-    log(f"mode={mode} timeout={timeout}s grace={grace}s poll={poll_s:.0f}s "
-        f"— arming: waiting for {HEALTH_URL} ok")
+    log(f"mode={mode} timeout={timeout}s grace={grace}s arm_grace={arm_grace}s "
+        f"poll={poll_s:.0f}s stop_api={'configured' if (STOP_KEY and STOP_PATH) else 'OFF'} "
+        f"— arming: waiting for {READY_URL} ok")
 
-    # Arm only once llama-server is serving; never kill mid-download/boot.
+    # Arm only once the GROUP is ready (the probe's own endpoint); never kill
+    # mid-download/boot, and never before clients can see "ready".
     arm_deadline = time.monotonic() + grace
-    while not health_ok():
+    while not ready_ok():
         if time.monotonic() >= arm_deadline:
-            log(f"/health never came up within IDLE_GRACE={grace}s — giving up (no kill)")
+            log(f"/ready never came up within IDLE_GRACE={grace}s — giving up (no kill)")
             return 0
-        time.sleep(HEALTH_PROBE_S)
-    log("llama-server healthy — idle timer armed")
+        time.sleep(READY_PROBE_S)
+    log(f"group ready — holding IDLE_ARM_GRACE={arm_grace}s so the probe flips "
+        f"the group running and clients get a window before the countdown")
+    time.sleep(arm_grace)
+    log("idle timer armed")
 
     last = activity()
     if last is None:
@@ -252,8 +337,9 @@ def main() -> int:
             last_activity = time.monotonic()
         idle_s = time.monotonic() - last_activity
         if idle_s >= timeout:
-            log(f"idle {idle_s:.0f}s >= {timeout}s (mode {mode}) — "
-                f"terminating llama-server (PID 1); container exits, group stops")
+            log(f"idle {idle_s:.0f}s >= {timeout}s (mode {mode}) — stopping the "
+                f"group, then terminating llama-server (PID 1)")
+            stop_group()
             return terminate_pid1()
         if ticks % STATUS_EVERY_TICKS == 0:
             log(f"alive: idle {idle_s:.0f}s / {timeout}s, activity score {last:.0f}")

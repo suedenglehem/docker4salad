@@ -126,10 +126,14 @@ echo "sentinel guards (!= \"none\"): $GUARDS (informational)"
 if printf '%s' "$MARKERS" | grep -q 'idle_watchdog'; then
   echo "  -> WATCHDOG generation: + idle/heartbeat self-shutdown"
   echo "     (idle_watchdog.py started by the CMD; IDLE_SHUTDOWN=none|idle|"
-  echo "     heartbeat, kill llama-server after the timeout -> container exits"
-  echo "     -> group stops when restart_policy=never). Watchdog log:"
+  echo "     heartbeat; arms on the group /ready endpoint, kills by POSTing the"
+  echo "     Salad group /stop endpoint (SALAD_STOP_KEY) THEN SIGTERM —"
+  echo "     self-exit alone gets RESCHEDULED, not stopped). Watchdog log:"
   echo "     \${API_STATE_DIR}/watchdog.log; live check:"
   echo "     ps -eo pid,args | grep idle_watchdog"
+  if grep -q 'SALAD_STOP_KEY' /usr/local/bin/idle_watchdog.py 2>/dev/null; then
+    echo "     -> watchdog v2: arms on /ready + group /stop POST (SALAD_STOP_KEY)"
+  fi
 elif printf '%s' "$MARKERS" | grep -q 'DRAFT_MODEL_URL'; then
   echo "  -> V3 (wget2) image: draft/vision downloaded at runtime via"
   echo "     DRAFT_MODEL_URL / VISION_MODEL_URL"

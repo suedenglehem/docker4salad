@@ -122,19 +122,21 @@ MODEL_ALIAS = "qwen38-27b"
 # Digest-pinned: the API accepts the @sha256 ref verbatim, and it is the
 # airtight lever against the worker image cache (keyed by repo NAME — a tag
 # re-push can serve stale layers on workers that cached the old one). This
-# is the cuda128-v7 push (2026-10-09, build id 'lmss q6-mtp-vision-v7 (baked
-# draft+vision, claude-template, idle_watchdog + trapped-child supervisor,
-# exec-form entry.sh CMD) 2026-10-09' — the exec-form entry.sh CMD fix (the
-# v6 inline JSON CMD was malformed -> buildkit shell-form fallback -> dash
-# exit 2 crash-loop) on top of the idle/heartbeat watchdog; based on
-# boris271142/lmss:cuda128-v5); the tag form, for humans:
-#   boris271142/lmss_jonathancoletti_qwen38_q6_mtp_vision:cuda128-v7
+# is the cuda128-v8 push (2026-10-09, build id 'lmss q6-mtp-vision-v8 (baked
+# draft+vision, claude-template, idle_watchdog v2 [arm on /ready + group /stop
+# POST] + trapped-child supervisor, exec-form entry.sh CMD) 2026-10-09' —
+# watchdog v2 (arms on the group /ready endpoint, IDLE_ARM_GRACE hold, then
+# POSTs the Salad group /stop with SALAD_STOP_KEY before SIGTERM — the only
+# kill that truly stops billing) on top of the exec-form entry.sh CMD fix;
+# based on boris271142/lmss:cuda128-v6); the tag form, for humans:
+#   boris271142/lmss_jonathancoletti_qwen38_q6_mtp_vision:cuda128-v8
 # Previous manifest-list digests, for reference:
+#   cuda128-v7: sha256:b7ea489397ab314313133a6b1f93ea159162df4338fd42083f6ff07b91a3d20e
 #   cuda128-v6: sha256:97aa3d72bf8e367f74c7e7e6f9e565b662ff06bccb648e7f61d65c47d5686600
 #   cuda128-v5: sha256:4089a457281519033764868d5422786b7c48e0d2e81f7847354ceb5acd953839
 #   cuda128-v4: sha256:789ff2b34000409d13d76c2f51d607502f65d96c739fa3adfc5d04ae6f353a4a
 IMAGE = ("boris271142/lmss_jonathancoletti_qwen38_q6_mtp_vision"
-         "@sha256:b7ea489397ab314313133a6b1f93ea159162df4338fd42083f6ff07b91a3d20e")
+         "@sha256:7d635166ffb9cb0c87200b0b1b17faae73b96ce288cb0e579c01cd7eb12ebd35")
 
 MODEL_REPO = "JonathanColetti/Qwen3.8-27B-Uncensored-GGUF"
 # Default = live production quant (2026-10-03): Q5_K_M, MTP head embedded in
@@ -218,11 +220,13 @@ def parse_args() -> argparse.Namespace:
                              "heartbeat (self-stop after --heartbeat-timeout s with no client "
                              "keepalive pings — run cl_salad/chat_salad.sh with "
                              "SALAD_HEARTBEAT=1). Needs a watchdog-capable image "
-                             "(version.sh prints the WATCHDOG generation). Armed mode needs "
-                             "restart_policy=never so the self-exit STAYS stopped — that is "
-                             "CREATE-ONLY (not in the PATCH schema): an existing group with "
-                             "restart_policy=always must be deleted + recreated with a fresh "
-                             "name (names tombstone 10+ min; keep the MODEL_ALIAS stable)")
+                             "(version.sh prints the WATCHDOG generation). The watchdog arms "
+                             "on the group's /ready endpoint and kills by POSTing the group "
+                             "/stop endpoint — pass --stop-key (account-wide key): "
+                             "self-exit alone does NOT stop a group (Salad reschedules a new "
+                             "instance — paid test 2026-10-09), so arming without --stop-key "
+                             "bills. The create path also sets restart_policy=never when "
+                             "armed (create-only field) to stop crash-loop billing")
     parser.add_argument("--idle-timeout", default="600",
                         help="env IDLE_TIMEOUT — seconds of flat token counters on /metrics "
                              "(mode idle) before the watchdog SIGTERMs llama-server and the "
@@ -232,6 +236,13 @@ def parse_args() -> argparse.Namespace:
                              "(mode heartbeat) before the watchdog kills the container. The "
                              "client pinger fires every ~30 s, so keep this at ~2x the pinger "
                              "period or more (60 s minimum) or pinger jitter can false-kill")
+    parser.add_argument("--stop-key", default=None, metavar="FILE",
+                        help="file holding a PER-GROUP scoped Salad API key for the watchdog's "
+                             "group /stop call (create it in the Salad web UI, scoped to THIS "
+                             "group only — never the org-wide key). Injected as env "
+                             "SALAD_STOP_KEY with SALAD_ORG/SALAD_PROJECT/SALAD_GROUP; the key "
+                             "is never printed. Without it the watchdog SIGTERMs only and the "
+                             "group RESCHEDULES — do not arm --idle-shutdown without it")
     parser.add_argument("--priority", choices=PRIORITY_CHOICES, default=PRIORITY,
                         help="placement priority (create-only): high > medium > low > batch. "
                              "Default medium — low/batch instances are placed best-effort and "
@@ -286,7 +297,9 @@ def load_hf_token(path: str = HF_TOKEN_FILE) -> str | None:
 def build_env(name: str, ctx_size: str, use_draft_model: str, hf_token: str | None,
               model_file: str | None = None, claude_template: str = "1",
               idle_shutdown: str = "none", idle_timeout: str = "600",
-              heartbeat_timeout: str = "600") -> dict[str, str]:
+              heartbeat_timeout: str = "600",
+              stop_key: str = "none",
+              org: str = "", project: str = "", group: str = "") -> dict[str, str]:
     """Full env for the group (create sets it, PATCH replaces it wholesale).
 
     The baked image drops v3's DRAFT_MODEL_URL / VISION_MODEL_URL: the draft +
@@ -332,6 +345,16 @@ def build_env(name: str, ctx_size: str, use_draft_model: str, hf_token: str | No
         "IDLE_SHUTDOWN": idle_shutdown,
         "IDLE_TIMEOUT": idle_timeout,
         "HEARTBEAT_TIMEOUT": heartbeat_timeout,
+        # Group /stop kill (watchdog v2): the ONLY action that truly stops a
+        # group is the Salad group /stop endpoint — self-exit gets RESCHEDULED
+        # (paid test 2026-10-09). SALAD_STOP_KEY = account-wide key from
+        # --stop-key ('none' = watchdog SIGTERMs only, group reschedules —
+        # do not arm armed mode without a key). Path components ride along;
+        # never empty (the API rejects empty env values).
+        "SALAD_STOP_KEY": stop_key,
+        "SALAD_ORG": org,
+        "SALAD_PROJECT": project,
+        "SALAD_GROUP": group,
     }
     if hf_token:
         env["HF_TOKEN"] = hf_token
@@ -339,8 +362,9 @@ def build_env(name: str, ctx_size: str, use_draft_model: str, hf_token: str | No
 
 
 def redact(env: dict[str, str]) -> dict[str, str]:
-    """Mask secrets for printing (HF_TOKEN is the only secret in the env)."""
-    return {k: "<REDACTED>" if k == "HF_TOKEN" else v for k, v in env.items()}
+    """Mask secrets for printing (HF_TOKEN and SALAD_STOP_KEY are secrets)."""
+    return {k: "<REDACTED>" if k in ("HF_TOKEN", "SALAD_STOP_KEY") else v
+            for k, v in env.items()}
 
 
 def get_group(org: str, project: str, group: str):
@@ -412,11 +436,24 @@ def main() -> int:
     print("[2/5] loading HF token (validated, never printed)")
     hf_token = load_hf_token()
     print(f"      token {'validated' if hf_token else 'UNAVAILABLE — model download will run unauthenticated'}")
+    stop_key = "none"
+    if args.stop_key:
+        try:
+            with open(args.stop_key) as f:
+                stop_key = f.read().strip()
+        except OSError as e:
+            print(f"      cannot read --stop-key file {args.stop_key!r}: {e}")
+            return 2
+        if not stop_key:
+            print(f"      --stop-key file {args.stop_key!r} is empty")
+            return 2
+        print("      stop key loaded (account-wide key, never printed)")
     env = build_env(group, args.ctx_size, args.use_draft_model, hf_token, args.model_file,
                     claude_template="none" if args.no_claude_template else "1",
                     idle_shutdown=args.idle_shutdown,
                     idle_timeout=args.idle_timeout,
-                    heartbeat_timeout=args.heartbeat_timeout)
+                    heartbeat_timeout=args.heartbeat_timeout,
+                    stop_key=stop_key, org=org, project=project, group=group)
 
     existing = get_group(org, project, group)
     if existing is not None:
@@ -435,15 +472,19 @@ def main() -> int:
         if args.no_start and existing.current_status in ("running", "scaling"):
             print("      NOTE: --no-start while running — the PATCH takes effect on the next start")
         live_policy = existing.raw.get("restart_policy")
-        if args.idle_shutdown != "none" and live_policy == "always":
+        if args.idle_shutdown != "none" and stop_key == "none":
             print(f"      WARNING: --idle-shutdown {args.idle_shutdown!r} arms the in-container "
-                  "watchdog, but this group's restart_policy is 'always' — after the watchdog's "
-                  "self-exit Salad RESTARTS the container and billing continues. restart_policy "
-                  "is CREATE-ONLY (not in the PATCH schema, so this update cannot flip it): to "
-                  "arm, delete the group and recreate it with the same flags — fresh --group "
-                  "name (the deleted name tombstones 10+ min), keep the MODEL_ALIAS stable for "
-                  "clients. The env knobs are applied; the watchdog stays harmless (it kills, "
-                  "the container restarts) — do NOT leave it armed on an 'always' group.")
+                  "watchdog WITHOUT --stop-key — the watchdog can then only SIGTERM, and "
+                  "self-exit does NOT stop a group: Salad reschedules a new instance "
+                  "(restart_policy='never') or restarts the container (restart_policy='always', "
+                  f"live here: {live_policy!r}) — billing continues. Pass --stop-key <per-group "
+                  "key file> so the watchdog POSTs the group /stop endpoint (the only real "
+                  "stop). Do NOT leave a group armed without it.")
+        elif args.idle_shutdown != "none" and live_policy == "always":
+            print("      NOTE: armed with --stop-key — the watchdog's group /stop call stops "
+                  f"the group at GROUP level, so the live restart_policy={live_policy!r} is "
+                  "fine (the stop endpoint wins over container-restart policy; no "
+                  "delete+recreate needed).")
         result = update_container_group(
             org, project, group,
             UpdateContainerGroupRequest(
@@ -471,9 +512,10 @@ def main() -> int:
             display_name=group,
             autostart_policy=False,
             replicas=1,
-            # 'never' when the watchdog is armed: its SIGTERM of PID 1 exits
-            # the container and Salad leaves the group STOPPED (free). With
-            # 'always' the self-exit would just restart the container.
+            # 'never' when the watchdog is armed: the watchdog's real kill is
+            # the group /stop POST (--stop-key), and 'never' additionally
+            # stops crash-loop billing on any self-exit — self-exit alone
+            # gets RESCHEDULED, not stopped (paid test 2026-10-09).
             restart_policy="never" if args.idle_shutdown != "none" else "always",
             container_image=args.image,
             command=(),
@@ -526,7 +568,7 @@ def main() -> int:
     print_group(get_group(org, project, group))
     print("OK: group running. 'running' means the container process is up —")
     print(f"      1. verify the LIVE build in-container: version.sh should print")
-    print(f"         'lmss q6-mtp-vision-v5 (baked draft+vision, claude-template) 2026-10-05';")
+    print(f"         'lmss q6-mtp-vision-v8 (baked draft+vision, claude-template, idle_watchdog v2 [arm on /ready + group /stop POST] + trapped-child supervisor, exec-form entry.sh CMD) 2026-10-09';")
     print(f"         /models holds the baked draft + mmproj while the main model hf-downloads")
     print(f"      2. PID1 cmdline: --spec-type draft-mtp --spec-draft-n-max 5 --mmproj "
           f"{'(no --model-draft, USE_DRAFT_MODEL=none)' if args.use_draft_model == 'none' else '--model-draft ...draft-Q8_0.gguf'} "
