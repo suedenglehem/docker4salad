@@ -134,20 +134,26 @@ MODEL_ALIAS = "atx-swift-27b-opt"
 # airtight lever against the worker image cache (keyed by repo NAME — a tag
 # re-push can serve stale layers on workers that cached the old one, so every
 # delivery here is a NEW digest no worker has seen, pinned verbatim).
-# This is the cuda130-v5 push (2026-10-09, build id 'lmss_generic_ampere-v5
+# This is the cuda130-v6 push (2026-10-09, build id 'lmss_generic_ampere-v6
 # (llamAmpere v0.4 fork, cuda 13.0.2, turbo5/turbo4 KV, idle_watchdog v2.1
-# [b64 key decode + key=none disables watchdog] + trapped-child supervisor,
-# exec-form entry.sh CMD) 2026-10-09' — watchdog v2.1: arms on the group
+# [b64 key decode + key=none disables watchdog] + bw_reporter + iputils-ping +
+# llama-stats, trapped-child supervisor, exec-form entry.sh CMD) 2026-10-09' —
+# bw_reporter.py samples MODEL_DIR growth every 10 s into
+# ${API_STATE_DIR}/bw.log (self-exits on llama-server /health) so
+# `manage_groups.py start --min-bw-mbps N` can read it over SSH and reallocate
+# a slow node; iputils-ping needs CAP_NET_RAW (Salad workers may deny it);
+# `llama-stats` = stats.sh symlink, local-only; on top of watchdog v2.1: arms on the group
 # /ready endpoint, kills by POSTing the Salad group /stop (SALAD_STOP_KEY from
 # --stop-key, stored b64-obfuscated, decoded at startup) then SIGTERM; a bare
 # self-exit gets RESCHEDULED, not stopped (paid test 2026-10-09); key
 # 'none'/missing/undecodable DISABLES the watchdog. On top of cuda130-v3's
 # exec-form entry.sh CMD fix (the v2 inline JSON CMD was malformed ->
 # buildkit shell-form fallback -> dash exit 2 crash-loop)); the
-# tag form, for humans: boris271142/lmss_generic_ampere:cuda130-v5
+# tag form, for humans: boris271142/lmss_generic_ampere:cuda130-v6
+#   cuda130-v5: sha256:58db9d239fa9f3d5abdb7a448dcd92d0774e3d19770be4edf0783635cf774eae
 #   cuda130-v4: sha256:2df98d5b2f961c7e4ae497b84ec1111c56fba26558cc4c25dc677c5d08b74e5d
 IMAGE = "boris271142/lmss_generic_ampere" \
-        "@sha256:58db9d239fa9f3d5abdb7a448dcd92d0774e3d19770be4edf0783635cf774eae"
+        "@sha256:ceb9059fdd84dd4d01d31ad9121a493dbaf601ecbebd017ffd5f0446c6a50b2a"
 
 MODEL_REPO = "bjivanovich/ATX-Swift-1.5-Qwen3.8-27B-Uncensored-MTP-GGUF"
 # Q5_K_M — MTP head embedded in the gguf (the 'MTP' in the repo name), so no

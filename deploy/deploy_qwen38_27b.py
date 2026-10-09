@@ -123,25 +123,31 @@ MODEL_ALIAS = "qwen38-27b"
 # Digest-pinned: the API accepts the @sha256 ref verbatim, and it is the
 # airtight lever against the worker image cache (keyed by repo NAME — a tag
 # re-push can serve stale layers on workers that cached the old one). This
-# is the cuda128-v9 push (2026-10-09, build id 'lmss q6-mtp-vision-v9 (baked
+# is the cuda128-v10 push (2026-10-09, build id 'lmss q6-mtp-vision-v10 (baked
 # draft+vision, claude-template, idle_watchdog v2.1 [b64 key decode + key=none
-# disables watchdog] + trapped-child supervisor, exec-form entry.sh CMD)
-# 2026-10-09' — watchdog v2.1 (arms on the group /ready endpoint,
+# disables watchdog] + bw_reporter + iputils-ping + llama-stats, trapped-child
+# supervisor, exec-form entry.sh CMD) 2026-10-09' — bw_reporter.py samples
+# MODEL_DIR growth every 10 s into ${API_STATE_DIR}/bw.log (self-exits on
+# llama-server /health) so `manage_groups.py start --min-bw-mbps N` can read it
+# over SSH and reallocate a slow node; iputils-ping needs CAP_NET_RAW (Salad
+# workers may deny it); `llama-stats` = stats.sh symlink, local-only; on top of
+# watchdog v2.1 (arms on the group /ready endpoint,
 # IDLE_ARM_GRACE hold, then POSTs the Salad group /stop with SALAD_STOP_KEY
 # (b64-obfuscated storage, decoded at startup) before SIGTERM — the only kill
 # that truly stops billing; key 'none'/missing/undecodable DISABLES the
 # watchdog) on top of the exec-form entry.sh CMD fix; based on
-# boris271142/lmss:cuda128-v7); the tag form, for humans:
-#   boris271142/lmss_jonathancoletti_qwen38_q6_mtp_vision:cuda128-v9
+# boris271142/lmss:cuda128-v8@sha256:0386058c…); the tag form, for humans:
+#   boris271142/lmss_jonathancoletti_qwen38_q6_mtp_vision:cuda128-v10
 # Older tags were deleted from the registry (2026-10-09, user request — only
 # the current tag per repo is kept); digests kept for history only:
+#   cuda128-v9: sha256:755c43df1e2285bb0ab5bcc25d0471359a9f78ac9349cabbc6ba2ee5e878221f
 #   cuda128-v8: sha256:7d635166ffb9cb0c87200b0b1b17faae73b96ce288cb0e579c01cd7eb12ebd35
 #   cuda128-v7: sha256:b7ea489397ab314313133a6b1f93ea159162df4338fd42083f6ff07b91a3d20e
 #   cuda128-v6: sha256:97aa3d72bf8e367f74c7e7e6f9e565b662ff06bccb648e7f61d65c47d5686600
 #   cuda128-v5: sha256:4089a457281519033764868d5422786b7c48e0d2e81f7847354ceb5acd953839
 #   cuda128-v4: sha256:789ff2b34000409d13d76c2f51d607502f65d96c739fa3adfc5d04ae6f353a4a
 IMAGE = ("boris271142/lmss_jonathancoletti_qwen38_q6_mtp_vision"
-         "@sha256:755c43df1e2285bb0ab5bcc25d0471359a9f78ac9349cabbc6ba2ee5e878221f")
+         "@sha256:576560097be5a19e14d5d9042c53202dad062f17c6576824773b55b13c6a045d")
 
 MODEL_REPO = "JonathanColetti/Qwen3.8-27B-Uncensored-GGUF"
 # Default = live production quant (2026-10-03): Q5_K_M, MTP head embedded in

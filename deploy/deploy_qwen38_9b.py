@@ -82,7 +82,13 @@ GROUP_NAME = "qwen38-9b"
 # image ref to a digest no worker has seen (this group was PATCHed to
 # lmss@sha256:... for exactly that reason); with a plain tag, verify the
 # live build with version.sh in the container.
-# cuda128-v7 (2026-10-09): watchdog v2.1 — arms on the group /ready endpoint
+# cuda128-v8 (2026-10-09): bandwidth reporter + tools — bw_reporter.py samples
+# MODEL_DIR growth every 10 s into ${API_STATE_DIR}/bw.log (self-exits when
+# llama-server /health goes ok) so `manage_groups.py start --min-bw-mbps N`
+# can read it over SSH and reallocate a slow node; plus iputils-ping (needs
+# CAP_NET_RAW — Salad workers may deny it), scp (openssh-client, already
+# shipped) and the `llama-stats` command (symlink to stats.sh, local-only).
+# On top of cuda128-v7's watchdog v2.1 — arms on the group /ready endpoint
 # (the probe's own, api_app :9999), holds IDLE_ARM_GRACE, then kills by
 # POSTing the Salad group /stop (SALAD_STOP_KEY = account-wide key from
 # --stop-key, stored b64-obfuscated and decoded at startup) and SIGTERM. A
@@ -94,10 +100,11 @@ GROUP_NAME = "qwen38-9b"
 # was malformed (stray quote) so buildkit's parseMaybeJSON silently fell back
 # to shell form and dash exited 2 (crash-loop ~1-2s after "Running"); v5 runs
 # `bash -l /opt/llama.cpp/entry.sh` with llama-server as a trapped child).
-# IDLE_SHUTDOWN=none baked = off by default. Tag form: boris271142/lmss:cuda128-v7
+# IDLE_SHUTDOWN=none baked = off by default. Tag form: boris271142/lmss:cuda128-v8
+#   cuda128-v7: sha256:3db2ab311ed5c43b83f2c612966009524957f5fd3941dfdbaef0b263b3baa35d
 #   cuda128-v6: sha256:c1a671ab6e75e11af85203a4ffea9863a0cf7e7059af9f2c37319392ea69dc11
 IMAGE = "boris271142/lmss" \
-        "@sha256:3db2ab311ed5c43b83f2c612966009524957f5fd3941dfdbaef0b263b3baa35d"
+        "@sha256:0386058c64d603430960c0b3d5ab03c2ad740f752d12ebd32b11dfc4ea31ebca"
 
 # The 7 card classes the old 'qwen9b' group ran on, by normalized base name
 # (parenthesized VRAM suffix stripped, lowercased, spaces removed).

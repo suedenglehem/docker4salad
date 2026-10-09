@@ -82,7 +82,10 @@ ORGANIZATION_NAME = "ma-casa-in-paris"
 PROJECT_NAME = "qwen38-27b"
 GROUP_NAME = "qwen9b"
 # Digest-pinned (the airtight lever against the worker image cache, keyed by
-# REPO NAME — see deploy_qwen38_9b.py's note). cuda128-v7 (2026-10-09):
+# REPO NAME — see deploy_qwen38_9b.py's note). cuda128-v8 (2026-10-09):
+# bw_reporter.py (MODEL_DIR growth -> ${API_STATE_DIR}/bw.log every 10 s, feeds
+# `manage_groups.py start --min-bw-mbps`) + iputils-ping (CAP_NET_RAW) + scp +
+# the `llama-stats` command; on top of cuda128-v7's
 # watchdog v2.1 (arms on the group /ready endpoint, kills by POSTing the Salad
 # group /stop with SALAD_STOP_KEY from --stop-key — stored b64-obfuscated,
 # decoded at startup — then SIGTERM; a bare self-exit gets RESCHEDULED, not
@@ -90,10 +93,11 @@ GROUP_NAME = "qwen9b"
 # watchdog) on top of cuda128-v5's exec-form entry.sh CMD fix (v4's inline
 # JSON CMD was malformed -> buildkit shell-form fallback -> dash exit 2
 # crash-loop). IDLE_SHUTDOWN=
-# none baked = off by default. Tag form for humans: boris271142/lmss:cuda128-v7
+# none baked = off by default. Tag form for humans: boris271142/lmss:cuda128-v8
+#   cuda128-v7: sha256:3db2ab311ed5c43b83f2c612966009524957f5fd3941dfdbaef0b263b3baa35d
 #   cuda128-v6: sha256:c1a671ab6e75e11af85203a4ffea9863a0cf7e7059af9f2c37319392ea69dc11
 IMAGE = "boris271142/lmss" \
-        "@sha256:3db2ab311ed5c43b83f2c612966009524957f5fd3941dfdbaef0b263b3baa35d"
+        "@sha256:0386058c64d603430960c0b3d5ab03c2ad740f752d12ebd32b11dfc4ea31ebca"
 GPU_CLASS_BASE = "rtx3090"  # must match 'RTX 3090 (24 GB)', not a Laptop/variant class
 
 # Mirrored from the live 'qwen38-27b-rtx5090' group (GET, 2026-09-30) — response-only

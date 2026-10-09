@@ -123,20 +123,25 @@ MODEL_ALIAS = "atx-swift-27b"
 # Digest-pinned: the API accepts the @sha256 ref verbatim, and it is the
 # airtight lever against the worker image cache (keyed by repo NAME — a tag
 # re-push can serve stale layers on workers that cached the old one). This
-# is the cuda128-v7 push (2026-10-09, build id 'lmss generic-v7 (hf runtime
+# is the cuda128-v8 push (2026-10-09, build id 'lmss generic-v8 (hf runtime
 # download, claude-template, extra-args, idle_watchdog v2.1 [b64 key decode +
-# key=none disables watchdog] + trapped-child supervisor, exec-form entry.sh
-# CMD) 2026-10-09' — watchdog v2.1 (arms on the group /ready endpoint, kills
-# by POSTing the Salad group /stop with SALAD_STOP_KEY from --stop-key,
-# stored b64-obfuscated and decoded at startup, then SIGTERM — a bare
-# self-exit gets RESCHEDULED, not stopped, paid test 2026-10-09; key
-# 'none'/missing/undecodable DISABLES the watchdog) on top of the exec-form
-# entry.sh CMD fix; based on boris271142/lmss:cuda128-v7); the tag form, for
-# humans:
-#   boris271142/lmss_generic:cuda128-v7
+# key=none disables watchdog] + bw_reporter + iputils-ping + llama-stats,
+# trapped-child supervisor, exec-form entry.sh CMD) 2026-10-09' — bw_reporter.py
+# samples MODEL_DIR growth every 10 s into ${API_STATE_DIR}/bw.log (self-exits
+# on llama-server /health) so `manage_groups.py start --min-bw-mbps N` can read
+# it over SSH and reallocate a slow node; iputils-ping needs CAP_NET_RAW (Salad
+# workers may deny it); `llama-stats` = stats.sh symlink, local-only; on top of
+# watchdog v2.1 (arms on the group /ready endpoint, kills by POSTing the Salad
+# group /stop with SALAD_STOP_KEY from --stop-key, stored b64-obfuscated and
+# decoded at startup, then SIGTERM — a bare self-exit gets RESCHEDULED, not
+# stopped, paid test 2026-10-09; key 'none'/missing/undecodable DISABLES the
+# watchdog) on top of the exec-form entry.sh CMD fix; based on
+# boris271142/lmss:cuda128-v8@sha256:0386058c…); the tag form, for humans:
+#   boris271142/lmss_generic:cuda128-v8
+#   cuda128-v7: sha256:43206e0a231ff60c7228ff7ca2894f6e80e995c6f5994f98d37067018e4fe576
 #   cuda128-v6: sha256:d7a0a327cd70bd6b7617feb6ebb09ae11b1403681635bcac07b369ee281fc0e5
 IMAGE = "boris271142/lmss_generic" \
-        "@sha256:43206e0a231ff60c7228ff7ca2894f6e80e995c6f5994f98d37067018e4fe576"
+        "@sha256:9fe70c073e1c11828cb7b611acb3b6685ea17b51797168cae1cd6ef1d869eac1"
 
 MODEL_REPO = "bjivanovich/ATX-Swift-1.5-Qwen3.8-27B-Uncensored-MTP-GGUF"
 # Q5_K_M — MTP head embedded in the gguf (the 'MTP' in the repo name), so no
