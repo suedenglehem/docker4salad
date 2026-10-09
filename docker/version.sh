@@ -149,6 +149,15 @@ if printf '%s' "$MARKERS" | grep -q 'idle_watchdog'; then
     echo "        ps -eo pid,args | grep bw_reporter"
     echo "     -> + llama-stats (symlink to stats.sh, local-only stats) and"
     echo "        iputils-ping (ping needs CAP_NET_RAW; scp ships with openssh-client)"
+    if grep -q '/\.ssh' /usr/local/bin/idle_watchdog.py 2>/dev/null; then
+      echo "     -> SSH-GUARD generation: the idle watchdog holds off its self-stop"
+      echo "        while /.ssh exists, and the manage_groups.py bandwidth arbitrator"
+      echo "        spends no /reallocate shot while it exists (probe: ls /.ssh)."
+      echo "        Contract: touch /.ssh after logging in over SSH, rm /.ssh on the"
+      echo "        way out. Knob: SSH_GUARD=1 (default) | 0; file path:"
+      echo "        SSH_GUARD_FILE (default /.ssh). Live check: ls /.ssh;"
+      echo "        watchdog.log shows 'ssh guard ... stop held off'"
+    fi
   fi
 elif printf '%s' "$MARKERS" | grep -q 'DRAFT_MODEL_URL'; then
   echo "  -> V3 (wget2) image: draft/vision downloaded at runtime via"

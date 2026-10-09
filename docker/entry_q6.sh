@@ -1,7 +1,7 @@
 #!/bin/bash
 # Entrypoint for the lmss_qwen38_q6_mtp_vision image (baked Qwen3.8-27B-Uncensored
 # draft + vision, q8_0 KV cache). Starts the helper daemons (api_app, two socat
-# port forwarders, the idle/heartbeat watchdog, and the HF-download bandwidth
+# port forwarders, the idle/heartbeat watchdog, the HF-download bandwidth
 # reporter) in the background, downloads the main model on first start, then
 # runs llama-server as a TRAPPED CHILD of this
 # PID-1 bash (not exec'd) so the watchdog's SIGTERM lands. With the group's

@@ -108,7 +108,9 @@ _LLM_STATS = os.path.normpath(
 # BW_LOG_PATH; the arbitrator reads the tail over SSH (Salad SSH is a
 # shell-less OCI exec — exactly ONE plain command per call), takes the
 # median rate over BW_VERDICT_WINDOW, and POSTs the instance /reallocate
-# endpoint when it is below the cap. The group is never stopped.
+# endpoint when it is below the cap. The group is never stopped. While /.ssh
+# exists (the user touched it after logging in over SSH) every shot is held
+# off — the arbitrator never reallocates the instance out from under a session.
 BW_POLL_INTERVAL = 15.0    # manager read period (reporter samples every 10 s)
 BW_RAMP_GRACE = 60.0       # skip the first minute (baseline + ramp) before measuring
 BW_VERDICT_WINDOW = 120.0  # median over rates inside the last 2 min decides
@@ -121,6 +123,7 @@ BW_PULL_TIMEOUT = 900.0    # max time in image-pull state; a stuck pull counts a
 BW_LOG_FROZEN = 180.0      # no new bw.log lines while not ready => reporter dead
 BW_TAIL_LINES = 80         # ~13 min of 10 s samples per probe
 BW_LOG_PATH = "/tmp/llama-api/bw.log"
+BW_SSH_GUARD_FILE = "/.ssh"  # SSH-presence guard the user touches when logged in
 BW_SSH_OPTS = (
     "-o", "StrictHostKeyChecking=no",
     "-o", "UserKnownHostsFile=/dev/null",
@@ -565,6 +568,34 @@ def _bw_read(inst: sc.ContainerGroupInstanceInfo) -> "tuple[list[tuple[int, int]
     return None, f"conn (no samples, exit {p.returncode}: {p.stderr.strip()[:120]})"
 
 
+def _bw_ssh_guard(inst: sc.ContainerGroupInstanceInfo) -> "tuple[bool, str]":
+    """SSH-presence gate for reallocate shots — the simple contract (user's
+    design, 2026-10-09): the user touches /.ssh after logging into the
+    container over SSH (the same file the idle watchdog honors), and removes
+    it on the way out. While it exists, a /reallocate would yank the instance
+    — and their session — out from under them, so NO shot is spent. Probe =
+    `ls /.ssh` (one plain command; the relay exits 1 on success — the PAYLOAD
+    decides, see _bw_read): stdout naming the file => guard present; ls's
+    "cannot access" => absent; anything else => probe strike. Absent and
+    strike both return False (spend the shot) — holding on every probe
+    failure would silently disable the arbitrator."""
+    cmd = [
+        "ssh", *BW_SSH_OPTS, "-p", str(inst.ssh_port), f"root@{inst.ssh_ip}",
+        "ls", BW_SSH_GUARD_FILE,
+    ]
+    try:
+        p = subprocess.run(cmd, capture_output=True, text=True, timeout=BW_SSH_TIMEOUT)
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as e:
+        return False, f"probe failed ({e.__class__.__name__})"
+    if p.returncode == 255:
+        return False, f"ssh transport failed ({p.stderr.strip()[:120]})"
+    if BW_SSH_GUARD_FILE in p.stdout:
+        return True, f"{BW_SSH_GUARD_FILE} present"
+    if "cannot access" in p.stderr:
+        return False, f"no {BW_SSH_GUARD_FILE}"
+    return False, f"probe inconclusive (exit {p.returncode}: {p.stderr.strip()[:120]})"
+
+
 def _bw_rates(pairs: "list[tuple[int, int]]") -> "list[tuple[int, float]]":
     """Per-interval download rates as (end_epoch, Mbps). Negative deltas (xet
     restarts a partial) floor at 0 — the median absorbs the dip."""
@@ -725,8 +756,12 @@ def _arbitrate(
     """Bandwidth arbitrator: after a start, keep the HF download on a host
     whose median download rate clears cap_mbps, reallocating (max
     BW_MAX_SHOTS times) until it does. The 4th host is kept unconditionally.
-    Exit codes: 0 accepted/complete/kept-4th; 1 group bail; 3 arbitrator
-    bail. Ctrl-C leaves the group running as-is (main's handler)."""
+    BW_MAX_SHOTS times) until it does. The 4th host is kept unconditionally.
+    SSH-presence gate: before spending a shot, _bw_ssh_guard probes /.ssh —
+    the user touches it after logging in over SSH, and no /reallocate is
+    spent while it exists (their session rides on that instance). Exit codes:
+    0 accepted/complete/kept-4th; 1 group bail; 3 arbitrator bail. Ctrl-C
+    leaves the group running as-is (main's handler)."""
     print(f"bandwidth arbitrator: {name} — cap {cap_mbps:g} Mbps, max {BW_MAX_SHOTS} "
           f"reallocations, 4th host kept")
     print(f"(reads {BW_LOG_PATH} over SSH every {BW_POLL_INTERVAL:g}s; median over "
@@ -744,6 +779,11 @@ def _arbitrate(
                 print(f"kept the {shots + 1}th host ({inst.machine_id or '?'}) — pull-stuck "
                       f"and shots exhausted; download continues on it")
                 return 0
+            active, why = _bw_ssh_guard(inst)
+            if active:
+                ts = datetime.now(timezone.utc).strftime("%H:%M:%S")
+                print(f"{ts} UTC  ssh session active ({why}) — holding, no shot spent")
+                continue
             if not _bw_reallocate(org, project, name, key, inst, excluded,
                                   shots + 1, "image pull stuck"):
                 return 3
@@ -770,6 +810,11 @@ def _arbitrate(
             print(f"kept the {shots + 1}th host ({inst.machine_id or '?'}) at {mbps:.1f} Mbps "
                   f"— no faster host in {BW_MAX_SHOTS} shots; download continues on it")
             return 0
+        active, why = _bw_ssh_guard(inst)
+        if active:
+            ts = datetime.now(timezone.utc).strftime("%H:%M:%S")
+            print(f"{ts} UTC  ssh session active ({why}) — holding, no shot spent")
+            continue
         if not _bw_reallocate(org, project, name, key, inst, excluded,
                               shots + 1, f"median {mbps:.1f} Mbps < {cap_mbps:g}"):
             return 3

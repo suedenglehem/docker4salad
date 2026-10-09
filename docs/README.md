@@ -29,7 +29,7 @@ The two keys to the whole setup:
 | **`cl_salad_deploy`** | `claude/` | **The deploy half.** Looks up the group's status, starts it if stopped (costs), waits for the model, then hands off to `cl_salad`. |
 | **`salad_proxy.py`** | `claude/` | Stdlib Anthropic↔OpenAI bridge. Injects `Salad-Api-Key`, translates requests + streaming SSE + tool calls. Run by `cl_salad`. |
 | `version.sh` | `docker/` | Run **inside a running instance** (via SSH) to confirm *which build* is actually live and what it's downloading. |
-| `idle_watchdog.py` | `docker/` (installed in the image) | In-container **idle/heartbeat self-shutdown (v2.1)**: arms on the group `/ready` endpoint (the probe's own), holds `IDLE_ARM_GRACE`, then after `IDLE_TIMEOUT`/`HEARTBEAT_TIMEOUT` s of no traffic **POSTs the Salad group `/stop`** (account-wide key, `SALAD_STOP_KEY=b64:<base64>` obfuscated storage, decoded at startup) and SIGTERMs the container — the only kill that truly stops billing (a bare self-exit gets RESCHEDULED, paid test 2026-10-09). Key `none`/missing/undecodable **disables the watchdog**. Deployers: `--idle-shutdown none|idle|heartbeat` + `--stop-key <file>`. |
+| `idle_watchdog.py` | `docker/` (installed in the image) | In-container **idle/heartbeat self-shutdown (v2.2)**: arms on the group `/ready` endpoint (the probe's own), holds `IDLE_ARM_GRACE`, then after `IDLE_TIMEOUT`/`HEARTBEAT_TIMEOUT` s of no traffic **POSTs the Salad group `/stop`** (account-wide key, `SALAD_STOP_KEY=b64:<base64>` obfuscated storage, decoded at startup) and SIGTERMs the container — the only kill that truly stops billing (a bare self-exit gets RESCHEDULED, paid test 2026-10-09). Key `none`/missing/undecodable **disables the watchdog**. **SSH-presence guard**: while `/.ssh` exists (the user touched it after logging in over SSH) the kill is held off and the arbitrator spends no reallocate shot; `SSH_GUARD=0` disables. Deployers: `--idle-shutdown none|idle|heartbeat` + `--stop-key <file>` + `--ssh-guard 1|0`. |
 | `stats.sh` | `docker/` | Run **inside a running instance**: llama-server stats — tps, queue, token totals (scrapes the local `/metrics`). Aliased **`llama-stats`** in the image (local-only; works under Salad's shell-less SSH exec). |
 | `bw_reporter.py` | `docker/` (installed in the image) | In-container **HF-download bandwidth sampler**: appends `epoch bytes` (size of `MODEL_DIR`, `os.lstat` sum) to `${API_STATE_DIR}/bw.log` every 10 s and self-exits when llama-server `/health` is ok. Reports only — no verdicts, no API calls. Read over SSH by the `manage_groups.py` **bandwidth arbitrator** (`start --min-bw-mbps`). |
 | `utils/llama_stats.py` | `utils/` | Same stats **from the host**, against a Salad gateway URL (key auto-loaded) or a local server. |
@@ -305,7 +305,7 @@ never printed).
   plain: no draft, no vision, no template (the image's `none` sentinel makes that
   the default). `--ctx-size`, `--disk-size`.
 - **All five — idle/heartbeat self-shutdown**: `--idle-shutdown none|idle|heartbeat`
-  (default `none`), `--idle-timeout 600`, `--heartbeat-timeout 600`, **`--stop-key <file>`**
+  (default `none`), `--idle-timeout 600`, `--heartbeat-timeout 300`, **`--stop-key <file>`**
   (the account-wide per-user Salad API key — group-scoped keys don't exist; stored in
   the group env b64-obfuscated as `SALAD_STOP_KEY=b64:<base64>`, decoded by the
   watchdog at startup) → sent as `IDLE_SHUTDOWN` /
@@ -318,8 +318,13 @@ never printed).
   **DISABLES the watchdog** (a keyless self-exit would just get rescheduled and keep
   billing), and the deployers warn when arming without a key. Armed mode creates with `restart_policy=never`
   (create-only; kills crash-loop billing on self-exit — the group-level stop wins
-  over the policy, so an existing `always` group needs no delete+recreate). See
-  `docker/README.md` → *Idle/heartbeat self-shutdown*.
+  over the policy, so an existing `always` group needs no delete+recreate).
+- **All five — SSH-presence guard**: `--ssh-guard 1` (default; `0` = off) → sent as
+  `SSH_GUARD`. While `/.ssh` EXISTS in the container the watchdog never stops the group
+  and the `manage_groups.py` bandwidth arbitrator spends no `/reallocate` shot.
+  Contract: `touch /.ssh` after logging in over SSH, `rm /.ssh` on the way out. Harmless
+  on images predating the guard (the env is unread). See `docker/README.md` →
+  *Idle/heartbeat self-shutdown* + *Working inside the container over SSH*.
 
 ---
 

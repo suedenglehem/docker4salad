@@ -242,11 +242,12 @@ def parse_args() -> argparse.Namespace:
                         help="env IDLE_TIMEOUT — seconds of flat token counters on /metrics "
                              "(mode idle) before the watchdog SIGTERMs llama-server and the "
                              "container exits")
-    parser.add_argument("--heartbeat-timeout", default="180",
+    parser.add_argument("--heartbeat-timeout", default="300",
                         help="env HEARTBEAT_TIMEOUT — seconds without a client keepalive call "
                              "(mode heartbeat) before the watchdog kills the container. The "
                              "client pinger fires every ~30 s, so keep this at ~2x the pinger "
-                             "period or more (60 s minimum) or pinger jitter can false-kill")
+                             "period or more (60 s minimum) or pinger jitter can false-kill. "
+                             "Default 300 = 10 pinger periods (fleet-wide since 2026-10-09)")
     parser.add_argument("--idle-grace", default="1800",
                         help="env IDLE_GRACE — max seconds the watchdog waits for the FIRST "
                              "/ready ok before giving up (no kill). A cold start that "
@@ -254,6 +255,13 @@ def parse_args() -> argparse.Namespace:
                              "(2026-10-09: atx-hb-test2's 27B took ~37 min, the watchdog gave "
                              "up at 30 min and the group ran the whole session UNARMED) — use "
                              "3600 for big-quant groups")
+    parser.add_argument("--ssh-guard", default="1",
+                        help="env SSH_GUARD — 1 (default): the watchdog holds off its "
+                             "self-stop while /.ssh exists in the container, and the "
+                             "bandwidth arbitrator spends no /reallocate shot while it "
+                             "exists. Contract: `touch /.ssh` after logging in over SSH, "
+                             "`rm /.ssh` on the way out. 0 = guard off. Harmless on "
+                             "images that predate the guard (the env is unread)")
     parser.add_argument("--stop-key", default=None, metavar="FILE",
                         help="file holding the Salad API key for the watchdog's group /stop "
                              "call (Salad keys are per-user and account-wide — no group-"
@@ -318,6 +326,7 @@ def build_env(name: str, ctx_size: str, use_draft_model: str, hf_token: str | No
               model_file: str | None = None, claude_template: str = "1",
               idle_shutdown: str = "none", idle_timeout: str = "600",
               heartbeat_timeout: str = "600", idle_grace: str = "1800",
+              ssh_guard: str = "1",
               stop_key: str = "none",
               org: str = "", project: str = "", group: str = "") -> dict[str, str]:
     """Full env for the group (create sets it, PATCH replaces it wholesale).
@@ -369,6 +378,13 @@ def build_env(name: str, ctx_size: str, use_draft_model: str, hf_token: str | No
         # before it gives up (no kill). Big-quant cold starts exceed the 1800
         # default — the watchdog then exits and the group runs UNARMED.
         "IDLE_GRACE": idle_grace,
+        # SSH-presence guard (watchdog v2.2 + bandwidth arbitrator): while
+        # /.ssh exists in the container the watchdog holds off its self-stop
+        # and the arbitrator spends no /reallocate shot. The user touches
+        # /.ssh after logging in over SSH and removes it on the way out.
+        # Always sent; harmless on images predating the guard (the env is
+        # unread).
+        "SSH_GUARD": ssh_guard,
         # Group /stop kill (watchdog v2): the ONLY action that truly stops a
         # group is the Salad group /stop endpoint — self-exit gets RESCHEDULED
         # (paid test 2026-10-09). SALAD_STOP_KEY = account-wide key from
@@ -483,6 +499,7 @@ def main() -> int:
                     idle_timeout=args.idle_timeout,
                     heartbeat_timeout=args.heartbeat_timeout,
                     idle_grace=args.idle_grace,
+                    ssh_guard=args.ssh_guard,
                     stop_key=stop_key, org=org, project=project, group=group)
 
     existing = get_group(org, project, group)

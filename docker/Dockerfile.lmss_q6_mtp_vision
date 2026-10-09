@@ -78,7 +78,7 @@ RUN set -eux; \
 # first word, e.g. "lmss q6-mtp..." -> "lmss"). Override with
 # --build-arg LMSS_BUILD_ID="..." for a per-push id.
 ARG LMSS_BUILD_ID
-RUN printf '%s\n' "${LMSS_BUILD_ID:-lmss q6-mtp-vision-v10 (baked draft+vision, claude-template, idle_watchdog v2.1 [b64 key decode + key=none disables watchdog] + bw_reporter + iputils-ping + llama-stats, trapped-child supervisor, exec-form entry.sh CMD) 2026-10-09}" > /etc/llama-image-build
+RUN printf '%s\n' "${LMSS_BUILD_ID:-lmss q6-mtp-vision-v11 (baked draft+vision, claude-template, idle_watchdog v2.2 [/.ssh presence guard] + bw_reporter + iputils-ping + llama-stats + apt kit [less nano iproute2 dnsutils jq], trapped-child supervisor, exec-form entry.sh CMD) 2026-10-09}" > /etc/llama-image-build
 
 # --- Claude Code template: dump+patch script (repo-root build context) ------
 # Zero dependencies (stdlib Python only); copied in and run at STARTUP, not at

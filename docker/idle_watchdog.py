@@ -65,6 +65,12 @@ Safety rails:
     llama-server runs as a CHILD of the CMD bash, which installs a SIGTERM
     trap (handler installed -> delivered), kills the child, and exits; PID
     -namespace teardown then reaps everything left.
+  - SSH-presence guard: while the guard file /.ssh EXISTS, the kill is HELD
+    OFF and the countdown restarts — the group stays alive while the user
+    works in the container (the watchdog's activity timer is chat traffic/
+    pings only, so a logged-in user with no chat would otherwise be killed
+    mid-session — observed 2026-10-09). The user touches it after SSHing in
+    and removes it on the way out; SSH_GUARD=0 disables the check.
   - IDLE_SHUTDOWN=none (default) -> exits immediately, does nothing.
   - No usable group /stop config (SALAD_STOP_KEY is "none"/missing/
     undecodable, or SALAD_ORG/SALAD_PROJECT/SALAD_GROUP incomplete) -> the
@@ -86,6 +92,11 @@ Env knobs (all baked defaults, group-overridable via the deployers):
   HEARTBEAT_TIMEOUT seconds of no pings      -> kill (mode heartbeat)
   IDLE_GRACE      max seconds to wait for the first /ready ok before giving up
   IDLE_ARM_GRACE  seconds to hold after /ready ok before the countdown starts
+  SSH_GUARD       1 (default) | 0 — the SSH-presence guard: while the guard
+                  file exists the watchdog NEVER stops the group (the user
+                  touched it after logging in over SSH; see ssh_guard_active).
+  SSH_GUARD_FILE  guard file path (default /.ssh). Contract: `touch /.ssh` on
+                  the way in, `rm /.ssh` on the way out.
   READY_PORT      api_app port serving /ready (default 9999)
   PORT            llama-server port (default 8080)
   API_KEY         llama-server auth key; sent as Bearer when set (local runs
@@ -122,6 +133,8 @@ STATUS_EVERY_TICKS = 10  # log a heartbeat line every ~5 min
 SIGKILL_GRACE_S = 10     # SIGTERM grace before escalating to SIGKILL
 STOP_ATTEMPTS = 2        # group /stop POST attempts (the API is the real kill)
 STOP_RETRY_S = 5.0       # pause between stop attempts
+SSH_GUARD = (os.environ.get("SSH_GUARD") or "1").strip().lower() not in ("0", "none", "off", "")
+SSH_GUARD_FILE = os.environ.get("SSH_GUARD_FILE") or "/.ssh"
 # Overridable for stub tests / staging; production uses the spec server.
 SALAD_API_BASE = os.environ.get("SALAD_API_BASE") or "https://api.salad.com/api/public"
 
@@ -254,6 +267,25 @@ def activity() -> "float | None":
     return total
 
 
+def ssh_guard_active() -> bool:
+    """SSH-presence suppression, the simple contract (user's design,
+    2026-10-09): the user works in the container over SSH and touches the
+    guard file — `ssh root@ip -p PORT touch /.ssh` — when they get in. The
+    file's EXISTENCE means "I am in this machine": the watchdog never stops
+    the group while it exists, and the bandwidth arbitrator spends no
+    /reallocate shot. No daemon, no marker freshness, no process scanning —
+    a plain os.path.exists. The user removes it on the way out
+    (`rm /.ssh`), and normal idle/heartbeat billing hygiene resumes.
+    SSH_GUARD=0 disables the check. A stat failure counts as absent
+    (fail-open toward the kill — the billing-hygiene default)."""
+    if not SSH_GUARD:
+        return False
+    try:
+        return os.path.exists(SSH_GUARD_FILE)
+    except OSError:
+        return False
+
+
 def pid1_alive() -> bool:
     """/proc/1 gone = PID 1 exited. A zombie PID 1 counts as dead (the
     container is on its way out; it can't be signalled meaningfully)."""
@@ -338,7 +370,8 @@ def main() -> int:
     # (min() caps at POLL_S); a 5 s floor keeps /metrics unharmed.
     poll_s = min(POLL_S, max(timeout / 3.0, POLL_MIN_S))
     log(f"mode={mode} timeout={timeout}s grace={grace}s arm_grace={arm_grace}s "
-        f"poll={poll_s:.0f}s stop_api={'configured' if (STOP_KEY and STOP_PATH) else 'OFF'} "
+        f"poll={poll_s:.0f}s ssh_guard={'on' if SSH_GUARD else 'off'}({SSH_GUARD_FILE}) "
+        f"stop_api={'configured' if (STOP_KEY and STOP_PATH) else 'OFF'} "
         f"— arming: waiting for {READY_URL} ok")
 
     # Arm only once the GROUP is ready (the probe's own endpoint); never kill
@@ -372,6 +405,15 @@ def main() -> int:
             last = score
             last_activity = time.monotonic()
         idle_s = time.monotonic() - last_activity
+        if idle_s >= timeout and ssh_guard_active():
+            # The SSH guard file exists (the user touched it after logging in):
+            # never stop the group under them. Restart the countdown so the
+            # kill fires only after the guard is removed (rm /.ssh).
+            last_activity = time.monotonic()
+            if ticks % STATUS_EVERY_TICKS == 0:
+                log(f"ssh guard {SSH_GUARD_FILE} present — stop held off, "
+                    f"countdown restarted")
+            continue
         if idle_s >= timeout:
             log(f"idle {idle_s:.0f}s >= {timeout}s (mode {mode}) — stopping the "
                 f"group, then terminating llama-server (PID 1)")

@@ -196,10 +196,30 @@ Salad bills while a group runs. If a client session dies (lost connection, close
 - **`IDLE_SHUTDOWN=idle`** → kill after `IDLE_TIMEOUT` s (default 600) with no chat traffic.
 - **`IDLE_SHUTDOWN=heartbeat`** → kill after `HEARTBEAT_TIMEOUT` s (default 600) with no client keepalive. Salad exposes exactly **one** service port, so the keepalive is not a dedicated port: the client (`cl_salad` / `chat_salad.sh` with `SALAD_HEARTBEAT=1`) posts a **1-token completion** through the existing gateway every 30 s. llama-server IS the agent — its token counters are the heartbeat signal.
 - **Activity signal**: `llamacpp:prompt_tokens_total` + `llamacpp:tokens_predicted_total` scraped from `/metrics` every 30 s (all CMDs bake `--metrics`; adaptive to a shorter period when the timeout is small). Only chat calls move the counters — `/health` and `/v1/models` polls do NOT count. An in-flight request (`llamacpp:requests_processing` > 0) counts as activity; any counter change (including a reset) resets the timer.
+- **SSH-presence guard (`/.ssh`, watchdog v2.2)**: the watchdog's activity timer is chat traffic/pings only — a user logged in over SSH doing shell work moves no counters, so the heartbeat timeout would kill the group mid-session (observed 2026-10-09). The contract is deliberately dumb: **`touch /.ssh` after logging in, `rm /.ssh` on the way out**. While the file EXISTS, the watchdog never stops the group (the countdown restarts every tick — the kill fires only after the guard is removed), and the `manage_groups.py` bandwidth arbitrator spends no `/reallocate` shot (its probe is `ls /.ssh`; payload decides: stdout naming `/.ssh` = present, ls's `cannot access` = absent, ssh transport failure = strike → the shot proceeds, so a broken probe never silently disables the arbitrator). No daemon, no marker freshness, no process scanning. Knobs: `SSH_GUARD=1` (default) | `0` disables; `SSH_GUARD_FILE` (default `/.ssh`).
 - **Safety rails**: a failed `/metrics` scrape is a skipped tick, never an idle tick; the stop POST is retried once; the key is never logged; a malformed `b64:` payload logs the decode failure and disables the watchdog (never crashes it).
 - **Group side**: armed mode = `--idle-shutdown idle|heartbeat` **plus `--stop-key <file>`** (the deployer refuses to arm loudly — it warns — without it). Deployers also create armed groups with `restart_policy=never` (create-only, not in the PATCH schema) so crash-loop self-exits stay stopped. The group-level stop wins over `restart_policy`, so an existing `always` group does NOT need delete+recreate for the watchdog to work.
-- Env knobs: `IDLE_SHUTDOWN`, `IDLE_TIMEOUT`, `HEARTBEAT_TIMEOUT`, `IDLE_GRACE`, `IDLE_ARM_GRACE`, `READY_PORT` (9999), `SALAD_STOP_KEY` + `SALAD_ORG`/`SALAD_PROJECT`/`SALAD_GROUP` (the stop path; all four required, set by the deployer), `SALAD_API_BASE` (override for tests only).
+- Env knobs: `IDLE_SHUTDOWN`, `IDLE_TIMEOUT`, `HEARTBEAT_TIMEOUT`, `IDLE_GRACE`, `IDLE_ARM_GRACE`, `READY_PORT` (9999), `SSH_GUARD` (1 default | 0) + `SSH_GUARD_FILE` (default `/.ssh`), `SALAD_STOP_KEY` + `SALAD_ORG`/`SALAD_PROJECT`/`SALAD_GROUP` (the stop path; all four required, set by the deployer), `SALAD_API_BASE` (override for tests only).
 - Log: `${API_STATE_DIR}/watchdog.log` (i.e. `/tmp/llama-api/watchdog.log`); live check `ps -eo pid,args | grep idle_watchdog`. `version.sh` prints the **WATCHDOG generation** — from the PID1 cmdline, or (on the exec-form `entry.sh` images, where PID 1 is just `bash -l /opt/llama.cpp/entry.sh`) by fingerprinting the `entry.sh` script itself — and flags **watchdog v2** when `SALAD_STOP_KEY` is in the script, plus **watchdog v2.1** when the script carries the `b64:` sentinel (b64 key decode + key `none` disables the watchdog).
+
+### Working inside the container over SSH
+
+`ssh root@<ip> -p <port>` (the manager's `ssh` action prints the pair). Salad's SSH is an
+OCI **exec**, not a login shell: each call runs **one plain command** — no pipes, `;`,
+redirects, or quotes (the relay passes argv straight to runc; `hostname;` fails as
+`exec: "hostname;": executable file not found`). The relay **exits 1 even on success** —
+judge by the payload, never the exit code (255 = ssh transport failure only).
+
+- **Stay-alive contract**: `touch /.ssh` when you get in, `rm /.ssh` on the way out — the
+  idle watchdog holds off its self-stop and the bandwidth arbitrator spends no reallocate
+  shot while the file exists (see the guard bullet above).
+- **apt**: ships in every image (`apt 2.4.14` on the ubuntu22.04 bases). Over shell-less
+  SSH that is **two plain commands**: `apt-get update`, then `apt-get install -y <pkg>`.
+  The images carry a lean operator kit so most sessions need no install: `less nano
+  iproute2 dnsutils jq` on top of the runtime set (`vim-tiny`, `htop`, `bmon`,
+  `net-tools`, `nvtop`, `curl`, `wget2`, `socat`, `iputils-ping`). Installs are
+  **ephemeral** — the writable layer dies with the container; bake persistent tools into
+  the image.
 
 ### HF-download bandwidth reporter (`bw_reporter.py`) + the arbitrator
 

@@ -134,6 +134,10 @@ ENV DEBIAN_FRONTEND=noninteractive \
 #                 ("ping: Operation not permitted") — installed for the cases
 #                 where it works. scp ships with openssh-client (above).
 #   net-tools   - classic network tools (ifconfig/netstat/route) for debugging container networking
+#   less/nano   - pager + editor for SSH work (vi.tiny ships; `more` can't scroll back)
+#   iproute2    - ss/ip (socket + route inspection; raw /proc/net/tcp is painful)
+#   dnsutils    - dig/nslookup (DNS debugging)
+#   jq          - JSON on the command line (API payloads, /v1/models)
 #   socat       - forwards all IPv6 TCP :8888 to the llama-server on 127.0.0.1:8080 (see CMD)
 #   libncurses6/libtinfo6 - runtime libs of the nvtop binary built in stage 1
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -151,6 +155,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     htop \
     bmon \
     net-tools \
+    less \
+    nano \
+    iproute2 \
+    dnsutils \
+    jq \
     socat \
     libncurses6 \
     libtinfo6 \
@@ -227,6 +236,11 @@ COPY qwen3.8.q6.jinja ${LLAMA_CPP_DIR}/qwen3.8.q6.jinja
 #                 `epoch bytes` lines to ${API_STATE_DIR}/bw.log every 10 s
 #                 for the manage_groups.py bandwidth arbitrator to read over
 #                 SSH; self-exits when llama-server /health answers ok).
+# SSH-presence guard (no daemon): the user touches /.ssh after logging in
+#                 over SSH; idle_watchdog.py holds off its self-stop while the
+#                 file exists, and the manage_groups.py bandwidth arbitrator
+#                 spends no /reallocate shot. `rm /.ssh` resumes normal
+#                 billing hygiene.
 COPY llm.sh /usr/local/bin/llm.sh
 COPY question.sh /usr/local/bin/question.sh
 COPY version.sh /usr/local/bin/version.sh

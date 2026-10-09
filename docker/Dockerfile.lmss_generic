@@ -80,7 +80,7 @@ FROM boris271142/lmss:cuda128-v8@sha256:0386058c64d603430960c0b3d5ab03c2ad740f75
 # first word, e.g. "lmss q6-mtp..." -> "lmss"). Override with
 # --build-arg LMSS_BUILD_ID="..." for a per-push id.
 ARG LMSS_BUILD_ID
-RUN printf '%s\n' "${LMSS_BUILD_ID:-lmss generic-v8 (hf runtime download, claude-template, extra-args, idle_watchdog v2.1 [b64 key decode + key=none disables watchdog] + bw_reporter + iputils-ping + llama-stats, trapped-child supervisor, exec-form entry.sh CMD) 2026-10-09}" > /etc/llama-image-build
+RUN printf '%s\n' "${LMSS_BUILD_ID:-lmss generic-v9 (hf runtime download, claude-template, extra-args, idle_watchdog v2.2 [/.ssh presence guard] + bw_reporter + iputils-ping + llama-stats + apt kit [less nano iproute2 dnsutils jq], trapped-child supervisor, exec-form entry.sh CMD) 2026-10-09}" > /etc/llama-image-build
 
 # --- Claude Code template: dump+patch script (repo-root build context) ------
 # Zero dependencies (stdlib Python only); copied in and run at STARTUP, not at

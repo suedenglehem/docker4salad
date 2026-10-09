@@ -168,6 +168,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     htop \
     bmon \
     net-tools \
+    less \
+    nano \
+    iproute2 \
+    dnsutils \
+    jq \
     socat \
     libncurses6 \
     libtinfo6 \
@@ -221,7 +226,7 @@ RUN chmod +x /usr/local/bin/llm.sh /usr/local/bin/question.sh /usr/local/bin/ver
 # default lives in the RUN (shell ${ARG:-default}), NOT in the ARG line - a
 # Dockerfile ARG default cannot carry unquoted spaces.
 ARG LMSS_BUILD_ID
-RUN printf '%s\n' "${LMSS_BUILD_ID:-lmss_generic_ampere-v6 (llamAmpere v0.4 fork, cuda 13.0.2, turbo5/turbo4 KV, idle_watchdog v2.1 [b64 key decode + key=none disables watchdog] + bw_reporter + iputils-ping + llama-stats, trapped-child supervisor, exec-form entry.sh CMD) 2026-10-09}" > /etc/llama-image-build
+RUN printf '%s\n' "${LMSS_BUILD_ID:-lmss_generic_ampere-v7 (llamAmpere v0.4 fork, cuda 13.0.2, turbo5/turbo4 KV, idle_watchdog v2.2 [/.ssh presence guard] + bw_reporter + iputils-ping + llama-stats + apt kit [less nano iproute2 dnsutils jq], trapped-child supervisor, exec-form entry.sh CMD) 2026-10-09}" > /etc/llama-image-build
 
 # Model + runtime env (lmss_generic's surface). The defaults are the family's
 # (JonathanColetti 27B) so a bare docker run behaves like the rest of the
