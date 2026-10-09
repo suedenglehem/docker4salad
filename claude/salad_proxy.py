@@ -20,6 +20,7 @@ import argparse
 import http.client
 import json
 import os
+import re
 import sys
 import urllib.parse
 import uuid
@@ -273,6 +274,101 @@ def anthropic_to_openai(body, up):
 
 
 # --------------------------------------------------------------------------- #
+# Empty think-block stripper
+# --------------------------------------------------------------------------- #
+# With enable_thinking=false the chat template ends the prompt with the CLOSED
+# empty block "<think>\n\n</think>\n\n" as the generation prefix. Groups whose
+# EXTRA_ARGS carry "--reasoning-format none" (the ATX operating point) do not
+# strip think blocks server-side, and the model echoes that prefix — Claude
+# Code then shows a literal "<think>\n\n</think>" in every answer. The proxy
+# removes EMPTY think blocks from the response text; real (non-empty) think
+# blocks pass through untouched, so --thinking 1 keeps working.
+_EMPTY_THINK = re.compile(r"<think>[ \t\n\r]*</think>\n*")
+# streaming: text AFTER the consumed "<think>" that completes an empty block
+_EMPTY_CLOSE = re.compile(r"[ \t\n\r]*</think>\n*")
+_THINK_OPEN = "<think>"
+
+
+def _viable_empty_think(rest):
+    """True if `rest` (text right after `<think>`) can still grow into an
+    empty block: whitespace, then `</think>`, then trailing newlines."""
+    i = 0
+    while i < len(rest) and rest[i] in " \t\n\r":
+        i += 1
+    return ("</think>\n\n").startswith(rest[i:])
+
+
+class EmptyThinkStripper:
+    """Streaming filter: removes empty think blocks from a text stream fed in
+    arbitrary chunks. Buffers only text that could still become an empty block
+    (a prefix of "<think>" / its whitespace / "</think>" / trailing newlines);
+    everything else is emitted immediately."""
+
+    def __init__(self):
+        self.buf = ""
+        self.in_tag = False
+        self.after_block = False  # just stripped: consume the prefix newlines
+
+    def feed(self, text):
+        self.buf += text
+        return self._drain(False)
+
+    def flush(self):
+        """End of stream: release whatever was buffered (a block that never
+        closed is real content and must not be swallowed)."""
+        return self._drain(True)
+
+    def _drain(self, final):
+        out = []
+        buf = self.buf
+        while buf:
+            if self.after_block:
+                self.after_block = False
+                j = 0
+                while j < len(buf) and buf[j] == "\n":
+                    j += 1
+                buf = buf[j:]
+                if not buf:
+                    break
+                continue
+            if not self.in_tag:
+                i = buf.find("<")
+                if i < 0:
+                    out.append(buf)
+                    buf = ""
+                    break
+                out.append(buf[:i])
+                buf = buf[i:]
+                self.in_tag = True
+            # in_tag: buf starts with '<'
+            if len(buf) < len(_THINK_OPEN) and _THINK_OPEN.startswith(buf):
+                if final:  # stream ended mid-tag — the text is real content
+                    out.append(buf)
+                    buf = ""
+                    self.in_tag = False
+                break  # partial tag ("<thi") — need more data
+            if not buf.startswith(_THINK_OPEN):
+                out.append("<")  # not a think tag — emit it, rescan
+                buf = buf[1:]
+                self.in_tag = False
+                continue
+            rest = buf[len(_THINK_OPEN):]
+            m = _EMPTY_CLOSE.match(rest)
+            if m:
+                buf = rest[m.end():]  # empty block — stripped
+                self.in_tag = False
+                self.after_block = True
+                continue
+            if not final and _viable_empty_think(rest):
+                break  # could still close as an empty block — keep buffering
+            out.append(_THINK_OPEN)  # real content inside — pass through
+            buf = rest
+            self.in_tag = False
+        self.buf = buf
+        return "".join(out)
+
+
+# --------------------------------------------------------------------------- #
 # OpenAI -> Anthropic (non-streaming response)
 # --------------------------------------------------------------------------- #
 def openai_to_anthropic(resp, model):
@@ -281,6 +377,8 @@ def openai_to_anthropic(resp, model):
     msg = ch.get("message") or {}
     content = []
     txt = msg.get("content")
+    if txt:
+        txt = _EMPTY_THINK.sub("", txt)
     if txt:
         content.append({"type": "text", "text": txt})
     for tc in (msg.get("tool_calls") or []):
@@ -341,6 +439,7 @@ class StreamBuilder:
         self.tools = {}
         self.finish_reason = None
         self.usage_out = 0
+        self.strip = EmptyThinkStripper()  # see the stripper section above
 
     def _aidx(self):
         i = self.next_index
@@ -373,6 +472,12 @@ class StreamBuilder:
         return out
 
     def _text(self, t):
+        t = self.strip.feed(t)  # empty think blocks are swallowed here
+        if not t:
+            return []
+        return self._text_raw(t)
+
+    def _text_raw(self, t):
         out = []
         if not self.text_open:
             self.text_open = True
@@ -397,6 +502,9 @@ class StreamBuilder:
         i = tc.get("index", 0)
         fn = tc.get("function") or {}
         if i not in self.tools:
+            tail = self.strip.flush()  # release buffered text before closing
+            if tail:
+                out.extend(self._text_raw(tail))
             ct = self._close_text()
             if ct:
                 out.append(ct)
@@ -415,6 +523,9 @@ class StreamBuilder:
 
     def finish(self):
         out = []
+        tail = self.strip.flush()  # a block that never closed is real content
+        if tail:
+            out.extend(self._text_raw(tail))
         ct = self._close_text()
         if ct:
             out.append(ct)

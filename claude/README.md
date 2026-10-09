@@ -61,13 +61,16 @@ cl_salad https://<dns> -p "Say hi"        # everything after the URL goes to cla
 - Other overrides: `SALAD_GATEWAY_HOST`, `SALAD_MODEL_ALIAS`
   (default `qwen38-27b` — keep stable across group recreations; clients
   depend on it), `SALAD_KEYFILE`, `CLAUDE_BIN`.
-- **Heartbeat keepalive** (`SALAD_HEARTBEAT=1`, default 0): while the session
-  lives, a background loop posts a **1-token completion** to the gateway every
-  30 s. Needed when the group runs with `IDLE_SHUTDOWN=heartbeat` — the
-  in-container watchdog self-stops the group `HEARTBEAT_TIMEOUT` s after the
-  pings stop, i.e. shortly after a dead connection (closed terminal, lost
-  SSH), instead of billing for hours. `cl_salad_deploy` sets it automatically
-  from the group env; the pinger dies with the session (EXIT trap).
+- **Heartbeat keepalive** (default **ON**, `SALAD_HEARTBEAT=0` to opt out):
+  while the session lives, a background loop posts a **1-token completion** to
+  the gateway every 30 s. Needed when the group runs with
+  `IDLE_SHUTDOWN=heartbeat` — the in-container watchdog self-stops the group
+  `HEARTBEAT_TIMEOUT` s after the pings stop, i.e. shortly after a dead
+  connection (closed terminal, lost SSH), instead of billing for hours. ON by
+  default so a bare `cl_salad https://<dns>` keeps its group alive (extra
+  keepalive is harmless on groups without the watchdog); `cl_salad_deploy`
+  also exports it from the group env. The pinger dies with the session
+  (EXIT trap).
 
 ## cl_salad_deploy — start (if needed) + wait + run
 
@@ -99,8 +102,9 @@ cl_salad_deploy --group qwen38-27b-q5 -- -p "Say hi"   # -- ends option parsing
   `IDLE_SHUTDOWN` env from the management API; when it's `heartbeat` it
   exports `SALAD_HEARTBEAT=1`, so cl_salad (and any `chat_salad.sh` run
   against this gateway) keeps the group alive with a 1-token call every 30 s
-  — the client follows the docker side. A manually-set `SALAD_HEARTBEAT=1`
-  works on any group (extra keepalive is harmless).
+  — the client follows the docker side. Both clients now default the pinger
+  ON, so this is a convenience, not a requirement; `SALAD_HEARTBEAT=0` opts
+  out.
 
 ## salad_proxy.py — the bridge (run by the wrappers, standalone-able)
 
@@ -113,6 +117,16 @@ Flag-only CLI: `--upstream` / `--model` / `--keyfile` are **required**;
 optional `--port` (8093), `--host` (127.0.0.1), `--thinking 0|1`,
 `--max-tokens-cap 12000`, `--timeout 600`. Serves `POST /v1/messages`,
 `GET /v1/models`, `GET /healthz` (alias `/health`). Upstream must be https.
+
+The proxy **strips empty think blocks** (`<think>\s*</think>`) from response
+text, streaming and non-streaming. With `enable_thinking=false` the chat
+template ends the prompt with the closed empty block as the generation
+prefix; groups whose EXTRA_ARGS carry `--reasoning-format none` don't strip
+it server-side and the model echoes it — Claude Code then shows a literal
+`<think>\n\n</think>` in every answer. Real (non-empty) think blocks pass
+through untouched. Server-side fix: the deployers now drop `--flag none`
+pairs from EXTRA_ARGS (`strip_none_value_args`), so llama.cpp keeps its
+default think parsing.
 
 ## curl_salad.sh — smoke test (no proxy)
 
@@ -133,17 +147,19 @@ budgets get eaten by reasoning content and the answer comes back empty.
 
 Chat with the model from the terminal: `./chat_salad.sh` for interactive,
 `./chat_salad.sh "prompt"` for one-shot; extra args pass through to `llm`
-(e.g. `-s "sys"`). `llm` 0.36+ sends the `Salad-Api-Key` header itself via
-`-H`, so it talks to the gateway **directly** — no proxy (the proxy is the
-Anthropic bridge `cl_salad` uses, and it does not serve OpenAI chat
-completions). Defaults to the production `qwen38-27b-q6k` gateway; point it
-elsewhere with `SALAD_UPSTREAM` / `SALAD_PORT` / `SALAD_MODEL` /
-`SALAD_KEYFILE`. It checks `/v1/models` once and dies (exit 2, hint per
-failure code) if the group is not serving; `SALAD_WAIT=1` polls for up to
-5 min instead, for a group mid cold start. `SALAD_HEARTBEAT=1` starts the
-same 1-token keepalive loop (every 30 s) for the duration of the chat —
-needed against a group deployed with `IDLE_SHUTDOWN=heartbeat`; the pinger
-is killed by the EXIT trap when the chat ends (the `llm` call runs in the
+(e.g. `-s "sys"`). A **leading URL argument** picks the gateway — same
+convention as `cl_salad`: `./chat_salad.sh https://<dns>.salad.cloud
+[prompt]`. `llm` 0.36+ sends the `Salad-Api-Key` header itself via `-H`, so
+it talks to the gateway **directly** — no proxy (the proxy is the Anthropic
+bridge `cl_salad` uses, and it does not serve OpenAI chat completions).
+Defaults to the `atx-hb-test2` gateway (`honey-coleslaw-…`) with model alias
+`atx-swift-27b-opt`; point it elsewhere with the URL argument or
+`SALAD_UPSTREAM` / `SALAD_PORT` / `SALAD_MODEL` / `SALAD_KEYFILE`. It checks
+`/v1/models` once and dies (exit 2, hint per failure code) if the group is
+not serving; `SALAD_WAIT=1` polls for up to 5 min instead, for a group mid
+cold start. The 1-token keepalive loop (every 30 s) is **ON by default**
+(`SALAD_HEARTBEAT=0` opts out) for the duration of the chat — the pinger is
+killed by the EXIT trap when the chat ends (the `llm` call runs in the
 foreground, not via `exec`, so the trap fires).
 
 ## Keys — don't mix them up

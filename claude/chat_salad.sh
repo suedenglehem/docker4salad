@@ -6,22 +6,25 @@
 # OpenAI chat completions at all.
 #
 # Usage:
-#   ./chat_salad.sh                 # interactive chat
+#   ./chat_salad.sh                 # interactive chat (default gateway)
+#   ./chat_salad.sh https://<dns>.salad.cloud        # interactive, that gateway
 #   ./chat_salad.sh "your prompt"   # one-shot, then exit
+#   ./chat_salad.sh https://<dns>.salad.cloud "prompt"   # one-shot, that gateway
 #   ./chat_salad.sh -s "sys" "prompt"   # extra args pass through to llm
 #
 # Config via env:
-#   SALAD_UPSTREAM   access domain (default: the production qwen38-27b-q6k
-#                    gateway corn-cabbage-2yk4e98r3rx752n0.salad.cloud)
+#   SALAD_UPSTREAM   access domain (default: the atx-hb-test2 gateway
+#                    honey-coleslaw-w2pzfno529hedl3j.salad.cloud;
+#                    a leading URL ARGUMENT overrides it, same as cl_salad)
 #   SALAD_PORT       public port   (default 443 — Cloudflare only proxies
 #                    standard ports; never the in-container gateway port 8888)
-#   SALAD_MODEL      model alias   (default qwen38-27b)
+#   SALAD_MODEL      model alias   (default atx-swift-27b-opt — the alias
+#                    atx-hb-test2 serves; q6k groups serve qwen38-27b)
 #   SALAD_KEYFILE    file holding the Salad-Api-Key (default: ./salad_api.txt)
-#   SALAD_HEARTBEAT  1 = send a 1-token keepalive to the gateway every 30 s
-#                    while the chat runs — needed when the group is deployed
-#                    with IDLE_SHUTDOWN=heartbeat (the in-container watchdog
-#                    self-stops the group HEARTBEAT_TIMEOUT s after pings
-#                    stop; real chat traffic also counts as activity)
+#   SALAD_HEARTBEAT  default 1 — send a 1-token keepalive to the gateway
+#                    every 30 s while the chat runs, so a heartbeat-mode
+#                    group survives the session (SALAD_HEARTBEAT=0 to opt
+#                    out; harmless on groups without the watchdog)
 #
 # Readiness: /v1/models is checked ONCE — 200 means a ready instance is
 # serving. 404 = group stopped or still downloading; 403 = gateway rejects
@@ -31,10 +34,20 @@ set -u
 
 cd "$(dirname "$0")"   # so salad_api.txt resolves no matter where you call it from
 
-UPSTREAM="${SALAD_UPSTREAM:-corn-cabbage-2yk4e98r3rx752n0.salad.cloud}"
+UPSTREAM="${SALAD_UPSTREAM:-honey-coleslaw-w2pzfno529hedl3j.salad.cloud}"
 PORT="${SALAD_PORT:-443}"
-MODEL="${SALAD_MODEL:-qwen38-27b}"
+MODEL="${SALAD_MODEL:-atx-swift-27b-opt}"
 KEYFILE="${SALAD_KEYFILE:-salad_api.txt}"
+
+# A leading URL argument overrides SALAD_UPSTREAM (cl_salad takes the gateway
+# URL as its first argument — chat_salad follows the same convention).
+if [ $# -gt 0 ]; then
+  case "$1" in
+    http://*|https://*)
+      UPSTREAM="$(printf '%s' "$1" | sed -e 's#^[a-zA-Z]*://##' -e 's#/.*$##')"
+      shift ;;
+  esac
+fi
 
 if [ ! -f "$KEYFILE" ]; then
   echo "error: key file $KEYFILE not found (expected next to this script)" >&2
@@ -80,13 +93,14 @@ fi
 # loop posts a 1-token completion through the gateway every 30 s while the
 # chat lives, so the group self-stops shortly after a dead connection (closed
 # terminal, lost SSH) instead of billing for hours. Real chat traffic also
-# counts as activity — the pinger is just the floor.
+# counts as activity — the pinger is just the floor. ON BY DEFAULT
+# (SALAD_HEARTBEAT=0 opts out).
 HEARTBEAT_PID=""
 cleanup() {
   [ -n "$HEARTBEAT_PID" ] && kill "$HEARTBEAT_PID" 2>/dev/null
 }
 trap cleanup EXIT
-if [ "${SALAD_HEARTBEAT:-0}" = "1" ]; then
+if [ "${SALAD_HEARTBEAT:-1}" = "1" ]; then
   (
     while :; do
       curl -m 10 -s -o /dev/null \

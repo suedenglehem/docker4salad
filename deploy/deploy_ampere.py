@@ -174,6 +174,27 @@ EXTRA_ARGS = ("--threads-batch 8 --prio 3 --spec-draft-n-max 3 "
               "--reasoning-format none --temp 0.2 --top-p 0.90 --top-k 40 "
               "--repeat-penalty 1.08 --repeat-last-n 256")
 
+
+def strip_none_value_args(s):
+    """Drop `--flag none` PAIRS from an extra-args string before it reaches
+    llama-server. A literal "none" VALUE means the feature is off — and
+    leaving `--reasoning-format none` in DISABLES llama.cpp's default
+    think-block parsing, so the template's empty <think></think> generation
+    prefix leaks into every answer (the 2026-10-09 double-<think> report).
+    The whole-string sentinel "none" (EXTRA_ARGS off — the Salad API rejects
+    empty env values) is preserved."""
+    if s.strip() == "none":
+        return s
+    toks = s.split()
+    out, i = [], 0
+    while i < len(toks):
+        if toks[i].startswith("--") and i + 1 < len(toks) and toks[i + 1] == "none":
+            i += 2
+            continue
+        out.append(toks[i])
+        i += 1
+    return " ".join(out)
+
 HF_TOKEN_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "hft.txt")
 
 # sm_86/89 only: the fork image is compiled with
@@ -285,7 +306,7 @@ def parse_args() -> argparse.Namespace:
                         help="env IDLE_TIMEOUT — seconds of flat token counters on /metrics "
                              "(mode idle) before the watchdog SIGTERMs llama-server and the "
                              "container exits")
-    parser.add_argument("--heartbeat-timeout", default="600",
+    parser.add_argument("--heartbeat-timeout", default="180",
                         help="env HEARTBEAT_TIMEOUT — seconds without a client keepalive call "
                              "(mode heartbeat) before the watchdog kills the container. The "
                              "client pinger fires every ~30 s, so keep this at ~2x the pinger "
@@ -402,9 +423,11 @@ def build_env(name: str, ctx_size: str, model_repo: str, model_file: str,
         # Extra llama-server args: one whitespace-separated string, appended
         # LAST to the argv (last-wins override of the baked base flags);
         # 'none' = off (never empty: the API rejects empty env values).
+        # `--flag none` PAIRS are stripped (strip_none_value_args) so
+        # llama.cpp keeps its default parsing for those features.
         # Harmless on images that predate EXTRA_ARGS (the env is simply
         # unread).
-        "EXTRA_ARGS": extra_args,
+        "EXTRA_ARGS": strip_none_value_args(extra_args),
         # Idle/heartbeat self-shutdown (in-container idle_watchdog.py):
         # 'none' = off; 'idle' = kill after IDLE_TIMEOUT s of no chat
         # traffic; 'heartbeat' = kill after HEARTBEAT_TIMEOUT s of no client

@@ -178,7 +178,7 @@ def parse_args() -> argparse.Namespace:
                         help="env IDLE_TIMEOUT — seconds of flat token counters on /metrics "
                              "(mode idle) before the watchdog SIGTERMs llama-server and the "
                              "container exits")
-    parser.add_argument("--heartbeat-timeout", default="600",
+    parser.add_argument("--heartbeat-timeout", default="180",
                         help="env HEARTBEAT_TIMEOUT — seconds without a client keepalive call "
                              "(mode heartbeat) before the watchdog kills the container. The "
                              "client pinger fires every ~30 s, so keep this at ~2x the pinger "

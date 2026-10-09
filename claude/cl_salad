@@ -28,10 +28,10 @@
 #   SALAD_KEYFILE         default <script dir>/salad_api.txt
 #   SALAD_PROXY_PORT      default 8093
 #   SALAD_ENABLE_THINKING default 0 (1 to enable Qwen thinking)
-#   SALAD_HEARTBEAT       default 0 (1 = send a 1-token keepalive to the
-#                         gateway every 30 s — needed when the group runs with
-#                         IDLE_SHUTDOWN=heartbeat; cl_salad_deploy sets it
-#                         automatically from the group env)
+#   SALAD_HEARTBEAT       default 1 — send a 1-token keepalive to the gateway
+#                         every 30 s so a heartbeat-mode group survives the
+#                         session (SALAD_HEARTBEAT=0 to opt out; harmless on
+#                         groups without the watchdog)
 #   CLAUDE_CODE_MAX_CONTEXT_TOKENS / CLAUDE_CODE_MAX_OUTPUT_TOKENS  token caps
 #
 # NOTE on token caps: the served model has n_ctx = 90112 (CTX_SIZE=90000,
@@ -148,9 +148,11 @@ done
 # loop posts a 1-token completion through the gateway every 30 s while this
 # session lives, so the group self-stops shortly after a dead connection
 # (closed terminal, lost SSH) instead of billing for hours. Real chat traffic
-# also counts as activity — the pinger is just the floor. cl_salad_deploy
-# exports SALAD_HEARTBEAT=1 automatically when the group env says heartbeat.
-if [ "${SALAD_HEARTBEAT:-0}" = "1" ]; then
+# also counts as activity — the pinger is just the floor. ON BY DEFAULT: a
+# bare `cl_salad https://<dns>` on a heartbeat group must keep it alive
+# (SALAD_HEARTBEAT=0 opts out). cl_salad_deploy also exports it from the
+# group env.
+if [ "${SALAD_HEARTBEAT:-1}" = "1" ]; then
     (
         while :; do
             curl -m 10 -s -o /dev/null \
