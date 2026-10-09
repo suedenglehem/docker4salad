@@ -28,8 +28,10 @@ draft source — DRAFT_MODEL_FILE/REPO are gone), and
   Every other value below mirrors the live 'qwen38-27b-rtx5090' group in
   project 'qwen38-27b' (GET 2026-09-30): gateway port 8888 (http, auth true,
   round_robin, 100 s timeouts), readiness probe HTTP /ready on 8889 with
-  120 s initial delay, priority 'batch', restart 'always', autostart off,
-  scheduled scaling on. The only differences are the model env, the card
+  120 s initial delay, restart 'always', autostart off, scheduled
+  scaling on; placement priority defaults to 'medium' (the live group
+  ran 'batch'; --priority overrides). The only differences are the model
+  env, the card
   (RTX 3090, not 5090), and the image tag.
 
 Env sized for the 24 GB card: Qwen3.8-9B Q4_K_M weights + KV are ~6 GB, so
@@ -116,6 +118,14 @@ READINESS_PROBE = {
 # keepalive pings (run the client with SALAD_HEARTBEAT=1).
 IDLE_SHUTDOWN = "none"
 IDLE_SHUTDOWN_CHOICES = ("none", "idle", "heartbeat")
+# Placement priority (create-only, not PATCHable): Salad places low/batch
+# instances best-effort and evicts them as soon as higher-priority work
+# lands — observed live 2026-10-09: a 'low' group churned through 9
+# placements in ~21 min while 372 'high' vs 5 'low' GPUs of its exact
+# profile were available. medium is the floor for a group expected to
+# actually run; high for latency-critical deployments.
+PRIORITY = "medium"
+PRIORITY_CHOICES = ("high", "medium", "low", "batch")
 
 
 def parse_args() -> argparse.Namespace:
@@ -162,6 +172,13 @@ def parse_args() -> argparse.Namespace:
                              "(mode heartbeat) before the watchdog kills the container. The "
                              "client pinger fires every ~30 s, so keep this at ~2x the pinger "
                              "period or more (60 s minimum) or pinger jitter can false-kill")
+    parser.add_argument("--priority", choices=PRIORITY_CHOICES, default=PRIORITY,
+                        help="placement priority (create-only): high > medium > low > batch. "
+                             "Default medium — low/batch instances are placed best-effort and "
+                             "evicted whenever higher-priority work lands (2026-10-09: a 'low' "
+                             "group churned 9 placements in ~21 min while 372 high vs 5 low "
+                             "GPUs were available). high for latency-critical; batch only for "
+                             "near-free tolerant placement")
     return parser.parse_args()
 
 
@@ -265,14 +282,14 @@ def main() -> int:
         shm_size=64,
         storage_amount=storage_amount,
         image_caching=True,
-        priority="batch",
+        priority=args.priority,
         networking=NETWORKING,
         readiness_probe=READINESS_PROBE,
         scheduled_scaling_enabled=True,
     )
     print(f"[4/5] creating container group {group!r} in project {project!r}")
     print(f"      image={args.image!r} replicas=1 cpu=8 memory={memory_mb} MB "
-          f"disk={storage_amount} bytes shm={64} MB")
+          f"disk={storage_amount} bytes shm={64} MB priority={args.priority}")
     print(f"      env={json.dumps(env)}")
     result = create_container_group(org, project, request)
     print(f"      HTTP {result.status_code} {result.reason_phrase} "

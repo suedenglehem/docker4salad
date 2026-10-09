@@ -149,6 +149,14 @@ GPU_CHOICES = ("rtx5090", "rtx3090")
 # keepalive pings (run the client with SALAD_HEARTBEAT=1).
 IDLE_SHUTDOWN = "none"
 IDLE_SHUTDOWN_CHOICES = ("none", "idle", "heartbeat")
+# Placement priority (create-only, not PATCHable): Salad places low/batch
+# instances best-effort and evicts them as soon as higher-priority work
+# lands — observed live 2026-10-09: a 'low' group churned through 9
+# placements in ~21 min while 372 'high' vs 5 'low' GPUs of its exact
+# profile were available. medium is the floor for a group expected to
+# actually run; high for latency-critical deployments.
+PRIORITY = "medium"
+PRIORITY_CHOICES = ("high", "medium", "low", "batch")
 
 # Readiness failure window for a cold worker: 30 s delay + 20 x 120 s =
 # 2430 s (~40 min). The spec caps failure_threshold at 20, period at 120,
@@ -222,6 +230,13 @@ def parse_args() -> argparse.Namespace:
                              "(mode heartbeat) before the watchdog kills the container. The "
                              "client pinger fires every ~30 s, so keep this at ~2x the pinger "
                              "period or more (60 s minimum) or pinger jitter can false-kill")
+    parser.add_argument("--priority", choices=PRIORITY_CHOICES, default=PRIORITY,
+                        help="placement priority (create-only): high > medium > low > batch. "
+                             "Default medium — low/batch instances are placed best-effort and "
+                             "evicted whenever higher-priority work lands (2026-10-09: a 'low' "
+                             "group churned 9 placements in ~21 min while 372 high vs 5 low "
+                             "GPUs were available). high for latency-critical; batch only for "
+                             "near-free tolerant placement")
     parser.add_argument("--no-start", action="store_true", help="apply config only, do not start")
     return parser.parse_args()
 
@@ -439,7 +454,7 @@ def main() -> int:
         print(f"      HTTP {result.status_code} {result.reason_phrase} status={result.current_status!r}")
     else:
         print(f"[3/5] group absent — creating (memory={int(round(args.memory_size * 1024))} MB, "
-              f"disk={int(round(args.disk_size * 1024**3))} bytes, "
+              f"disk={int(round(args.disk_size * 1024**3))} bytes, priority={args.priority}, "
               f"gpu={[g.name for g in gpus]!r})")
         try:
             proj = create_project(org, project)
@@ -467,7 +482,7 @@ def main() -> int:
             shm_size=64,
             storage_amount=int(round(args.disk_size * 1024**3)),
             image_caching=True,
-            priority="low",
+            priority=args.priority,
             networking={
                 "auth": True,
                 "client_request_timeout": 100000,
