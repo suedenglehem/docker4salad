@@ -129,6 +129,10 @@ ENV DEBIAN_FRONTEND=noninteractive \
 #                 `vi` symlink is added explicitly below (swap for full `vim` if needed)
 #   htop        - interactive process monitor
 #   bmon        - network bandwidth monitor (per-interface RX/TX rates)
+#   iputils-ping - ping (ICMP). Needs CAP_NET_RAW: docker run --cap-add=NET_RAW
+#                 works locally, Salad workers may deny the capability
+#                 ("ping: Operation not permitted") — installed for the cases
+#                 where it works. scp ships with openssh-client (above).
 #   net-tools   - classic network tools (ifconfig/netstat/route) for debugging container networking
 #   socat       - forwards all IPv6 TCP :8888 to the llama-server on 127.0.0.1:8080 (see CMD)
 #   libncurses6/libtinfo6 - runtime libs of the nvtop binary built in stage 1
@@ -142,6 +146,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     wget2 \
     openssh-client \
+    iputils-ping \
     vim-tiny \
     htop \
     bmon \
@@ -211,18 +216,28 @@ COPY qwen3.8.q6.jinja ${LLAMA_CPP_DIR}/qwen3.8.q6.jinja
 #   stats.sh    - llama-server statistics (generation/prompt tps, queue,
 #                 token totals, spec-decode) scraped from the local
 #                 /metrics endpoint (llama_stats.py, also on PATH).
-#                 `stats.sh --interval 2` for a live view.
+#                 `stats.sh --interval 2` for a live view. Aliased as
+#                 `llama-stats` (symlink below) — the local-only stats command
+#                 (it talks to 127.0.0.1:${PORT} and nothing else).
 #   idle_watchdog.py - idle/heartbeat self-shutdown watchdog (started by the
 #                 CMD below when IDLE_SHUTDOWN is armed; see its docstring and
 #                 the ENV block below).
+#   bw_reporter.py - HF-download bandwidth sampler (started by the entry
+#                 script right before the model download; appends
+#                 `epoch bytes` lines to ${API_STATE_DIR}/bw.log every 10 s
+#                 for the manage_groups.py bandwidth arbitrator to read over
+#                 SSH; self-exits when llama-server /health answers ok).
 COPY llm.sh /usr/local/bin/llm.sh
 COPY question.sh /usr/local/bin/question.sh
 COPY version.sh /usr/local/bin/version.sh
 COPY llama_stats.py /usr/local/bin/llama_stats.py
 COPY stats.sh /usr/local/bin/stats.sh
 COPY idle_watchdog.py /usr/local/bin/idle_watchdog.py
+COPY bw_reporter.py /usr/local/bin/bw_reporter.py
 RUN chmod +x /usr/local/bin/llm.sh /usr/local/bin/question.sh /usr/local/bin/version.sh \
     /usr/local/bin/llama_stats.py /usr/local/bin/stats.sh /usr/local/bin/idle_watchdog.py \
+    /usr/local/bin/bw_reporter.py \
+    && ln -sf /usr/local/bin/stats.sh /usr/local/bin/llama-stats \
     && printf '#!/bin/sh\nexec ps -p 1 -o etime=\n' > /usr/local/bin/uptime \
     && chmod +x /usr/local/bin/uptime
 

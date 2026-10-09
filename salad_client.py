@@ -61,6 +61,11 @@ USER_AGENT = "salad-cloud-python-client/1.0"
 # string, minLength 2, maxLength 63, pattern ^[a-z][a-z0-9-]{0,61}[a-z0-9]$
 _NAME_RE = re.compile(r"^[a-z][a-z0-9-]{0,61}[a-z0-9]$")
 
+# ContainerGroupInstanceID path param (spec components/schemas): format uuid.
+_UUID_RE = re.compile(
+    r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+)
+
 
 class SaladApiError(Exception):
     """Non-success response from the SaladCloud API."""
@@ -709,11 +714,15 @@ class ContainerGroupInstanceInfo:
     """
 
     id: str
-    state: str | None  # running|...
+    state: str | None  # allocating|downloading|creating|running|stopping
     ready: bool | None
     ssh_ip: str | None
     ssh_port: int | None
     ssh_host_key_fingerprint: str | None
+    machine_id: str | None  # Salad node identity — changes on reallocation;
+    # the bandwidth arbitrator uses it to prove each shot lands on a new node
+    # (a rejected node is excluded from the account pool for 48 h per docs)
+    pulling_progress: int | None  # IMAGE pull % (NOT the HF model download)
     raw: dict = field(repr=False)
 
     @classmethod
@@ -725,6 +734,8 @@ class ContainerGroupInstanceInfo:
             ssh_ip=payload.get("ssh_ip"),
             ssh_port=payload.get("ssh_port"),
             ssh_host_key_fingerprint=payload.get("ssh_host_key_fingerprint"),
+            machine_id=payload.get("machine_id"),
+            pulling_progress=payload.get("pulling_progress"),
             raw=payload,
         )
 
@@ -762,6 +773,55 @@ def list_container_group_instances(
         items = payload.get("instances") or []
         return tuple(
             ContainerGroupInstanceInfo.from_json(item) for item in items if isinstance(item, dict)
+        )
+    raise SaladApiError(status, _parse_problem(raw), raw.decode("utf-8", "replace"))
+
+
+@dataclass(frozen=True)
+class ReallocateContainerGroupInstanceResult:
+    """Spec defines 202 Accepted with no response content; headers kept generically."""
+
+    status_code: int
+    reason_phrase: str
+    headers: dict[str, str] = field(default_factory=dict)
+
+
+def reallocate_container_group_instance(
+    organization_name: str,
+    project_name: str,
+    container_group_name: str,
+    container_group_instance_id: str,
+    api_key: str | None = None,
+    timeout: float = 30.0,
+) -> ReallocateContainerGroupInstanceResult:
+    """Reallocate a container group instance to a different Salad Node
+    (POST .../instances/{id}/reallocate).
+
+    operationId: reallocate_container_group_instance; 202 Accepted with no
+    body. Salad places the group's workload on a NEW node and excludes the
+    rejected node from the account's allocation pool for 48 h (docs:
+    tutorials/performance/network-bandwidth-checks), so repeated shots land
+    on genuinely new hosts. The GROUP IS NEVER STOPPED — this is the
+    bandwidth arbitrator's kill lever (stop/SIGTERM would create a
+    stop/start loop across a row of slow nodes). Raises SaladApiError for
+    404/429/default per the spec.
+    """
+    _validate_group_names(organization_name, project_name, container_group_name)
+    if not _UUID_RE.match(container_group_instance_id):
+        raise ValueError(
+            f"container_group_instance_id={container_group_instance_id!r} is not "
+            r"uuid-shaped (^[0-9a-fA-F]{8}-…-{12}$)"
+        )
+    key = api_key if api_key is not None else load_api_key()
+    path = (
+        f"/organizations/{organization_name}/projects/{project_name}"
+        f"/containers/{container_group_name}/instances/"
+        f"{container_group_instance_id}/reallocate"
+    )
+    status, reason, headers, raw = _http("POST", path, key, timeout=timeout)
+    if status == 202:
+        return ReallocateContainerGroupInstanceResult(
+            status_code=status, reason_phrase=reason, headers=headers
         )
     raise SaladApiError(status, _parse_problem(raw), raw.decode("utf-8", "replace"))
 

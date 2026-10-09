@@ -1,8 +1,9 @@
 #!/bin/bash
 # Entrypoint for the lmss_qwen38_q6_mtp_vision image (baked Qwen3.8-27B-Uncensored
 # draft + vision, q8_0 KV cache). Starts the helper daemons (api_app, two socat
-# port forwarders, and the idle/heartbeat watchdog) in the background, downloads
-# the main model on first start, then runs llama-server as a TRAPPED CHILD of this
+# port forwarders, the idle/heartbeat watchdog, and the HF-download bandwidth
+# reporter) in the background, downloads the main model on first start, then
+# runs llama-server as a TRAPPED CHILD of this
 # PID-1 bash (not exec'd) so the watchdog's SIGTERM lands. With the group's
 # restart_policy=never that self-exit leaves the Salad group STOPPED (free).
 # The draft and mmproj are baked into the image; USE_DRAFT_MODEL toggles the
@@ -16,6 +17,7 @@ nohup python3 run_api.py >>"${API_STATE_DIR}/api.log" 2>&1 &
 nohup socat TCP6-LISTEN:8888,fork,reuseaddr TCP4:127.0.0.1:8080 >>"${API_STATE_DIR}/socat.log" 2>&1 &
 nohup socat TCP6-LISTEN:8889,fork,reuseaddr TCP4:127.0.0.1:9999 >>"${API_STATE_DIR}/socat2.log" 2>&1 &
 nohup python3 /usr/local/bin/idle_watchdog.py >>"${API_STATE_DIR}/watchdog.log" 2>&1 &
+nohup python3 /usr/local/bin/bw_reporter.py >>"${API_STATE_DIR}/bw_reporter.log" 2>&1 &
 
 if [ ! -f "${MODEL_DIR}/${MODEL_FILE}" ]; then
   touch "${API_STATE_DIR}/download_started"

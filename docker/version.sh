@@ -140,6 +140,16 @@ if printf '%s' "$MARKERS" | grep -q 'idle_watchdog'; then
       echo "        gets rescheduled and keeps billing)"
     fi
   fi
+  if printf '%s' "$MARKERS" | grep -q 'bw_reporter'; then
+    echo "     -> BW-REPORTER generation: + bw_reporter.py (HF download bandwidth"
+    echo "        sampler; appends 'epoch bytes' lines to \${API_STATE_DIR}/bw.log"
+    echo "        every 10 s during the model download, self-exits on llama-server"
+    echo "        /health; read by the manage_groups.py bandwidth arbitrator over"
+    echo "        SSH). Own log: \${API_STATE_DIR}/bw_reporter.log; live check:"
+    echo "        ps -eo pid,args | grep bw_reporter"
+    echo "     -> + llama-stats (symlink to stats.sh, local-only stats) and"
+    echo "        iputils-ping (ping needs CAP_NET_RAW; scp ships with openssh-client)"
+  fi
 elif printf '%s' "$MARKERS" | grep -q 'DRAFT_MODEL_URL'; then
   echo "  -> V3 (wget2) image: draft/vision downloaded at runtime via"
   echo "     DRAFT_MODEL_URL / VISION_MODEL_URL"

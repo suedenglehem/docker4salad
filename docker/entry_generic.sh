@@ -1,9 +1,10 @@
 #!/bin/bash
 # Entrypoint for the lmss_generic image (vanilla llama.cpp, q8_0 KV cache).
-# Starts the helper daemons (api_app, two socat port forwarders, and the
-# idle/heartbeat watchdog) in the background, downloads the model / draft /
-# vision on first start, then runs llama-server as a TRAPPED CHILD of this
-# PID-1 bash (not exec'd) so the watchdog's SIGTERM lands. With the group's
+# Starts the helper daemons (api_app, two socat port forwarders, the
+# idle/heartbeat watchdog, and the HF-download bandwidth reporter) in the
+# background, downloads the model / draft / vision on first start, then runs
+# llama-server as a TRAPPED CHILD of this PID-1 bash (not exec'd) so the
+# watchdog's SIGTERM lands. With the group's
 # restart_policy=never that self-exit leaves the Salad group STOPPED (free).
 # CWD is /opt/llama.cpp (the image WORKDIR); helper paths are CWD-relative.
 
@@ -15,6 +16,7 @@ nohup python3 run_api.py >>"${API_STATE_DIR}/api.log" 2>&1 &
 nohup socat TCP6-LISTEN:8888,fork,reuseaddr TCP4:127.0.0.1:8080 >>"${API_STATE_DIR}/socat.log" 2>&1 &
 nohup socat TCP6-LISTEN:8889,fork,reuseaddr TCP4:127.0.0.1:9999 >>"${API_STATE_DIR}/socat2.log" 2>&1 &
 nohup python3 /usr/local/bin/idle_watchdog.py >>"${API_STATE_DIR}/watchdog.log" 2>&1 &
+nohup python3 /usr/local/bin/bw_reporter.py >>"${API_STATE_DIR}/bw_reporter.log" 2>&1 &
 
 # resolve_model_ref REF -> sets REPO_REF/FILE_REF, returns 1 for empty/none.
 #   hf://user/repo/path/file.gguf -> REPO_REF=user/repo  FILE_REF=path/file.gguf

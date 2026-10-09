@@ -30,7 +30,8 @@ The two keys to the whole setup:
 | **`salad_proxy.py`** | `claude/` | Stdlib Anthropic↔OpenAI bridge. Injects `Salad-Api-Key`, translates requests + streaming SSE + tool calls. Run by `cl_salad`. |
 | `version.sh` | `docker/` | Run **inside a running instance** (via SSH) to confirm *which build* is actually live and what it's downloading. |
 | `idle_watchdog.py` | `docker/` (installed in the image) | In-container **idle/heartbeat self-shutdown (v2.1)**: arms on the group `/ready` endpoint (the probe's own), holds `IDLE_ARM_GRACE`, then after `IDLE_TIMEOUT`/`HEARTBEAT_TIMEOUT` s of no traffic **POSTs the Salad group `/stop`** (account-wide key, `SALAD_STOP_KEY=b64:<base64>` obfuscated storage, decoded at startup) and SIGTERMs the container — the only kill that truly stops billing (a bare self-exit gets RESCHEDULED, paid test 2026-10-09). Key `none`/missing/undecodable **disables the watchdog**. Deployers: `--idle-shutdown none|idle|heartbeat` + `--stop-key <file>`. |
-| `stats.sh` | `docker/` | Run **inside a running instance**: llama-server stats — tps, queue, token totals (scrapes the local `/metrics`). |
+| `stats.sh` | `docker/` | Run **inside a running instance**: llama-server stats — tps, queue, token totals (scrapes the local `/metrics`). Aliased **`llama-stats`** in the image (local-only; works under Salad's shell-less SSH exec). |
+| `bw_reporter.py` | `docker/` (installed in the image) | In-container **HF-download bandwidth sampler**: appends `epoch bytes` (size of `MODEL_DIR`, `os.lstat` sum) to `${API_STATE_DIR}/bw.log` every 10 s and self-exits when llama-server `/health` is ok. Reports only — no verdicts, no API calls. Read over SSH by the `manage_groups.py` **bandwidth arbitrator** (`start --min-bw-mbps`). |
 | `utils/llama_stats.py` | `utils/` | Same stats **from the host**, against a Salad gateway URL (key auto-loaded) or a local server. |
 | `curl_salad.sh` | `claude/` | Quick smoke test — asks the running model 2-3 simple questions through the gateway. |
 | `salad_client.py` | repo root | Stdlib-only SaladCloud OpenAPI client (create/start/stop/delete/patch groups, GPU classes, projects). |
@@ -200,6 +201,8 @@ Scrapes `/metrics` (every Dockerfile enables `--metrics`):
 # inside a running instance (Salad SSH or docker exec):
 stats.sh                     # one-shot
 stats.sh --interval 2        # live view (Ctrl-C to stop)
+llama-stats --once           # same command, aliased name (local-only; survives
+                             # Salad's shell-less SSH exec — one plain command)
 
 # from the host, against a Salad gateway (key auto-loaded from deploy/salad_api.txt):
 python3 utils/llama_stats.py https://<group>.salad.cloud
@@ -209,6 +212,45 @@ Generation/prompt tps, processing/deferred requests, token totals, max sequence
 length, and — when a draft model is enabled — spec-decode accept rate. `--raw`
 dumps the raw Prometheus body; `llamacpp:*` metrics not rendered above are
 listed under "other" so a rename in a future llama.cpp build is visible.
+
+### Bandwidth arbitrator — `manage_groups.py start --min-bw-mbps N`
+
+HF model downloads (10–30 GB GGUFs) on Salad's residential-node fleet can crawl at
+single-digit Mbps, turning a cold start into hours. The arbitrator keeps the download
+on a host that is fast enough. Available **only** when the group is started through
+`manage_groups.py` — the container side just reports, the manager owns every verdict.
+
+```bash
+python3 utils/manage_groups.py start ma-casa-in-paris --min-bw-mbps 30
+```
+
+1. **Acquire** — poll the API until a live instance is `running` with SSH fields and a
+   `machine_id` not already rejected. A stuck image pull (`state=downloading`,
+   `pulling_progress` flat > 15 min) counts as a shot: registry pull speed is a
+   node-bandwidth proxy.
+2. **Measure** — every 15 s, `ssh -p PORT root@IP tail -n 80 /tmp/llama-api/bw.log`
+   (Salad SSH is a shell-less OCI exec: exactly **one** plain command per call). The
+   verdict is the **median** of the per-interval rates inside the last 120 s, after a
+   60 s ramp grace, needing ≥ 6 samples. Median, not mean: an xet retry shows up as a
+   zero delta and the median absorbs it.
+3. **Verdict** — median ≥ cap → host accepted, exit 0 (download continues; use `wait`
+   for readiness). Median < cap → **POST the instance `/reallocate`** endpoint: Salad
+   places the group on a new node and excludes the rejected one from the account pool
+   for 48 h, so each shot is a genuinely new host. Max **3 shots**; the **4th host is
+   kept unconditionally** and the download proceeds on it.
+
+The group is **never stopped** for bandwidth — SIGTERM/`/stop` on a row of slow nodes
+would build a stop/start loop that bills forever. `/reallocate` is the only lever.
+
+Exit codes: `0` accepted / download complete / 4th host kept · `1` group bailed
+(`stopped`/`failed`/…) · `2` usage (`--min-bw-mbps` is `start`-only, must be > 0) ·
+`3` arbitrator bail (no instance in 10 min, 4 consecutive SSH failures, frozen
+`bw.log` = reporter dead, `bw.log` missing = image predates `bw_reporter`,
+reallocate API failure). Ctrl-C leaves the group running as-is.
+
+Needs the bw_reporter images: base/generic `cuda128-v8`, q6 `cuda128-v10`,
+ampere `cuda130-v6`. Offline harness (zero credits): `python3 -I
+tmp/test_arbitrator_offline.py`.
 
 ### `curl_salad.sh` — quick smoke test
 
@@ -393,7 +435,8 @@ on_salad/
 │   ├── run_api.py                  # status-API entrypoint (COPYed in — a build file)
 │   ├── version.sh                  # in-container build/download inspector
 │   ├── idle_watchdog.py            # in-container idle/heartbeat self-shutdown
-│   ├── stats.sh / llama_stats.py   # in-container stats (tps/queue/totals) via /metrics
+│   ├── bw_reporter.py              # HF-download bandwidth sampler -> bw.log (feeds the arbitrator)
+│   ├── stats.sh / llama_stats.py   # in-container stats (tps/queue/totals) via /metrics; aliased llama-stats
 │   ├── docker-compose.yml          # local 27B + 9B services
 │   ├── api.txt                     # local LLM key (gitignored, chmod 600)
 │   └── README.md                   # Docker / local-run details (image, compose, probes)
@@ -408,7 +451,7 @@ on_salad/
 │   ├── curl_salad.sh               # gateway smoke test
 │   └── salad_api.txt               # gateway key (gitignored)
 ├── utils/
-│   ├── manage_groups.py            # group manager: list/refresh/start/stop/wait/stats/delete
+│   ├── manage_groups.py            # group manager: list/refresh/start/stop/wait/stats/delete + bandwidth arbitrator (start --min-bw-mbps)
 │   ├── llama_stats.py              # stats entry point (delegates to docker/llama_stats.py)
 │   ├── billing.py                  # per-org portal credit balances (USD + EUR)
 │   ├── portal_vault.gpg            # billing vault (GPG AES256, gitignored)

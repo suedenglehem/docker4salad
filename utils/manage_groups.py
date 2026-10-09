@@ -23,12 +23,31 @@ Usage:
   ORG       ma-casa-in-paris | akl-on-salad (default: every known org)
   --interval N
             poll period in seconds for refresh / wait / stats (default 5)
+  --min-bw-mbps N
+            start only: BANDWIDTH ARBITRATOR — after the start is accepted,
+            watch the HF model download's speed (read from the container's
+            ${API_STATE_DIR}/bw.log over SSH, written by docker/bw_reporter.py)
+            and when the median rate over a 2-min window falls below N Mbps,
+            force Salad to REALLOCATE the instance to a new node via the API
+            (the rejected node is excluded from the account's allocation pool
+            for 48 h, so each shot lands on a genuinely new host). Max 3
+            shots; if no faster host appears in 3 shots the 4th host is KEPT
+            and the download continues. The group is NEVER stopped/SIGTERMed
+            for this — reallocate is the only lever (a stop/start loop across
+            a row of slow nodes is exactly what kills billing hygiene).
+            Needs the bw_reporter image generation (base/generic v8, q6 v10,
+            ampere v6) and SSH access to the instance (account-level key).
+            Exit codes: 0 accepted / download complete / kept 4th host;
+            1 group bail (group stopped/failed); 2 usage; 3 arbitrator bail
+            (persistent ssh failure, alloc timeout, reallocate API failure,
+            missing bw.log = old image). Ctrl-C leaves the group running.
 
   python3 utils/manage_groups.py                     # status, all known orgs
   python3 utils/manage_groups.py akl-on-salad        # one org
   python3 utils/manage_groups.py refresh             # live table, Ctrl-C to stop
   python3 utils/manage_groups.py delete              # numbered table -> prompt -> confirm
   python3 utils/manage_groups.py start akl-on-salad  # start a group in that org
+  python3 utils/manage_groups.py start --min-bw-mbps 30   # start + arbitrator
   python3 utils/manage_groups.py wait                # after start: poll until ready
   python3 utils/manage_groups.py stats               # stats, only if fully ready
 
@@ -57,6 +76,8 @@ from __future__ import annotations
 
 import os
 import runpy
+import statistics
+import subprocess
 import sys
 import time
 from datetime import datetime, timezone
@@ -80,6 +101,32 @@ ACTIONS = ("list", "refresh", "start", "stop", "wait", "stats", "delete")
 # to via runpy — the same pattern as utils/llama_stats.py.
 _LLM_STATS = os.path.normpath(
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "docker", "llama_stats.py")
+)
+
+# --- Bandwidth arbitrator (start --min-bw-mbps) ------------------------------
+# The container's bw_reporter.py samples MODEL_DIR size every 10 s into
+# BW_LOG_PATH; the arbitrator reads the tail over SSH (Salad SSH is a
+# shell-less OCI exec — exactly ONE plain command per call), takes the
+# median rate over BW_VERDICT_WINDOW, and POSTs the instance /reallocate
+# endpoint when it is below the cap. The group is never stopped.
+BW_POLL_INTERVAL = 15.0    # manager read period (reporter samples every 10 s)
+BW_RAMP_GRACE = 60.0       # skip the first minute (baseline + ramp) before measuring
+BW_VERDICT_WINDOW = 120.0  # median over rates inside the last 2 min decides
+BW_MIN_SAMPLES = 6         # minimum rate samples in the window before a verdict
+BW_MAX_SHOTS = 3           # reallocate attempts; the 4th host is kept unconditionally
+BW_SSH_TIMEOUT = 20.0      # per-probe ssh timeout (seconds)
+BW_SSH_STRIKES = 4         # consecutive ssh failures before bailing
+BW_ALLOC_TIMEOUT = 600.0   # max wait for a running instance with ssh fields
+BW_PULL_TIMEOUT = 900.0    # max time in image-pull state; a stuck pull counts as a shot
+BW_LOG_FROZEN = 180.0      # no new bw.log lines while not ready => reporter dead
+BW_TAIL_LINES = 80         # ~13 min of 10 s samples per probe
+BW_LOG_PATH = "/tmp/llama-api/bw.log"
+BW_SSH_OPTS = (
+    "-o", "StrictHostKeyChecking=no",
+    "-o", "UserKnownHostsFile=/dev/null",
+    "-o", "ConnectTimeout=10",
+    "-o", "BatchMode=yes",
+    "-o", "LogLevel=ERROR",
 )
 
 
@@ -481,8 +528,246 @@ def _stats(scope: str, name: str, key: str, interval: float) -> int:
     return 0
 
 
+def _bw_read(inst: sc.ContainerGroupInstanceInfo) -> "tuple[list[tuple[int, int]] | None, str | None)":
+    """Read the tail of the instance's bw.log over SSH. Salad's SSH exec is
+    shell-less (one plain command per call — no pipes/;/quotes), so the probe
+    is exactly `tail -n N <path>`. Returns (pairs, None) on success (pairs
+    may be empty), or (None, kind) where kind is "missing" (file absent —
+    the image predates bw_reporter) or a connection description (strike)."""
+    cmd = [
+        "ssh", *BW_SSH_OPTS, "-p", str(inst.ssh_port), f"root@{inst.ssh_ip}",
+        "tail", "-n", str(BW_TAIL_LINES), BW_LOG_PATH,
+    ]
+    try:
+        p = subprocess.run(cmd, capture_output=True, text=True, timeout=BW_SSH_TIMEOUT)
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as e:
+        return None, f"conn ({e.__class__.__name__})"
+    if p.returncode == 0:
+        pairs: list[tuple[int, int]] = []
+        for line in p.stdout.splitlines():
+            parts = line.split()
+            if len(parts) == 2 and parts[0].isdigit() and parts[1].isdigit():
+                pairs.append((int(parts[0]), int(parts[1])))
+        return pairs, None
+    if p.returncode == 1 and "cannot open" in p.stderr:
+        return None, "missing"
+    return None, f"conn (exit {p.returncode}: {p.stderr.strip()[:120]})"
+
+
+def _bw_rates(pairs: "list[tuple[int, int]]") -> "list[tuple[int, float]]":
+    """Per-interval download rates as (end_epoch, Mbps). Negative deltas (xet
+    restarts a partial) floor at 0 — the median absorbs the dip."""
+    rates: list[tuple[int, float]] = []
+    for (t0, b0), (t1, b1) in zip(pairs, pairs[1:]):
+        dt = t1 - t0
+        if dt <= 0:
+            continue
+        rates.append((t1, max(0, b1 - b0) * 8.0 / dt / 1e6))
+    return rates
+
+
+def _bw_acquire(
+    org: str, project: str, name: str, key: str, excluded: "set[str]", interval: float
+) -> "tuple[sc.ContainerGroupInstanceInfo | None, str | int | None]":
+    """Poll until a live instance is `running` with ssh fields and a
+    machine_id not already excluded. Returns (inst, None) when usable;
+    (None, 1) when the group bailed (stopped/failed/...); (None, 3) on alloc
+    timeout; (inst, "pull") when the image pull is stuck past
+    BW_PULL_TIMEOUT (the caller spends a shot on it — registry pull
+    bandwidth is a node-bandwidth proxy)."""
+    no_inst_since = time.monotonic()
+    pull_since: float | None = None
+    while True:
+        try:
+            g = sc.get_container_group(org, project, name, api_key=key)
+        except sc.SaladApiError as e:
+            print(f"error: {e}")
+            return None, 1
+        status = g.current_status or "?"
+        ts = datetime.now(timezone.utc).strftime("%H:%M:%S")
+        if status in ("stopped", "succeeded", "failed", "error", "deleted"):
+            print(f"bail: {name} is {status} — arbitrator stops, group left as-is")
+            return None, 1
+        if status == "running":
+            live = _live_instances(org, project, name, key)
+            if live:
+                inst = live[-1]  # newest wins (replicas=1 prod assumption)
+                if inst.state == "running" and inst.ssh_ip and inst.ssh_port \
+                        and (inst.machine_id or "") not in excluded:
+                    print(f"{ts} UTC  acquired: instance {inst.id[:8]} on node "
+                          f"{inst.machine_id or '?'} — measuring download bandwidth")
+                    return inst, None
+                if inst.state == "downloading":
+                    if pull_since is None:
+                        pull_since = time.monotonic()
+                    prog = inst.pulling_progress
+                    prog_s = f"{prog}%" if prog is not None else "?"
+                    print(f"{ts} UTC  image pull {prog_s} ({time.monotonic() - pull_since:.0f}s)")
+                    if time.monotonic() - pull_since > BW_PULL_TIMEOUT:
+                        print(f"image pull stuck > {BW_PULL_TIMEOUT:.0f}s at {prog_s} — "
+                              f"counts as a shot")
+                        return inst, "pull"
+                    no_inst_since = time.monotonic()
+                else:
+                    pull_since = None
+                    no_inst_since = time.monotonic()
+                    print(f"{ts} UTC  instance {inst.state or '?'} — waiting for "
+                          f"running + ssh fields")
+            else:
+                pull_since = None
+                print(f"{ts} UTC  no instances yet")
+                if time.monotonic() - no_inst_since > BW_ALLOC_TIMEOUT:
+                    print(f"bail: no instance appeared within {BW_ALLOC_TIMEOUT:.0f}s")
+                    return None, 3
+        time.sleep(interval)
+
+
+def _bw_measure(
+    org: str, project: str, name: str, key: str,
+    inst: sc.ContainerGroupInstanceInfo, cap_mbps: float, shots: int
+) -> "tuple[str, float]":
+    """Watch bw.log until a verdict. Returns (verdict, mbps):
+      "fast"   median >= cap — host accepted
+      "slow"   median < cap — spend a shot
+      "done"   instance ready via API — download+load complete
+      "churn"  instance id changed (Salad rescheduled on its own) — re-measure
+      "group"  group stopped/failed — bail 1
+      "ssh"    BW_SSH_STRIKES consecutive ssh failures — bail 3
+      "noimg"  bw.log missing/empty — image predates bw_reporter, bail 3
+      "dead"   log frozen BW_LOG_FROZEN while not ready — reporter dead, bail 3
+    All timing is log-time (reporter epochs), so ssh gaps never skew it."""
+    strikes = 0
+    last_ts: int | None = None
+    last_change = time.monotonic()
+    while True:
+        time.sleep(BW_POLL_INTERVAL)
+        ts = datetime.now(timezone.utc).strftime("%H:%M:%S")
+        try:
+            g = sc.get_container_group(org, project, name, api_key=key)
+        except sc.SaladApiError as e:
+            print(f"{ts} UTC  group GET failed (HTTP {e.status_code}) — retrying")
+            continue
+        if (g.current_status or "?") in ("stopped", "succeeded", "failed", "error", "deleted"):
+            return "group", 0.0
+        live = _live_instances(org, project, name, key)
+        cur = live[-1] if live else None
+        if cur is None or cur.id != inst.id:
+            print(f"{ts} UTC  instance churned — re-acquiring (shots unchanged)")
+            return "churn", 0.0
+        if _instance_ready(cur):
+            return "done", 0.0
+        inst = cur
+        pairs, err = _bw_read(inst)
+        if err == "missing" or (err is None and not pairs):
+            print(f"bail: {BW_LOG_PATH} missing/empty — the image predates "
+                  f"bw_reporter; the arbitrator needs the rebuilt images")
+            return "noimg", 0.0
+        if err is not None:
+            strikes += 1
+            print(f"{ts} UTC  ssh probe failed ({strikes}/{BW_SSH_STRIKES}): {err}")
+            if strikes >= BW_SSH_STRIKES:
+                print(f"bail: {BW_SSH_STRIKES} consecutive ssh failures")
+                return "ssh", 0.0
+            continue
+        strikes = 0
+        newest = pairs[-1][0]
+        if last_ts is not None and newest > last_ts:
+            last_change = time.monotonic()
+        last_ts = newest
+        rates = _bw_rates(pairs)
+        span = newest - pairs[0][0]
+        window = [mbps for (t, mbps) in rates if t > newest - BW_VERDICT_WINDOW]
+        if span >= BW_RAMP_GRACE + BW_VERDICT_WINDOW and len(window) >= BW_MIN_SAMPLES:
+            return "verdict", statistics.median(window)
+        if time.monotonic() - last_change > BW_LOG_FROZEN:
+            print(f"bail: {BW_LOG_PATH} frozen > {BW_LOG_FROZEN:.0f}s — reporter dead")
+            return "dead", 0.0
+        last_mbps = rates[-1][1] if rates else 0.0
+        print(f"{ts} UTC  {pairs[-1][1] / 1e6:8.1f} MB  {last_mbps:6.1f} Mbps  "
+              f"(shot {shots}/{BW_MAX_SHOTS})")
+
+
+def _bw_reallocate(
+    org: str, project: str, name: str, key: str,
+    inst: sc.ContainerGroupInstanceInfo, excluded: "set[str]", shot: int, why: str
+) -> bool:
+    """POST the instance /reallocate endpoint — the ONLY kill the arbitrator
+    uses (the group is never stopped; the rejected node is excluded from the
+    account pool for 48 h, so the next placement is a new host)."""
+    print(f"{why} — POST reallocate (shot {shot}/{BW_MAX_SHOTS}) on instance "
+          f"{inst.id[:8]} node {inst.machine_id or '?'}")
+    try:
+        sc.reallocate_container_group_instance(org, project, name, inst.id, api_key=key)
+    except sc.SaladApiError as e:
+        print(f"bail: reallocate failed: {e}")
+        return False
+    if inst.machine_id:
+        excluded.add(inst.machine_id)
+    print("202 Accepted — node excluded from the account pool for 48 h; "
+          "awaiting new placement")
+    return True
+
+
+def _arbitrate(
+    org: str, project: str, name: str, key: str, cap_mbps: float, interval: float
+) -> int:
+    """Bandwidth arbitrator: after a start, keep the HF download on a host
+    whose median download rate clears cap_mbps, reallocating (max
+    BW_MAX_SHOTS times) until it does. The 4th host is kept unconditionally.
+    Exit codes: 0 accepted/complete/kept-4th; 1 group bail; 3 arbitrator
+    bail. Ctrl-C leaves the group running as-is (main's handler)."""
+    print(f"bandwidth arbitrator: {name} — cap {cap_mbps:g} Mbps, max {BW_MAX_SHOTS} "
+          f"reallocations, 4th host kept")
+    print(f"(reads {BW_LOG_PATH} over SSH every {BW_POLL_INTERVAL:g}s; median over "
+          f"{BW_VERDICT_WINDOW:.0f}s; the group is NEVER stopped — only /reallocate)")
+    shots = 0
+    excluded: set[str] = set()
+    while True:
+        inst, code = _bw_acquire(org, project, name, key, excluded, interval)
+        if code == 1:
+            return 1
+        if code == 3:
+            return 3
+        if code == "pull" and inst is not None:
+            if shots >= BW_MAX_SHOTS:
+                print(f"kept the {shots + 1}th host ({inst.machine_id or '?'}) — pull-stuck "
+                      f"and shots exhausted; download continues on it")
+                return 0
+            if not _bw_reallocate(org, project, name, key, inst, excluded,
+                                  shots + 1, "image pull stuck"):
+                return 3
+            shots += 1
+            continue
+        if inst is None:
+            return 3
+        verdict, mbps = _bw_measure(org, project, name, key, inst, cap_mbps, shots)
+        if verdict == "done":
+            print(f"download complete — {name} has a ready instance")
+            return 0
+        if verdict == "group":
+            return 1
+        if verdict == "churn":
+            continue
+        if verdict in ("ssh", "noimg", "dead"):
+            return 3
+        if verdict == "verdict" and mbps >= cap_mbps:
+            print(f"host accepted at {mbps:.1f} Mbps (>= {cap_mbps:g}) — download "
+                  f"continues; use `wait` for readiness")
+            return 0
+        # slow (verdict with median < cap)
+        if shots >= BW_MAX_SHOTS:
+            print(f"kept the {shots + 1}th host ({inst.machine_id or '?'}) at {mbps:.1f} Mbps "
+                  f"— no faster host in {BW_MAX_SHOTS} shots; download continues on it")
+            return 0
+        if not _bw_reallocate(org, project, name, key, inst, excluded,
+                              shots + 1, f"median {mbps:.1f} Mbps < {cap_mbps:g}"):
+            return 3
+        shots += 1
+
+
 def main(argv: list[str]) -> int:
     interval = 5.0
+    min_bw_mbps: float | None = None
     positional: list[str] = []
     i = 1
     while i < len(argv):
@@ -498,6 +783,20 @@ def main(argv: list[str]) -> int:
                 return 2
             if interval <= 0:
                 print("error: --interval must be > 0", file=sys.stderr)
+                return 2
+            i += 2
+            continue
+        if arg == "--min-bw-mbps":
+            if i + 1 >= len(argv):
+                print("error: --min-bw-mbps needs a value", file=sys.stderr)
+                return 2
+            try:
+                min_bw_mbps = float(argv[i + 1])
+            except ValueError:
+                print(f"error: --min-bw-mbps: not a number: {argv[i + 1]!r}", file=sys.stderr)
+                return 2
+            if min_bw_mbps <= 0:
+                print("error: --min-bw-mbps must be > 0", file=sys.stderr)
                 return 2
             i += 2
             continue
@@ -533,6 +832,11 @@ def main(argv: list[str]) -> int:
             )
             return 2
 
+    if min_bw_mbps is not None and action != "start":
+        print("error: --min-bw-mbps applies to `start` only (the arbitrator "
+              "watches the HF download after a start)", file=sys.stderr)
+        return 2
+
     orgs = [org] if org is not None else list(KNOWN_PROJECTS)
     try:
         key = sc.load_api_key()
@@ -567,7 +871,12 @@ def main(argv: list[str]) -> int:
         if not _confirm(action, sel):
             print("aborted — nothing done.")
             return 1
-        return _run_action(action, sel, key)
+        rc = _run_action(action, sel, key)
+        if action == "start" and rc == 0 and min_bw_mbps is not None:
+            # The arbitrator: keep the HF download on a host whose median
+            # download rate clears the cap (max 3 reallocations, 4th kept).
+            return _arbitrate(s_org, s_project, g.name, key, min_bw_mbps, interval)
+        return rc
     except KeyboardInterrupt:
         print("\nstopped — nothing done.")
         return 0

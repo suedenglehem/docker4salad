@@ -5,7 +5,7 @@ Dockerized [llama.cpp](https://github.com/ggml-org/llama.cpp) `llama-server` for
 - **locally** (docker compose, `docker/`) — this box's 16 GB cards → the 9B service;
 - **on SaladCloud** — one card per container, public `*.salad.cloud` gateway; this is where the 27B Claude Code backend lives (deploy + run it on demand, switching cards and quants).
 
-Image build: llama.cpp compiled with CUDA + flash attention + NCCL (`-DGGML_CUDA_NCCL=ON`, pinned commit `3af988fab`, build tag b10572) in a CUDA devel stage, shipped on the `nvidia/cuda:12.8.2-runtime` base (`Dockerfile.multistage`). Binary at `/opt/llama.cpp/build/bin/llama-server`. Also ships a small status API on port **9999** (`/startup`, `/live`, `/ready` — see [Status API](#status-api-port-9999)) and debug tools inside the container: `curl`, `ssh`, `vi`, `htop`, `nvtop` (GPU monitor, built from source — not in Ubuntu 22.04 repos). The fourth image is a **custom build of a llama.cpp fork** (llamAmpere, TurboQuant KV cache) — [the fork build](#the-llamampere-fork-build-lmss_generic_ampere).
+Image build: llama.cpp compiled with CUDA + flash attention + NCCL (`-DGGML_CUDA_NCCL=ON`, pinned commit `3af988fab`, build tag b10572) in a CUDA devel stage, shipped on the `nvidia/cuda:12.8.2-runtime` base (`Dockerfile.multistage`). Binary at `/opt/llama.cpp/build/bin/llama-server`. Also ships a small status API on port **9999** (`/startup`, `/live`, `/ready` — see [Status API](#status-api-port-9999)) and debug tools inside the container: `curl`, `ssh`, `scp` (ships with `openssh-client`), `vi`, `htop`, `bmon` (interface monitor, for eyeballing throughput by hand), `nvtop` (GPU monitor, built from source — not in Ubuntu 22.04 repos), `ping` (`iputils-ping`; needs `CAP_NET_RAW`, so `docker run --cap-add=NET_RAW` — Salad workers may deny it, and `ping` will report "Operation not permitted"), and `llama-stats` (symlink to `stats.sh`: local-only llama-server stats, one plain command, so it works under Salad's shell-less SSH exec). The fourth image is a **custom build of a llama.cpp fork** (llamAmpere, TurboQuant KV cache) — [the fork build](#the-llamampere-fork-build-lmss_generic_ampere).
 
 Models are downloaded on first start into `/models` **inside** the container (no host bind mount), so `docker compose down` removes them — nothing is left behind on the host disk.
 
@@ -200,7 +200,34 @@ Salad bills while a group runs. If a client session dies (lost connection, close
 - Env knobs: `IDLE_SHUTDOWN`, `IDLE_TIMEOUT`, `HEARTBEAT_TIMEOUT`, `IDLE_GRACE`, `IDLE_ARM_GRACE`, `READY_PORT` (9999), `SALAD_STOP_KEY` + `SALAD_ORG`/`SALAD_PROJECT`/`SALAD_GROUP` (the stop path; all four required, set by the deployer), `SALAD_API_BASE` (override for tests only).
 - Log: `${API_STATE_DIR}/watchdog.log` (i.e. `/tmp/llama-api/watchdog.log`); live check `ps -eo pid,args | grep idle_watchdog`. `version.sh` prints the **WATCHDOG generation** — from the PID1 cmdline, or (on the exec-form `entry.sh` images, where PID 1 is just `bash -l /opt/llama.cpp/entry.sh`) by fingerprinting the `entry.sh` script itself — and flags **watchdog v2** when `SALAD_STOP_KEY` is in the script, plus **watchdog v2.1** when the script carries the `b64:` sentinel (b64 key decode + key `none` disables the watchdog).
 
-### Production 27B group: `qwen38-27b-q6k`
+### HF-download bandwidth reporter (`bw_reporter.py`) + the arbitrator
+
+Salad's residential nodes vary wildly in bandwidth, and a 10–30 GB GGUF download is the
+bulk of a cold start. The container side **only reports**; all verdicts and the kill
+lever live in `utils/manage_groups.py`.
+
+- **What it does**: a fifth `nohup … &` helper in the CMD. Every 10 s it sums the file
+  sizes under `MODEL_DIR` and appends `epoch bytes` to `${API_STATE_DIR}/bw.log`
+  (i.e. `/tmp/llama-api/bw.log`), then self-exits once llama-server `/health` answers
+  ok — the same probe `api_app._ready_state` uses, so download+load done = sampling
+  done. It writes a sample on **every** tick, so a frozen log means the reporter is
+  dead (the manager's bail signal), not that the download is quiet.
+- **Why file growth, not `bmon`**: `bmon -o ascii` (also in the image, for manual use)
+  measures the NIC — watchdog ticks, status-API probes and the manager's own SSH
+  sessions all inflate it — and its output is a periodic human-readable block with no
+  epoch timestamps. `MODEL_DIR` growth is the ground truth of "how fast the model is
+  arriving": xet retries, TLS overhead and re-transmissions show on the wire, not in
+  the file. Sizes are summed with `os.lstat` because the model file in `MODEL_DIR` is a
+  **symlink** into the blob cache — `os.stat` through it counts the blob twice.
+- **Never dies**: the whole loop body is wrapped in `try/except`; a failed sample is
+  logged to `${API_STATE_DIR}/bw_reporter.log` and sampling continues.
+- **The arbitrator** (`manage_groups.py start --min-bw-mbps N`, default 30): reads the
+  log tail over SSH every 15 s, takes the median rate over a 120 s window after a 60 s
+  ramp grace, and below the cap POSTs the instance `/reallocate` endpoint — new node,
+  rejected node excluded from the account pool for 48 h. Max 3 shots, **4th host kept**.
+  The group is **never stopped** for bandwidth. See `docs/README.md` → *Bandwidth
+  arbitrator*; live check `ps -eo pid,args | grep bw_reporter`, and `version.sh` prints
+  the **BW-REPORTER generation**.
 
 The 27B Claude Code backend: org `ma-casa-in-paris`, project `qwen38-27b`, one **RTX 3090 (24 GB)**, on-demand. Live config (GET-verified 2026-10-06):
 
@@ -272,7 +299,7 @@ All five take `--org` / `--project` / `--group` (defaults are the groups they're
 
 Stdlib-only; listens on **127.0.0.1 only** (it holds the Salad key — never exposed to the network). Claude Code speaks the Anthropic Messages API; llama-server is OpenAI-only. The proxy translates `POST /v1/messages` → `/v1/chat/completions` and the response back (SSE streaming or JSON), maps `tool_use` / `tool_result` ↔ `tool_calls` / `role:tool`, injects the `Salad-Api-Key` header on every upstream request (read from the key file, never printed), and disables Qwen "thinking" by default so the model emits clean answers rather than a long reasoning preamble (`--thinking 1` to change). Also serves `GET /v1/models` and `GET /healthz`.
 
-Other helpers — local run/test ones in `tests/` at the repo root: `run_27b.sh` / `run_9b*.sh` (compose/run helpers, see above), `curl1.sh` / `curl2.sh` (API check / question→answer on :8080 / :8081, read `api.txt` for the Bearer header — via a local symlink), and `run-nvidia-smi.sh`; the rest of the local ones in `docker/`: `check_status.sh` (status-API probe on :9999 / :9998), `question.sh`, `version.sh` (in-container build fingerprint + env table — the live check for the image-cache caveat above), and `stats.sh` (in-container llama-server stats — tps/queue/totals scraped from `/metrics`; the parser is `llama_stats.py`, also installed in the image and mirrored by `utils/llama_stats.py` for Salad-gateway URLs from the host); Salad-gateway ones in `claude/`: `curl_salad.sh` (the same smoke test against a gateway, with the key) and `chat_salad.sh` (`llm` chat direct against the gateway — `llm -H` carries the Salad-Api-Key).
+Other helpers — local run/test ones in `tests/` at the repo root: `run_27b.sh` / `run_9b*.sh` (compose/run helpers, see above), `curl1.sh` / `curl2.sh` (API check / question→answer on :8080 / :8081, read `api.txt` for the Bearer header — via a local symlink), and `run-nvidia-smi.sh`; the rest of the local ones in `docker/`: `check_status.sh` (status-API probe on :9999 / :9998), `question.sh`, `version.sh` (in-container build fingerprint + env table — the live check for the image-cache caveat above), and `stats.sh` (in-container llama-server stats — tps/queue/totals scraped from `/metrics`; the parser is `llama_stats.py`, also installed in the image and mirrored by `utils/llama_stats.py` for Salad-gateway URLs from the host; aliased in-image as `llama-stats`) and `bw_reporter.py` (HF-download bandwidth sampler — feeds the `manage_groups.py` arbitrator, see [HF-download bandwidth reporter](#hf-download-bandwidth-reporter-bw_reporterpy--the-arbitrator)); Salad-gateway ones in `claude/`: `curl_salad.sh` (the same smoke test against a gateway, with the key) and `chat_salad.sh` (`llm` chat direct against the gateway — `llm -H` carries the Salad-Api-Key).
 
 ## Verify
 
@@ -317,7 +344,8 @@ docker compose ps                     # status + port mapping
 docker compose up -d qwen38-9b        # start just the 9B server (or ../tests/run_9b.sh)
 docker compose down                   # stop and remove containers + downloaded models
 
-# Debug tools inside the container: curl, ssh, vi, htop, nvtop (GPU monitor)
+# Debug tools inside the container: curl, ssh, scp, vi, htop, bmon, nvtop (GPU monitor),
+# ping (needs --cap-add=NET_RAW), llama-stats
 docker compose exec -it qwen38-llama nvtop
 docker compose exec qwen38-llama curl -s localhost:8080/health
 ```
