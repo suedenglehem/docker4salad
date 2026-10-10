@@ -142,12 +142,12 @@ MODEL_ALIAS = "qwen38-27b"
 # the current tag per repo is kept); digests kept for history only:
 #   cuda128-v9: sha256:755c43df1e2285bb0ab5bcc25d0471359a9f78ac9349cabbc6ba2ee5e878221f
 #   cuda128-v8: sha256:7d635166ffb9cb0c87200b0b1b17faae73b96ce288cb0e579c01cd7eb12ebd35
+#   cuda128-v10: sha256:576560097be5a19e14d5d9042c53202dad062f17c6576824773b55b13c6a045d
 #   cuda128-v7: sha256:b7ea489397ab314313133a6b1f93ea159162df4338fd42083f6ff07b91a3d20e
 #   cuda128-v6: sha256:97aa3d72bf8e367f74c7e7e6f9e565b662ff06bccb648e7f61d65c47d5686600
 #   cuda128-v5: sha256:4089a457281519033764868d5422786b7c48e0d2e81f7847354ceb5acd953839
-#   cuda128-v4: sha256:789ff2b34000409d13d76c2f51d607502f65d96c739fa3adfc5d04ae6f353a4a
 IMAGE = ("boris271142/lmss_jonathancoletti_qwen38_q6_mtp_vision"
-         "@sha256:576560097be5a19e14d5d9042c53202dad062f17c6576824773b55b13c6a045d")
+         "@sha256:16c48781fd6a1a146703dec15a26ed1b87d255ff62f8344282c539bf3c4f4035")
 
 MODEL_REPO = "JonathanColetti/Qwen3.8-27B-Uncensored-GGUF"
 # Default = live production quant (2026-10-03): Q5_K_M, MTP head embedded in

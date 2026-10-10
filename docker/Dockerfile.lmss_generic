@@ -72,7 +72,7 @@
 #   docker push boris271142/lmss_generic:cuda128-v1
 # =============================================================================
 
-FROM boris271142/lmss:cuda128-v8@sha256:0386058c64d603430960c0b3d5ab03c2ad740f752d12ebd32b11dfc4ea31ebca
+FROM boris271142/lmss:cuda128-v9@sha256:47d2d276b7991586613131aec1ed7a57b6245d12bc75abe20ebabba5cf189c15
 
 # Build id for /usr/local/bin/version.sh (same file the v3 image writes).
 # The default lives in the RUN (shell ${ARG:-default}), NOT in the ARG line —

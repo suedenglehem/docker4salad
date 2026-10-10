@@ -136,12 +136,12 @@ MODEL_ALIAS = "atx-swift-27b"
 # decoded at startup, then SIGTERM — a bare self-exit gets RESCHEDULED, not
 # stopped, paid test 2026-10-09; key 'none'/missing/undecodable DISABLES the
 # watchdog) on top of the exec-form entry.sh CMD fix; based on
-# boris271142/lmss:cuda128-v8@sha256:0386058c…); the tag form, for humans:
-#   boris271142/lmss_generic:cuda128-v8
+# boris271142/lmss:cuda128-v9@sha256:47d2d276…); the tag form, for humans:
+#   boris271142/lmss_generic:cuda128-v9
+#   cuda128-v8: sha256:9fe70c073e1c11828cb7b611acb3b6685ea17b51797168cae1cd6ef1d869eac1
 #   cuda128-v7: sha256:43206e0a231ff60c7228ff7ca2894f6e80e995c6f5994f98d37067018e4fe576
-#   cuda128-v6: sha256:d7a0a327cd70bd6b7617feb6ebb09ae11b1403681635bcac07b369ee281fc0e5
 IMAGE = "boris271142/lmss_generic" \
-        "@sha256:9fe70c073e1c11828cb7b611acb3b6685ea17b51797168cae1cd6ef1d869eac1"
+        "@sha256:9f7b063809d08c2cf897b6c9902f9d09e6f4574d8905f2a080be4839ff90f2a2"
 
 MODEL_REPO = "bjivanovich/ATX-Swift-1.5-Qwen3.8-27B-Uncensored-MTP-GGUF"
 # Q5_K_M — MTP head embedded in the gguf (the 'MTP' in the repo name), so no

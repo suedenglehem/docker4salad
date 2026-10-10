@@ -100,11 +100,11 @@ GROUP_NAME = "qwen38-9b"
 # was malformed (stray quote) so buildkit's parseMaybeJSON silently fell back
 # to shell form and dash exited 2 (crash-loop ~1-2s after "Running"); v5 runs
 # `bash -l /opt/llama.cpp/entry.sh` with llama-server as a trapped child).
-# IDLE_SHUTDOWN=none baked = off by default. Tag form: boris271142/lmss:cuda128-v8
+# IDLE_SHUTDOWN=none baked = off by default. Tag form: boris271142/lmss:cuda128-v9
+#   cuda128-v8: sha256:0386058c64d603430960c0b3d5ab03c2ad740f752d12ebd32b11dfc4ea31ebca
 #   cuda128-v7: sha256:3db2ab311ed5c43b83f2c612966009524957f5fd3941dfdbaef0b263b3baa35d
-#   cuda128-v6: sha256:c1a671ab6e75e11af85203a4ffea9863a0cf7e7059af9f2c37319392ea69dc11
 IMAGE = "boris271142/lmss" \
-        "@sha256:0386058c64d603430960c0b3d5ab03c2ad740f752d12ebd32b11dfc4ea31ebca"
+        "@sha256:47d2d276b7991586613131aec1ed7a57b6245d12bc75abe20ebabba5cf189c15"
 
 # The 7 card classes the old 'qwen9b' group ran on, by normalized base name
 # (parenthesized VRAM suffix stripped, lowercased, spaces removed).
