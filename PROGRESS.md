@@ -902,6 +902,19 @@ stopped at 01:15Z; all 7 fleet groups are now stopped at $0.
    = nvtop/htop + aliases over the relay on any group's next start.
    `restart_policy`/`priority` are CREATE-ONLY, so any change to those still
    requires delete+recreate (§9c: use a fresh name, keep `MODEL_ALIAS` stable).
+6. **OPEN BUG (user-reported 2026-10-11, investigation deferred) — bandwidth
+   measurement discrepancy:** bmon INSIDE the container reported ~10 Mbps
+   (user's words — confirm units on resume; possibly 10,000) while the manager
+   reported 0 Mbps. Investigation angles: `docker/bw_reporter.py` (which dir it
+   sums — the `MODEL_DIR` env var — and its 10 s size-delta rate math) vs where
+   the HF download actually writes (`.incomplete` staging may live outside
+   MODEL_DIR ⇒ flat size ⇒ 0.0 samples while real traffic flows); check the
+   live `env` MODEL_DIR over the relay; cross-reference the 0.0 sample
+   timestamps against the bmon timeline. Run-1 context: 0.0 stalls were
+   interleaved with 300–1900 Mbps bursts and 13.8 GB did land in MODEL_DIR in
+   ~3 min, so the reporter does see growth — the dir question is prime suspect.
+   (Recorded 2026-10-11 right before the tr4 reboot; session checkpoint
+   mycelium #144/#145 has the resume order.)
 
 **Known open item (not urgent):** `qwen38-9b`'s env lacks `IDLE_GRACE` (it's
 `IDLE_SHUTDOWN=none`, so it's harmless). The other five `none` groups carry
