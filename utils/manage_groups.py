@@ -531,13 +531,21 @@ def _stats(scope: str, name: str, key: str, interval: float) -> int:
     return 0
 
 
-def _bw_read(inst: sc.ContainerGroupInstanceInfo) -> "tuple[list[tuple[int, int]] | None, str | None)":
+def _bw_read(inst: sc.ContainerGroupInstanceInfo) -> "tuple[list[tuple[int, int, int]] | None, str | None)":
     """Read the tail of the instance's bw.log over SSH. Salad's SSH exec is
     shell-less (one plain command per call — no pipes/;/quotes), so the probe
-    is exactly `tail -n N <path>`. Returns (pairs, None) on success (pairs
-    non-empty — the relay gives no exit-code signal), or (None, kind) where
-    kind is "missing" (file absent —
-    the image predates bw_reporter) or a connection description (strike)."""
+    is exactly `tail -n N <path>`. Returns (samples, None) on success
+    (samples non-empty — the relay gives no exit-code signal), or (None,
+    kind) where kind is "missing" (file absent — the image predates
+    bw_reporter) or a connection description (strike).
+
+    Each sample is (epoch, rx_bytes, model_bytes). Current images log the
+    kernel RX counter first — the bandwidth source, since xet (baked
+    HF_XET_HIGH_PERFORMANCE=1) transfers most shard bytes through its CAS
+    cache OUTSIDE MODEL_DIR, so file growth alone reads 0.0 mid-transfer —
+    and MODEL_DIR size second (progress display only). Old images logged
+    `epoch model-bytes` (2 columns); those parse with rx := model, i.e. the
+    pre-fix behavior, so a mixed fleet still measures."""
     cmd = [
         "ssh", *BW_SSH_OPTS, "-p", str(inst.ssh_port), f"root@{inst.ssh_ip}",
         "tail", "-n", str(BW_TAIL_LINES), BW_LOG_PATH,
@@ -546,16 +554,19 @@ def _bw_read(inst: sc.ContainerGroupInstanceInfo) -> "tuple[list[tuple[int, int]
         p = subprocess.run(cmd, capture_output=True, text=True, timeout=BW_SSH_TIMEOUT)
     except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as e:
         return None, f"conn ({e.__class__.__name__})"
-    pairs: list[tuple[int, int]] = []
+    samples: list[tuple[int, int, int]] = []
     for line in p.stdout.splitlines():
         parts = line.split()
-        if len(parts) == 2 and parts[0].isdigit() and parts[1].isdigit():
-            pairs.append((int(parts[0]), int(parts[1])))
+        if len(parts) == 3 and all(x.isdigit() for x in parts):
+            samples.append((int(parts[0]), int(parts[1]), int(parts[2])))
+        elif len(parts) == 2 and parts[0].isdigit() and parts[1].isdigit():
+            # legacy image: only the model counter existed — rate from it
+            samples.append((int(parts[0]), int(parts[1]), int(parts[1])))
     # Salad's SSH is an OCI exec behind a relay: it forwards stdout/stderr but
     # ALWAYS exits 1 — success and failure are indistinguishable by exit code
     # (live-probed 2026-10-09: `ls /tmp/llama-api` printed the listing and
     # exited 1). Only ssh's own transport failures exit 255. So the payload
-    # decides, not the code: pairs ⇒ success; "cannot open" (tail's own
+    # decides, not the code: samples ⇒ success; "cannot open" (tail's own
     # stderr) ⇒ the log is absent; anything else ⇒ connection strike.
     # The relay's "Connecting to container <id>" banner lands on stdout and is
     # skipped by the digit-pair filter.
@@ -565,8 +576,8 @@ def _bw_read(inst: sc.ContainerGroupInstanceInfo) -> "tuple[list[tuple[int, int]
     # (live-probed 2026-10-11), so tail's "cannot open" error lands on stdout
     # — check both streams. (255 errors above are ssh's own and stay local.)
     combined = p.stdout + p.stderr
-    if pairs:
-        return pairs, None
+    if samples:
+        return samples, None
     if "cannot open" in combined:
         return None, "missing"
     return None, f"conn (no samples, exit {p.returncode}: {combined.strip()[:120]})"
@@ -611,15 +622,19 @@ def _bw_ssh_guard(inst: sc.ContainerGroupInstanceInfo) -> "tuple[bool, str]":
     return False, f"probe inconclusive (exit {p.returncode}: {combined.strip()[:120]})"
 
 
-def _bw_rates(pairs: "list[tuple[int, int]]") -> "list[tuple[int, float]]":
-    """Per-interval download rates as (end_epoch, Mbps). Negative deltas (xet
-    restarts a partial) floor at 0 — the median absorbs the dip."""
+def _bw_rates(samples: "list[tuple[int, int, int]]") -> "list[tuple[int, float]]":
+    """Per-interval download rates as (end_epoch, Mbps), computed from the
+    MIDDLE (rx-bytes) column of each (epoch, rx, model) sample — the kernel
+    NIC counter, which sees xet's CAS-cache traffic that never lands in
+    MODEL_DIR. The model column is display-only. The kernel counter is
+    monotonic, but negative deltas still floor at 0 defensively (a container
+    restart mid-window resets it) — the median absorbs the dip."""
     rates: list[tuple[int, float]] = []
-    for (t0, b0), (t1, b1) in zip(pairs, pairs[1:]):
+    for (t0, r0, _m0), (t1, r1, _m1) in zip(samples, samples[1:]):
         dt = t1 - t0
         if dt <= 0:
             continue
-        rates.append((t1, max(0, b1 - b0) * 8.0 / dt / 1e6))
+        rates.append((t1, max(0, r1 - r0) * 8.0 / dt / 1e6))
     return rates
 
 
@@ -717,8 +732,8 @@ def _bw_measure(
         if _instance_ready(cur):
             return "done", 0.0
         inst = cur
-        pairs, err = _bw_read(inst)
-        if err == "missing" or (err is None and not pairs):
+        samples, err = _bw_read(inst)
+        if err == "missing" or (err is None and not samples):
             print(f"bail: {BW_LOG_PATH} missing/empty — the image predates "
                   f"bw_reporter; the arbitrator needs the rebuilt images")
             return "noimg", 0.0
@@ -730,12 +745,12 @@ def _bw_measure(
                 return "ssh", 0.0
             continue
         strikes = 0
-        newest = pairs[-1][0]
+        newest = samples[-1][0]
         if last_ts is not None and newest > last_ts:
             last_change = time.monotonic()
         last_ts = newest
-        rates = _bw_rates(pairs)
-        span = newest - pairs[0][0]
+        rates = _bw_rates(samples)
+        span = newest - samples[0][0]
         window = [mbps for (t, mbps) in rates if t > newest - BW_VERDICT_WINDOW]
         if span >= BW_RAMP_GRACE + BW_VERDICT_WINDOW and len(window) >= BW_MIN_SAMPLES:
             return "verdict", statistics.median(window)
@@ -743,7 +758,7 @@ def _bw_measure(
             print(f"bail: {BW_LOG_PATH} frozen > {BW_LOG_FROZEN:.0f}s — reporter dead")
             return "dead", 0.0
         last_mbps = rates[-1][1] if rates else 0.0
-        print(f"{ts} UTC  {pairs[-1][1] / 1e6:8.1f} MB  {last_mbps:6.1f} Mbps  "
+        print(f"{ts} UTC  {samples[-1][2] / 1e6:8.1f} MB  {last_mbps:6.1f} Mbps  "
               f"(shot {shots}/{BW_MAX_SHOTS})")
 
 

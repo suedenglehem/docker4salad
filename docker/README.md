@@ -227,19 +227,34 @@ Salad's residential nodes vary wildly in bandwidth, and a 10–30 GB GGUF downlo
 bulk of a cold start. The container side **only reports**; all verdicts and the kill
 lever live in `utils/manage_groups.py`.
 
-- **What it does**: a fifth `nohup … &` helper in the CMD. Every 10 s it sums the file
-  sizes under `MODEL_DIR` and appends `epoch bytes` to `${API_STATE_DIR}/bw.log`
+- **What it does**: a fifth `nohup … &` helper in the CMD. Every 10 s it reads the
+  kernel RX counter (`/sys/class/net/<if>/statistics/rx_bytes` summed over all
+  non-lo interfaces — the exact counters `bmon` reads) and the `MODEL_DIR` size, and
+  appends `epoch rx-bytes model-bytes` to `${API_STATE_DIR}/bw.log`
   (i.e. `/tmp/llama-api/bw.log`), then self-exits once llama-server `/health` answers
   ok — the same probe `api_app._ready_state` uses, so download+load done = sampling
-  done. It writes a sample on **every** tick, so a frozen log means the reporter is
-  dead (the manager's bail signal), not that the download is quiet.
-- **Why file growth, not `bmon`**: `bmon -o ascii` (also in the image, for manual use)
-  measures the NIC — watchdog ticks, status-API probes and the manager's own SSH
-  sessions all inflate it — and its output is a periodic human-readable block with no
-  epoch timestamps. `MODEL_DIR` growth is the ground truth of "how fast the model is
-  arriving": xet retries, TLS overhead and re-transmissions show on the wire, not in
-  the file. Sizes are summed with `os.lstat` because the model file in `MODEL_DIR` is a
-  **symlink** into the blob cache — `os.stat` through it counts the blob twice.
+  done. The first sample lands before the download starts and the counters are
+  monotonic, so it doubles as the baseline pair. It writes a sample on **every** tick,
+  so a frozen log means the reporter is dead (the manager's bail signal), not that the
+  download is quiet.
+- **Why the RX counter (file growth was v1 — and it was wrong for xet)**: the images
+  bake `HF_XET_HIGH_PERFORMANCE=1`, and xet moves most shard bytes through its own CAS
+  cache **outside** `MODEL_DIR` — `MODEL_DIR` only grows when a finished shard is
+  finalized into it. File growth therefore read 0.0 Mbps for long stretches of a
+  healthy multi-Gbps download (live-observed 2026-10-11: `bmon` in the container
+  showed steady traffic while the manager reported 0 Mbps), spiking only at
+  finalizations. The kernel RX counter is the ground truth of wire bandwidth: it sees
+  xet, LFS, retries and re-transmissions all at once, wherever the bytes land. Reading
+  the counter directly (instead of running `bmon`) avoids the binary, the extra
+  process, and bmon's periodic human-readable block, which is unparseable over the
+  shell-less relay; the NIC-noise objection (watchdog ticks, status-API probes, the
+  manager's own SSH tails) is KB/s — negligible against a cap measured in Mbps over a
+  120 s median. `bmon` stays in the image for manual eyeballing. The manager computes
+  rates from the **rx column**; the model column is the human-facing MB progress
+  display only, summed with `os.lstat` because the model file in `MODEL_DIR` is a
+  **symlink** into the blob cache (`os.stat` through it counts the blob twice).
+  Images from before this change logged 2 columns (`epoch model-bytes`); the manager
+  parses those as rx := model (the v1 behavior), so a mixed fleet still measures.
 - **Never dies**: the whole loop body is wrapped in `try/except`; a failed sample is
   logged to `${API_STATE_DIR}/bw_reporter.log` and sampling continues.
 - **The arbitrator** (`manage_groups.py start --min-bw-mbps N`, default 30): reads the
