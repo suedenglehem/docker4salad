@@ -561,11 +561,15 @@ def _bw_read(inst: sc.ContainerGroupInstanceInfo) -> "tuple[list[tuple[int, int]
     # skipped by the digit-pair filter.
     if p.returncode == 255:
         return None, f"conn (ssh: {p.stderr.strip()[:120]})"
+    # The relay merges the remote process's stderr into the client's stdout
+    # (live-probed 2026-10-11), so tail's "cannot open" error lands on stdout
+    # — check both streams. (255 errors above are ssh's own and stay local.)
+    combined = p.stdout + p.stderr
     if pairs:
         return pairs, None
-    if "cannot open" in p.stderr:
+    if "cannot open" in combined:
         return None, "missing"
-    return None, f"conn (no samples, exit {p.returncode}: {p.stderr.strip()[:120]})"
+    return None, f"conn (no samples, exit {p.returncode}: {combined.strip()[:120]})"
 
 
 def _bw_ssh_guard(inst: sc.ContainerGroupInstanceInfo) -> "tuple[bool, str]":
@@ -575,10 +579,20 @@ def _bw_ssh_guard(inst: sc.ContainerGroupInstanceInfo) -> "tuple[bool, str]":
     it on the way out. While it exists, a /reallocate would yank the instance
     — and their session — out from under them, so NO shot is spent. Probe =
     `ls /.ssh` (one plain command; the relay exits 1 on success — the PAYLOAD
-    decides, see _bw_read): stdout naming the file => guard present; ls's
-    "cannot access" => absent; anything else => probe strike. Absent and
-    strike both return False (spend the shot) — holding on every probe
-    failure would silently disable the arbitrator."""
+    decides, see _bw_read): an exact stdout line naming the file => guard
+    present; ls's "cannot access" => absent; anything else => inconclusive.
+    Absent and inconclusive both return False (spend the shot) — holding on
+    every probe failure would silently disable the arbitrator.
+
+    REGRESSION (2026-10-11, live hold-loop on instance ccf9203e): the relay
+    merges the remote's stderr into the client's stdout, so when the file is
+    ABSENT, ls's error — `ls: cannot access '/.ssh': No such file or
+    directory` — arrives on STDOUT and contains the guard path itself. The
+    old `"/.ssh" in p.stdout` substring check matched its own error text and
+    reported "present" forever: holding, zero shots, group stuck billing.
+    Hence: error markers are checked FIRST, on the combined streams, and
+    presence requires an exact line (ls of an existing file prints the path
+    alone, one line)."""
     cmd = [
         "ssh", *BW_SSH_OPTS, "-p", str(inst.ssh_port), f"root@{inst.ssh_ip}",
         "ls", BW_SSH_GUARD_FILE,
@@ -589,11 +603,12 @@ def _bw_ssh_guard(inst: sc.ContainerGroupInstanceInfo) -> "tuple[bool, str]":
         return False, f"probe failed ({e.__class__.__name__})"
     if p.returncode == 255:
         return False, f"ssh transport failed ({p.stderr.strip()[:120]})"
-    if BW_SSH_GUARD_FILE in p.stdout:
-        return True, f"{BW_SSH_GUARD_FILE} present"
-    if "cannot access" in p.stderr:
+    combined = p.stdout + p.stderr  # the relay merges remote stderr into stdout
+    if "cannot access" in combined or "No such file" in combined:
         return False, f"no {BW_SSH_GUARD_FILE}"
-    return False, f"probe inconclusive (exit {p.returncode}: {p.stderr.strip()[:120]})"
+    if any(line.strip() == BW_SSH_GUARD_FILE for line in p.stdout.splitlines()):
+        return True, f"{BW_SSH_GUARD_FILE} present"
+    return False, f"probe inconclusive (exit {p.returncode}: {combined.strip()[:120]})"
 
 
 def _bw_rates(pairs: "list[tuple[int, int]]") -> "list[tuple[int, float]]":
