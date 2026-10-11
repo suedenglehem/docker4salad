@@ -868,6 +868,17 @@ stopped at 01:15Z; all 7 fleet groups are now stopped at $0.
    first regardless of cap — the 3-drop demo needs a slow landing node.
    Drop-log capture: user pastes the terminal section when the run ends;
    verify ≤3 `— POST reallocate (shot N/3)` lines + the final node.
+   **Rerun confirmed in flight (~04:29Z, fixed code):** the user's terminal
+   showed `image pull 0.70000833% (84s)` — a DISPLAY bug (the API sends a
+   0–1 fraction, not a percent; now rendered `70.0%`, fixed in this same
+   cycle) — and the new instance `b85289df` placed on
+   FRESH node `84b984b8` (neither attempt 1's 0bf20a53 nor the fast node).
+   Pull completed (1.0), model download started, `ready=False` at last
+   read. The tr4 reboot (~04:3xZ) killed the local `manage_groups.py`; the
+   group runs unmanaged, but the in-container v2.3 watchdog
+   (`IDLE_SHUTDOWN=heartbeat`, `HEARTBEAT_TIMEOUT=300`, `IDLE_GRACE=3600`)
+   bounds the billing. On resume: read-only state check → user's terminal
+   log → verify shot count → then §15.6 (bmon/0-Mbps measurement bug).
 3. **Verify prod ATX context:** at the next start of `atx-swift-27b-q5-opt`,
    scrape `/metrics` and confirm `llama_model_n_ctx = 132864` (spec CTX is 132768).
    §7.
