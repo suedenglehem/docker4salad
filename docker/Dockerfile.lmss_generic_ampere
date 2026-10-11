@@ -228,6 +228,33 @@ RUN chmod +x /usr/local/bin/llm.sh /usr/local/bin/question.sh /usr/local/bin/ver
 ARG LMSS_BUILD_ID
 RUN printf '%s\n' "${LMSS_BUILD_ID:-lmss_generic_ampere-v8 (llamAmpere v0.4 fork, cuda 13.0.2, turbo5/turbo4 KV, idle_watchdog v2.3 [/.ssh presence guard, 20-min max-hold cap] + bw_reporter + iputils-ping + llama-stats + apt kit [less nano iproute2 dnsutils jq], trapped-child supervisor, exec-form entry.sh CMD) 2026-10-11}" > /etc/llama-image-build
 
+# Interactive-shell ergonomics for the Salad ssh relay (verified 2026-10-11 on a
+# live relay session: it execs a bare /bin/bash on a pty with TERM=xterm, which
+# breaks TUIs — "Error opening terminal: unknown" — and it DOES read
+# /root/.bashrc). Appended at the END of the skel .bashrc so it wins:
+#   export TERM  - xterm-256color, so nvtop/htop work over the relay
+#   nv/ht/gpu    - one-letter process/GPU monitors
+#   wlog/alog    - live-tail the idle-watchdog / API logs
+#   ready        - the :9999 readiness probe
+#   als          - print the aliases (so the set is discoverable)
+#   ll/la/l/h    - standard listing/history aliases (ll/la/l re-pin the skel's
+#                  with identical values; h is new)
+RUN { [ -f /root/.bashrc ] || : > /root/.bashrc; printf '%s\n' \
+    '# --- on_salad shell ergonomics (baked 2026-10-11) ---' \
+    'export TERM=xterm-256color' \
+    "alias nv='nvtop'" \
+    "alias ht='htop'" \
+    "alias gpu='nvidia-smi'" \
+    "alias wlog='tail -f /tmp/llama-api/watchdog.log'" \
+    "alias alog='tail -f /tmp/llama-api/api.log'" \
+    "alias ready='curl -s http://127.0.0.1:9999/ready'" \
+    "alias als='alias'" \
+    "alias ll='ls -alF'" \
+    "alias la='ls -A'" \
+    "alias l='ls -CF'" \
+    "alias h='history'" \
+    >> /root/.bashrc; }
+
 # Model + runtime env (lmss_generic's surface). The defaults are the family's
 # (JonathanColetti 27B) so a bare docker run behaves like the rest of the
 # family; the ATX group overrides per the header recipe.
