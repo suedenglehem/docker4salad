@@ -22,14 +22,16 @@
 
 ## 0. TL;DR — state as of 2026-10-11
 
-- **Latest image set = v2.4 (shell ergonomics), fleet re-PATCHed 7/7.** The
-  image's `/root/.bashrc` now exports `TERM=xterm-256color` and defines the
-  `nv/ht/gpu/wlog/alog/ready/als/ll/la/l/h` aliases — fixes the Salad ssh
-  relay's `TERM=xterm` breaking nvtop/htop. Watchdog content unchanged (still
-  v2.3: `SSH_GUARD_MAX_HOLD` cap). Hub digests base `2bfbd69c…`, generic
-  `888fc401…`, q6 `f6e3b9d0…`, ampere `d4f4b030…`; FROM re-pins + all 5
-  deployer re-pins done. Fleet PATCH 7/7 `200 OK` (env byte-identical, no
-  starts); propagation verified read-only via `tmp/check_images_v11.py`.
+- **Latest image set = v2.5 (bw-reporter v2 / xet fix), fleet re-PATCHed
+  7/7.** The bandwidth reporter now reads the kernel NIC RX counter (the
+  exact counters `bmon` reads) and logs `epoch rx-bytes model-bytes` —
+  fixes the systematic 0.0 Mbps while xet moves shard bytes through its
+  CAS cache outside MODEL_DIR (§15.6). Watchdog content unchanged (still
+  v2.3: `SSH_GUARD_MAX_HOLD` cap; shell ergonomics still present). Hub
+  digests base `0586ba35…`, generic `2fc912ae…`, q6 `a779732c…`, ampere
+  `28417137…`; FROM re-pins + all 5 deployer re-pins done. Fleet PATCH 7/7
+  `200 OK` (env byte-identical, no starts); propagation verified read-only
+  via `tmp/poll_images_v12.py`.
 - **Latest feature = the guard's 20-minute hard cap (watchdog v2.3),
   live-smoked 2026-10-11 — FULLY PASSED, user-confirmed ("watchdog cap-kill
   worked").** The SSH-presence guard (v2.2, commit `e115dc6`) has a hard cap:
@@ -63,9 +65,9 @@
   counters `bmon` reads, read directly) is the bandwidth source; model bytes
   are the human-facing MB display only. The manager computes rates from the
   rx column and still parses the legacy 2-column log (rx := model), so old
-  images keep measuring at v1 accuracy in a mixed fleet. **The fix only
-  takes effect in rebuilt images** (the reporter is baked in); the manager
-  side is live code. §15.6.
+  images keep measuring at v1 accuracy in a mixed fleet. **Shipped in the
+  v2.5 image set (2026-10-11)** — built, pushed, re-pinned and fleet
+  re-PATCHed 7/7 (no starts); only NEW instances run the fixed reporter.
 - **All 7 groups stopped at $0 — the in-flight drop-test ended.** The
   tr4 reboot (~04:3xZ) killed the local `manage_groups.py` mid-rerun; the
   unmanaged `atx-hb-test2` then self-stopped via its own v2.3 watchdog
@@ -73,8 +75,8 @@
   0 instances). Billing is stopped. The user's rerun terminal log (shot
   count + sample lines) is still the open artifact for §15.2.
 - **Nothing else is left in the critical path except user-gated paid
-  actions:** the v2.5 image rebuild (carries the bw fix) + fleet re-PATCH,
-  and the next arbitrator live run. Offline suites green (watchdog 7/7,
+  actions:** the next arbitrator live run — on a v2.5 instance the Mbps
+  column is real per-interval wire speed. Offline suites green (watchdog
   arbitrator 26/26).
 - **This Claude session runs on LOCAL vllm on tr4** (`qwen3.8-27b` fp8,
   `:8000`, TP2+MTP, since Oct 10) — NOT on a Salad group. Group stops never
@@ -254,25 +256,41 @@ heartbeat-armed groups kept their armed mode + real stop keys; the five
 
 ---
 
-## 4. The image chain (CURRENT 2026-10-11) — the v2.4 set (watchdog still v2.3)
+## 4. The image chain (CURRENT 2026-10-11) — the v2.5 set (watchdog still v2.3)
 
-**The v2.4 set (tr4, 32 jobs, warm layer cache — ~14 min).** All four images
-are BUILT + PUSHED + digest-verified (offline: the .bashrc block + build id
-checked in each), the fleet is re-PATCHed onto it 7/7, and all 7 digests
-confirmed landed via read-only GETs (2026-10-11 02:14Z). Content diff vs the
-v2.3 set = ONLY the `/root/.bashrc` shell-ergonomics block (see below);
-watchdog content is unchanged (still v2.3). For these single-arch amd64
-images the Hub manifest digest == the local image ID (the registry-returned
-`digest:` line on push):
+**The v2.5 set (tr4, 32 jobs, warm layer cache — ~14 min, 05:22→05:36Z).**
+All four images are BUILT + PUSHED + digest-verified (in situ: build id +
+`net_rx_bytes` in the baked reporter + the 3-column write line), the fleet
+is re-PATCHed onto it 7/7, and all 7 digests confirmed landed via
+read-only GETs (2026-10-11). Content diff vs the v2.4 set = ONLY the
+`bw_reporter.py` rewrite (the xet fix, §15.6); watchdog content is
+unchanged (still v2.3). For these single-arch amd64 images the Hub
+manifest digest == the local image ID (the registry-returned `digest:`
+line on push):
 
 | family | repo:tag | digest `sha256:` | what's in it |
 |---|---|---|---|
-| base | `boris271142/lmss:cuda128-v11` | `2bfbd69c5730b9787f2b91cfd496ebbfdcce469ba99fc538fbe5a66b2a305455` | llama.cpp server + proxy + watchdog **v2.3** + bw_reporter + ping + llama-stats + **shell ergonomics** |
-| generic | `boris271142/lmss_generic:cuda128-v11` | `888fc401f1eba851888f22bf8f8caf9665df41f734cfe1432e6ed1df23f14b1b` | base, any-model, no baked model |
-| q6 | `boris271142/lmss_jonathancoletti_qwen38_q6_mtp_vision:cuda128-v13` | `f6e3b9d0c4f6b3fb08ecfabb94c4115d256cdce246054202f858b868115bbfb9` | base + Qwen3.8 27B Q6 + MTP + vision + Claude template |
-| ampere | `boris271142/lmss_generic_ampere:cuda130-v9` | `d4f4b030fe2d88c1fdaaf5a31505ac0f4d357f1db38f8e7b369804d3502e6593` | llamAmpere turbo-KV fork, sm_86 cards |
+| base | `boris271142/lmss:cuda128-v12` | `0586ba35fb439c4ea35271c17d6fa243b3605d993a5c3f3f32ba0b1070011e63` | llama.cpp server + proxy + watchdog **v2.3** + **bw_reporter v2 (kernel RX counter)** + ping + llama-stats + shell ergonomics |
+| generic | `boris271142/lmss_generic:cuda128-v12` | `2fc912ae0050c8adc9b11e26ff53a777ff0a92cf4560b77841b2da19136683af` | base, any-model, no baked model |
+| q6 | `boris271142/lmss_jonathancoletti_qwen38_q6_mtp_vision:cuda128-v14` | `a779732c02b2ad8148d21c6ff6f33f5a6d252e9de2e78ab729878342e389ab88` | base + Qwen3.8 27B Q6 + MTP + vision + Claude template |
+| ampere | `boris271142/lmss_generic_ampere:cuda130-v10` | `28417137144d2192093eada751b359dc13b482a0190d7eb37e87b7232feb259b` | llamAmpere turbo-KV fork, sm_86 cards |
 
-**Shell-ergonomics block (the v2.4 content change), appended at the END of
+**bw_reporter v2 (the v2.5 content change):** logs `epoch rx-bytes
+model-bytes` every 10 s — `rx-bytes` is the kernel NIC RX counter
+(`/sys/class/net/<if>/statistics/rx_bytes`, summed over non-lo — the exact
+counters `bmon` reads, read directly: no binary, no extra process, our own
+epoch timestamps over the shell-less relay) and `model-bytes` is MODEL_DIR
+size (the human-facing MB display only). Root cause of the v1 0.0-Mbps bug:
+the images bake `HF_XET_HIGH_PERFORMANCE=1` and xet moves most shard bytes
+through its CAS cache OUTSIDE MODEL_DIR, so MODEL_DIR growth only spiked at
+shard finalizations (§15.6). The manager computes rates from the rx column
+and still parses the legacy 2-column log (rx := model), so old images keep
+measuring at v1 accuracy in a mixed fleet. Wiring unchanged: all four entry
+scripts launch `nohup python3 /usr/local/bin/bw_reporter.py … &`; base COPYs
+the new file, ampere COPYs it itself, generic/q6 inherit it via their FROM
+re-pin.
+
+**Shell-ergonomics block (v2.4 content, still present; inherited by all four), appended at the END of
 `/root/.bashrc` in the final stage** (`Dockerfile.multistage` +
 `Dockerfile.lmss_generic_ampere`; generic/q6 inherit via their FROM re-pin).
 The Salad ssh relay execs a bare `/bin/bash` on a pty with `TERM=xterm`
@@ -282,7 +300,9 @@ The Salad ssh relay execs a bare `/bin/bash` on a pty with `TERM=xterm`
 log) / `ready` (curl :9999/ready) / `als` (alias) / `ll` / `la` / `l` / `h`
 (history).
 
-**Superseded (v2.3 set, guard-v2.3, commit `29de3ec`):** base v10
+**Superseded (v2.4 set, shell ergonomics, commit `c04ded0`):** base v11
+`2bfbd69c`, generic v11 `888fc401`, q6 v13 `f6e3b9d0`, ampere v9
+`d4f4b030`. **Superseded (v2.3 set, guard-v2.3, commit `29de3ec`):** base v10
 `c363d00e`, generic v10 `95b4c77c`, q6 v12 `56579bc1`, ampere v8
 `f713e04f`. **Superseded (v2.2 set):** base v9 `47d2d276`, generic v9
 `9f7b0638`, q6 v11 `16c48781`, ampere v7 `314f77b8`. **Pre-guard (v2.1)**,
@@ -292,7 +312,7 @@ tags deleted from Hub: base v8 `0386058c`, generic v8 `9fe70c07`, q6 v10
 **Build procedure** (tr4, 32-way): build the **base first**, push, capture its
 digest; re-pin the **derivative `FROM`s** to the base digest
 (`docker/Dockerfile.lmss_generic:75` and `docker/Dockerfile.lmss_q6_mtp_vision:59`
-both `FROM boris271142/lmss:cuda128-v11@sha256:2bfbd69c…`); build+push the
+both `FROM boris271142/lmss:cuda128-v12@sha256:0586ba35…`); build+push the
 three derivatives with `--build-arg BUILD_JOBS=32`. **Build-context gotcha:**
 the generic/q6/ampere Dockerfiles `COPY docker/version.sh` → the build context
 MUST be the **repo root**, and on tr4 the working invocation is
@@ -309,12 +329,12 @@ non-ampere trio), but the v2.4 rebuild of all four images took only **~14 min**
 layers rebuilt. Plan ~15 min for small content changes; the long pole (ampere
 llamAmpere CUDA template-instances pass) only bites on cold rebuilds.
 
-**Deployer digest pins** (re-pinned 2026-10-11 to the v2.4 set, the live
+**Deployer digest pins** (re-pinned 2026-10-11 to the v2.5 set, the live
 `@sha256:` line in each): `deploy/deploy_qwen9b.py` +
-`deploy/deploy_qwen38_9b.py` → base v11 `2bfbd69c…`;
-`deploy/deploy_generic.py` → generic v11 `888fc401…`;
-`deploy/deploy_qwen38_27b.py` → q6 v13 `f6e3b9d0…`;
-`deploy/deploy_ampere.py` → ampere v9 `d4f4b030…`. Each deployer also keeps a
+`deploy/deploy_qwen38_9b.py` → base v12 `0586ba35…`;
+`deploy/deploy_generic.py` → generic v12 `2fc912ae…`;
+`deploy/deploy_qwen38_27b.py` → q6 v14 `a779732c…`;
+`deploy/deploy_ampere.py` → ampere v10 `28417137…`. Each deployer also keeps a
 commented history list of prior tag→digest for humans.
 
 **v2.3 rebuild (COMPLETE on tr4, 2026-10-11).** tr4 had never built these
@@ -322,7 +342,7 @@ images → the whole set compiled from scratch at **32 jobs** (sequential — tw
 32-way CUDA compiles would OOM 62 GB; the ampere fork compile's CUDA
 template-instances stage was the long pole). All digests captured, re-pinned
 here and in the five deployers; the derivative `FROM`s point at the new base
-digest. That set is now superseded by v2.4 above.
+digest. That set is now superseded by v2.5 above.
 
 ---
 
@@ -966,10 +986,13 @@ stopped at 01:15Z; all 7 fleet groups are now stopped at $0.
    - **bmon units:** the user's "~10 Mbps" figure is no longer needed to
      discriminate — we read the same kernel counters bmon reads, so any
      residual gap is display/interval, not source.
-   - **REMAINING (user-gated, paid):** the fix lives in the BAKED reporter —
-     it takes effect only in rebuilt images: a v2.5 set (tr4 build ~15 min
-     warm + push + digest re-pins + fleet re-PATCH; only NEW instances get
-     it). The manager side is already live (run from this repo on tr4).
+   - **DONE (2026-10-11) — the v2.5 set carries the fix:** built + pushed +
+     digest-verified on tr4 (32 jobs, ~14 min warm, 05:22→05:36Z), both
+     derivative FROMs + all 5 deployer IMAGE constants re-pinned, fleet
+     re-PATCHed 7/7 `200 OK` (env byte-identical, no starts), all 7 digests
+     verified landed via read-only GETs. Only NEW instances (next paid
+     starts) run the fixed reporter; the manager side was already live.
+     Full digests: §4.
 
 **Known open item (not urgent):** `qwen38-9b`'s env lacks `IDLE_GRACE` (it's
 `IDLE_SHUTDOWN=none`, so it's harmless). The other five `none` groups carry
@@ -1000,6 +1023,8 @@ stopped at 01:15Z; all 7 fleet groups are now stopped at $0.
 ## 17. Recent git history (context for what each commit did)
 
 ```
+870bc05 images: v2.5 set pushed (base/generic v12, q6 v14, ampere v10) — bw_reporter v2 kernel-RX (xet fix) + re-pins
+06ed2ba docs: PROGRESS.md — xet root cause + RX-counter fix (55aac06), drop-test ended ($0), open item 6 resolved, history backfilled
 55aac06 bw: measure from the kernel RX counter, not MODEL_DIR growth (xet fix)
 b5177cc docs: PROGRESS.md — rerun in flight on fresh node 84b984b8 (fixed code), pull-% display fix, state at tr4 reboot
 b0b3800 arbitrator: render image pull progress as a real percent
