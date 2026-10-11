@@ -93,11 +93,11 @@ GROUP_NAME = "qwen9b"
 # watchdog) on top of cuda128-v5's exec-form entry.sh CMD fix (v4's inline
 # JSON CMD was malformed -> buildkit shell-form fallback -> dash exit 2
 # crash-loop). IDLE_SHUTDOWN=
-# none baked = off by default. Tag form for humans: boris271142/lmss:cuda128-v9
+# none baked = off by default. Tag form for humans: boris271142/lmss:cuda128-v10
+#   cuda128-v9: sha256:47d2d276b7991586613131aec1ed7a57b6245d12bc75abe20ebabba5cf189c15
 #   cuda128-v8: sha256:0386058c64d603430960c0b3d5ab03c2ad740f752d12ebd32b11dfc4ea31ebca
-#   cuda128-v7: sha256:3db2ab311ed5c43b83f2c612966009524957f5fd3941dfdbaef0b263b3baa35d
 IMAGE = "boris271142/lmss" \
-        "@sha256:47d2d276b7991586613131aec1ed7a57b6245d12bc75abe20ebabba5cf189c15"
+        "@sha256:c363d00e5eaebb2b88bffab5a8bddd44a6afa3687e0377c78ac63d134fdd019d"
 GPU_CLASS_BASE = "rtx3090"  # must match 'RTX 3090 (24 GB)', not a Laptop/variant class
 
 # Mirrored from the live 'qwen38-27b-rtx5090' group (GET, 2026-09-30) — response-only

@@ -66,11 +66,17 @@ Safety rails:
     trap (handler installed -> delivered), kills the child, and exits; PID
     -namespace teardown then reaps everything left.
   - SSH-presence guard: while the guard file /.ssh EXISTS, the kill is HELD
-    OFF and the countdown restarts — the group stays alive while the user
-    works in the container (the watchdog's activity timer is chat traffic/
-    pings only, so a logged-in user with no chat would otherwise be killed
-    mid-session — observed 2026-10-09). The user touches it after SSHing in
-    and removes it on the way out; SSH_GUARD=0 disables the check.
+    OFF — the group stays alive while the user works in the container (the
+    watchdog's activity timer is chat traffic/pings only, so a logged-in user
+    with no chat would otherwise be killed mid-session — observed 2026-10-09).
+    The user touches it after SSHing in and removes it on the way out. The
+    hold is CAPPED at SSH_GUARD_MAX_HOLD seconds of continuous idle (default
+    1200 = 20 min; 0 = uncapped, the pre-v2.3 behavior): a dropped SSH
+    connection — laptop sleep, lost internet — must not bill the group
+    forever, so a hard stop fires past the cap even with the guard file
+    present. The cap is measured from the last real activity (the idle clock
+    no longer restarts on a hold), and any activity resets the whole clock.
+    SSH_GUARD=0 disables the check entirely.
   - IDLE_SHUTDOWN=none (default) -> exits immediately, does nothing.
   - No usable group /stop config (SALAD_STOP_KEY is "none"/missing/
     undecodable, or SALAD_ORG/SALAD_PROJECT/SALAD_GROUP incomplete) -> the
@@ -97,6 +103,12 @@ Env knobs (all baked defaults, group-overridable via the deployers):
                   touched it after logging in over SSH; see ssh_guard_active).
   SSH_GUARD_FILE  guard file path (default /.ssh). Contract: `touch /.ssh` on
                   the way in, `rm /.ssh` on the way out.
+  SSH_GUARD_MAX_HOLD  max seconds of continuous idle the SSH guard may hold
+                  the stop off (default 1200 = 20 min). Past the cap the
+                  group stops even with the guard file present — a dropped
+                  SSH connection must not bill the group forever. 0 = uncapped
+                  hold (the pre-v2.3 behavior). Measured from the last real
+                  activity; any activity resets the whole clock.
   READY_PORT      api_app port serving /ready (default 9999)
   PORT            llama-server port (default 8080)
   API_KEY         llama-server auth key; sent as Bearer when set (local runs
@@ -135,6 +147,19 @@ STOP_ATTEMPTS = 2        # group /stop POST attempts (the API is the real kill)
 STOP_RETRY_S = 5.0       # pause between stop attempts
 SSH_GUARD = (os.environ.get("SSH_GUARD") or "1").strip().lower() not in ("0", "none", "off", "")
 SSH_GUARD_FILE = os.environ.get("SSH_GUARD_FILE") or "/.ssh"
+
+
+def _env_int(name: str, default: int) -> int:
+    try:
+        return int((os.environ.get(name) or "").strip() or default)
+    except ValueError:
+        return default
+
+
+# Cap on the SSH-presence hold: max seconds of continuous idle the guard may
+# delay the stop (0 = uncapped, the pre-v2.3 behavior). A dropped SSH
+# connection — laptop sleep, lost internet — must not bill the group forever.
+SSH_GUARD_MAX_HOLD = max(0, _env_int("SSH_GUARD_MAX_HOLD", 1200))
 # Overridable for stub tests / staging; production uses the spec server.
 SALAD_API_BASE = os.environ.get("SALAD_API_BASE") or "https://api.salad.com/api/public"
 
@@ -369,8 +394,11 @@ def main() -> int:
     # timeout + 30 s late. The default 600 s keeps the 30 s period
     # (min() caps at POLL_S); a 5 s floor keeps /metrics unharmed.
     poll_s = min(POLL_S, max(timeout / 3.0, POLL_MIN_S))
+    guard_state = ("off" if not SSH_GUARD
+                   else f"on({SSH_GUARD_FILE}, "
+                        f"{'no cap' if SSH_GUARD_MAX_HOLD == 0 else f'cap {SSH_GUARD_MAX_HOLD}s'})")
     log(f"mode={mode} timeout={timeout}s grace={grace}s arm_grace={arm_grace}s "
-        f"poll={poll_s:.0f}s ssh_guard={'on' if SSH_GUARD else 'off'}({SSH_GUARD_FILE}) "
+        f"poll={poll_s:.0f}s ssh_guard={guard_state} "
         f"stop_api={'configured' if (STOP_KEY and STOP_PATH) else 'OFF'} "
         f"— arming: waiting for {READY_URL} ok")
 
@@ -405,18 +433,30 @@ def main() -> int:
             last = score
             last_activity = time.monotonic()
         idle_s = time.monotonic() - last_activity
-        if idle_s >= timeout and ssh_guard_active():
-            # The SSH guard file exists (the user touched it after logging in):
-            # never stop the group under them. Restart the countdown so the
-            # kill fires only after the guard is removed (rm /.ssh).
-            last_activity = time.monotonic()
-            if ticks % STATUS_EVERY_TICKS == 0:
-                log(f"ssh guard {SSH_GUARD_FILE} present — stop held off, "
-                    f"countdown restarted")
-            continue
         if idle_s >= timeout:
-            log(f"idle {idle_s:.0f}s >= {timeout}s (mode {mode}) — stopping the "
-                f"group, then terminating llama-server (PID 1)")
+            guard = ssh_guard_active()
+            past_cap = SSH_GUARD_MAX_HOLD > 0 and idle_s >= SSH_GUARD_MAX_HOLD
+            if guard and not past_cap:
+                # The SSH guard file exists (the user touched it after logging
+                # in): hold the stop off so a logged-in user is never killed
+                # mid-session — but only within the SSH_GUARD_MAX_HOLD cap.
+                # The idle clock keeps counting from the last real activity
+                # (no countdown restart), so the cap measures continuous idle
+                # the way the user does; any activity resets the whole clock.
+                if ticks % STATUS_EVERY_TICKS == 0:
+                    cap = ("no cap" if SSH_GUARD_MAX_HOLD == 0
+                           else f"cap {SSH_GUARD_MAX_HOLD}s")
+                    log(f"ssh guard {SSH_GUARD_FILE} present — stop held off "
+                        f"(idle {idle_s:.0f}s, {cap})")
+                continue
+            if guard:
+                log(f"ssh guard {SSH_GUARD_FILE} present but idle {idle_s:.0f}s "
+                    f">= max hold {SSH_GUARD_MAX_HOLD}s — stopping the group "
+                    f"anyway (the guard cannot hold past its cap), then "
+                    f"terminating llama-server (PID 1)")
+            else:
+                log(f"idle {idle_s:.0f}s >= {timeout}s (mode {mode}) — stopping "
+                    f"the group, then terminating llama-server (PID 1)")
             stop_group()
             return terminate_pid1()
         if ticks % STATUS_EVERY_TICKS == 0:

@@ -72,7 +72,7 @@
 #   docker push boris271142/lmss_generic:cuda128-v1
 # =============================================================================
 
-FROM boris271142/lmss:cuda128-v9@sha256:47d2d276b7991586613131aec1ed7a57b6245d12bc75abe20ebabba5cf189c15
+FROM boris271142/lmss:cuda128-v10@sha256:c363d00e5eaebb2b88bffab5a8bddd44a6afa3687e0377c78ac63d134fdd019d
 
 # Build id for /usr/local/bin/version.sh (same file the v3 image writes).
 # The default lives in the RUN (shell ${ARG:-default}), NOT in the ARG line —
@@ -80,7 +80,7 @@ FROM boris271142/lmss:cuda128-v9@sha256:47d2d276b7991586613131aec1ed7a57b6245d12
 # first word, e.g. "lmss q6-mtp..." -> "lmss"). Override with
 # --build-arg LMSS_BUILD_ID="..." for a per-push id.
 ARG LMSS_BUILD_ID
-RUN printf '%s\n' "${LMSS_BUILD_ID:-lmss generic-v9 (hf runtime download, claude-template, extra-args, idle_watchdog v2.2 [/.ssh presence guard] + bw_reporter + iputils-ping + llama-stats + apt kit [less nano iproute2 dnsutils jq], trapped-child supervisor, exec-form entry.sh CMD) 2026-10-09}" > /etc/llama-image-build
+RUN printf '%s\n' "${LMSS_BUILD_ID:-lmss generic-v10 (hf runtime download, claude-template, extra-args, idle_watchdog v2.3 [/.ssh presence guard, 20-min max-hold cap] + bw_reporter + iputils-ping + llama-stats + apt kit [less nano iproute2 dnsutils jq], trapped-child supervisor, exec-form entry.sh CMD) 2026-10-11}" > /etc/llama-image-build
 
 # --- Claude Code template: dump+patch script (repo-root build context) ------
 # Zero dependencies (stdlib Python only); copied in and run at STARTUP, not at
