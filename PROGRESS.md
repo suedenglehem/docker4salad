@@ -44,12 +44,23 @@
   after the last inference (00:54:45Z) — and the user confirms that was the
   watchdog's own cap-kill, not a manual GUI stop. (The verbatim kill line
   itself was missed — watcher armed ~27 min late.) See §15.1.**
-- **All 7 live groups are STOPPED, 0 instances — nothing is running, nothing is
-  billing.** The first paid start of any group now runs the v2.4 set (v2.3
-  watchdog + v2.4 shell).
-- **Nothing is left in the critical path except user-gated paid tests:** the
-  arbitrator drop-log live capture (§15.2; driver `tmp/arbitrate_attach.py`
-  ready). Offline suites green (watchdog 7/7, arbitrator 23/23).
+- **Arbitrator guard false-positive FOUND LIVE + FIXED (b9eae88, 2026-10-11):**
+  the first paid drop-test (atx-hb-test2, cap 10000) looped forever on `ssh
+  session active (/.ssh present) — holding, no shot spent` with the file
+  GENUINELY absent. The relay merges the remote stderr into the client's
+  stdout, so `ls /.ssh`'s own error text — which contains `/.ssh` — sat on
+  stdout and the old substring check matched it. The guard now checks ls's
+  error markers first (combined streams) and requires an exact `/.ssh` line
+  for presence; `_bw_read` hardened the same way. §9f.
+- **`atx-hb-test2` is the ONLY live group — the user's paid arbitrator
+  drop-test is in flight** (the other six are stopped at $0). Attempt 1's
+  node finished the download anyway (READY 04:03:01Z, "download complete",
+  zero shots — the bug ate the run's only reallocation opportunity); with the
+  fixed code the user is re-running `start --min-bw-mbps 10000` for the
+  3-reallocation demo. §15.2.
+- **Nothing else is left in the critical path except user-gated paid tests:**
+  the arbitrator drop-log live capture (§15.2) is running. Offline suites
+  green (watchdog 7/7, arbitrator 24/24).
 - **This Claude session runs on LOCAL vllm on tr4** (`qwen3.8-27b` fp8,
   `:8000`, TP2+MTP, since Oct 10) — NOT on a Salad group. Group stops never
   affect the session, and session turns never reset a group's watchdog.
@@ -406,7 +417,10 @@ a shot), `BW_LOG_FROZEN=180`, `BW_TAIL_LINES=80`, `BW_LOG_PATH=/tmp/llama-api/bw
 `BW_SSH_GUARD_FILE=/.ssh`. The SSH probe is **one plain command** (`tail -n 80
 /tmp/llama-api/bw.log` — Salad SSH is a shell-less OCI exec, §9). Guard:
 `_bw_ssh_guard()` (§3) — holds any shot while `/.ssh` is present, fails open
-otherwise. Requires an image with `bw_reporter` (base v8+/generic v8+/q6 v10+/
+otherwise. Since b9eae88 (2026-10-11) "present" means an **exact `/.ssh` line
+on stdout, after the ls error markers are checked on the combined
+streams** — the relay's stderr-into-stdout merge (§9f) made the original
+substring check match its own error text and hold forever. Requires an image with `bw_reporter` (base v8+/generic v8+/q6 v10+/
 ampere v6+; current guard set all have it). Offline harness:
 `tmp/test_arbitrator_offline.py` + `tmp/fakebin/ssh`, run with `python3 -I`.
 **Naming:** it is the **arbitrator** (the user rejected "arbiter").
@@ -558,13 +572,22 @@ flips to False when the new spec reads back.
 not found`. Pass **ONE plain command** with plain args (`ps aux`, `env`,
 `tail -40 /tmp/llama-api/watchdog.log`). **The relay exits 1 even on SUCCESS** —
 `ls /tmp/llama-api` printed the full listing and exited 1; a missing file also
-exits 1. Only ssh transport failures exit **255**. So **classify by payload,
-never by exit code**: stdout samples ⇒ success; `cannot open`/`cannot access` in
-stderr ⇒ absent; empty stdout + no such text ⇒ connection problem. The
-`Connecting to container <uuid>` banner lands on **stdout** (filter when
-parsing). This bit the arbitrator (its `returncode==0` gate turned four good
-reads into "bail"). Filter secrets on the **local** side of the ssh pipe
-(`| grep -v hf_`), never remotely.
+exits 1. Only ssh transport failures exit **255** (those errors are the local
+ssh client's own and stay on the LOCAL stderr). So **classify by payload,
+never by exit code**. **The relay also MERGES the remote process's stderr into
+the client's STDOUT** (live-probed 2026-10-11: `ls /.ssh` on an absent file →
+client stdout = banner + `ls: cannot access '/.ssh': No such file or
+directory`, client stderr EMPTY). Classify on the **combined** stdout+stderr:
+samples ⇒ success; `cannot open`/`cannot access` in EITHER stream ⇒ absent;
+empty combined output ⇒ connection problem. The `Connecting to container
+<uuid>` banner lands on **stdout** (filter when parsing). This bit the
+arbitrator twice: its `returncode==0` gate turned four good reads into "bail"
+(b418ba3), and the guard's `"/.ssh" in p.stdout` substring check matched ls's
+own error text (delivered on stdout via the merge, and containing the guard
+path) — a false "present" and a zero-shot hold loop on the live drop-test
+(b9eae88; the offline suite's absent-fixture modeled the error on stderr and
+missed it until corrected). Filter secrets on the **local** side of the ssh
+pipe (`| grep -v hf_`), never remotely.
 
 **9g. Transitional API GETs can return an EMPTY container object.** While a group
 is mid-start (`current_status: None`), a management-API GET can return
@@ -826,8 +849,25 @@ stopped at 01:15Z; all 7 fleet groups are now stopped at $0.
      before trusting it.) Offline suites — watchdog 7/7, arbitrator 23/23 —
      green.
 2. **Paid arbitrator live test:** `python3 utils/manage_groups.py start
-   ma-casa-in-paris --min-bw-mbps 30` (pick a group at the prompt) — watch it
-   `POST /reallocate` on a slow download (≤3 shots). §6.
+   ma-casa-in-paris --min-bw-mbps 10000` (atx-hb-test2, user-run) — watch it
+   `POST /reallocate` on a slow download (≤3 shots). §6. **Status 2026-10-11
+   — attempt 1 hit the guard false-positive, now fixed; user re-running.**
+   Attempt 1 (started ~03:54Z, cap 10000): acquired ccf9203e on node
+   0bf20a53 03:58:28Z; slow verdict ~04:01:27Z, but the guard reported
+   `/.ssh present` (FALSE — the relay merged ls's own error text onto stdout;
+   §9f) → infinite `ssh session active (/.ssh present) — holding, no shot
+   spent`, ZERO shots. The node finished the download anyway (READY
+   04:03:01Z, per the read-only watcher) and the run exited 0 "download
+   complete" — the run's one reallocation opportunity was exactly the shot
+   the bug ate. Fix b9eae88 committed+pushed (offline 24/24; the live
+   scenario pinned as the regression). Rerun (user): fresh process — the
+   running one held stale code in memory — and a fresh 3-shot budget; node
+   0bf20a53 was never excluded (no shot ever spent). Known structural limit
+   (explained to user, accepted): the `ready` check runs on every 15 s poll
+   BEFORE verdict eligibility, so a fast node (~2 min download) finishes
+   first regardless of cap — the 3-drop demo needs a slow landing node.
+   Drop-log capture: user pastes the terminal section when the run ends;
+   verify ≤3 `— POST reallocate (shot N/3)` lines + the final node.
 3. **Verify prod ATX context:** at the next start of `atx-swift-27b-q5-opt`,
    scrape `/metrics` and confirm `llama_model_n_ctx = 132864` (spec CTX is 132768).
    §7.
@@ -892,6 +932,8 @@ stopped at 01:15Z; all 7 fleet groups are now stopped at $0.
 ## 17. Recent git history (context for what each commit did)
 
 ```
+b9eae88 arbitrator: fix /.ssh guard false-positive — relay merges stderr into stdout
+be50f71 docs: PROGRESS.md — v2.4 set current, guard smoke FULLY PASSED (user-confirmed cap-kill), build-cache correction, c04ded0 in history
 c04ded0 images: v2.4 set pushed (base/generic v11, q6 v13, ampere v9) — bashrc shell ergonomics + re-pins
 29de3ec images: guard-v2.3 set pushed (base/generic v10, q6 v12, ampere v8) — SSH guard max-hold cap + re-pins
 c54dd9e images: guard-v2.2 set pushed (base/generic v9, q6 v11, ampere v7) — FROMs + deployers re-pinned
