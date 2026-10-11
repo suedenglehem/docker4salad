@@ -722,7 +722,9 @@ class ContainerGroupInstanceInfo:
     machine_id: str | None  # Salad node identity — changes on reallocation;
     # the bandwidth arbitrator uses it to prove each shot lands on a new node
     # (a rejected node is excluded from the account pool for 48 h per docs)
-    pulling_progress: int | None  # IMAGE pull % (NOT the HF model download)
+    pulling_progress: float | None  # IMAGE pull progress as a 0..1 FRACTION
+    # (0.7 = 70%, NOT a percent — live-verified 2026-10-11), NOT the HF model
+    # download
     raw: dict = field(repr=False)
 
     @classmethod

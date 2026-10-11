@@ -658,7 +658,10 @@ def _bw_acquire(
                     if pull_since is None:
                         pull_since = time.monotonic()
                     prog = inst.pulling_progress
-                    prog_s = f"{prog}%" if prog is not None else "?"
+                    # Salad reports pulling_progress as a 0..1 FRACTION, not a
+                    # percent (live-verified 2026-10-11: 0.70000833 read as
+                    # "0.7%" was actually 70%) — scale before printing.
+                    prog_s = f"{prog * 100:.1f}%" if prog is not None else "?"
                     print(f"{ts} UTC  image pull {prog_s} ({time.monotonic() - pull_since:.0f}s)")
                     if time.monotonic() - pull_since > BW_PULL_TIMEOUT:
                         print(f"image pull stuck > {BW_PULL_TIMEOUT:.0f}s at {prog_s} — "
