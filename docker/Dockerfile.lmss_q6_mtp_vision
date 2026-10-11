@@ -56,7 +56,7 @@
 #   docker push boris271142/lmss_jonathancoletti_qwen38_q6_mtp_vision:<tag>
 # =============================================================================
 
-FROM boris271142/lmss:cuda128-v11@sha256:2bfbd69c5730b9787f2b91cfd496ebbfdcce469ba99fc538fbe5a66b2a305455
+FROM boris271142/lmss:cuda128-v12@sha256:0586ba35fb439c4ea35271c17d6fa243b3605d993a5c3f3f32ba0b1070011e63
 
 # --- Bake the two small auxiliary models into /models (build time) -----------
 # The v3 runtime image already has the `hf` CLI (huggingface_hub 1.28.0) +

@@ -136,18 +136,18 @@ MODEL_ALIAS = "qwen38-27b"
 # (b64-obfuscated storage, decoded at startup) before SIGTERM — the only kill
 # that truly stops billing; key 'none'/missing/undecodable DISABLES the
 # watchdog) on top of the exec-form entry.sh CMD fix; based on
-# boris271142/lmss:cuda128-v11@sha256:2bfbd69c…); the tag form, for humans:
-#   boris271142/lmss_jonathancoletti_qwen38_q6_mtp_vision:cuda128-v13
+# boris271142/lmss:cuda128-v12@sha256:0586ba35…); the tag form, for humans:
+#   boris271142/lmss_jonathancoletti_qwen38_q6_mtp_vision:cuda128-v14
 # Older tags were deleted from the registry (2026-10-09, user request — only
 # the current tag per repo is kept); digests kept for history only:
+#   cuda128-v13: sha256:f6e3b9d0c4f6b3fb08ecfabb94c4115d256cdce246054202f858b868115bbfb9
 #   cuda128-v12: sha256:56579bc1f1e45796d72679ca347588b49fa082db8770d9069591a05b9261178a
 #   cuda128-v11: sha256:16c48781fd6a1a146703dec15a26ed1b87d255ff62f8344282c539bf3c4f4035
 #   cuda128-v9: sha256:755c43df1e2285bb0ab5bcc25d0471359a9f78ac9349cabbc6ba2ee5e878221f
 #   cuda128-v8: sha256:7d635166ffb9cb0c87200b0b1b17faae73b96ce288cb0e579c01cd7eb12ebd35
 #   cuda128-v10: sha256:576560097be5a19e14d5d9042c53202dad062f17c6576824773b55b13c6a045d
-#   cuda128-v7: sha256:b7ea489397ab314313133a6b1f93ea159162df4338fd42083f6ff07b91a3d20e
 IMAGE = ("boris271142/lmss_jonathancoletti_qwen38_q6_mtp_vision"
-         "@sha256:f6e3b9d0c4f6b3fb08ecfabb94c4115d256cdce246054202f858b868115bbfb9")
+         "@sha256:a779732c02b2ad8148d21c6ff6f33f5a6d252e9de2e78ab729878342e389ab88")
 
 MODEL_REPO = "JonathanColetti/Qwen3.8-27B-Uncensored-GGUF"
 # Default = live production quant (2026-10-03): Q5_K_M, MTP head embedded in
