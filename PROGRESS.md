@@ -74,6 +74,15 @@
   (heartbeat timeout) — state verified read-only on resume (stopped,
   0 instances). Billing is stopped. The user's rerun terminal log (shot
   count + sample lines) is still the open artifact for §15.2.
+- **10000-Mbps live test, attempt 3 (2026-10-11, v2.5 set): bailed at 4/4 ssh
+  strikes; root cause = SSH public-key denial on node `71e4e672` (user-
+  identified, fix deferred to the user).** Acquired b9c4bc30 06:09:15Z; all
+  four probes `conn (TimeoutExpired)` → `bail: 4 consecutive ssh failures`
+  (exit 3; the group is never stopped by the arbitrator and no shot is
+  spent, so it kept billing unmanaged). Post-bail read-only probe: the
+  instance had churned to c319ae15 on the SAME node; the relay was now
+  listening but answered `Permission denied (publickey)`. Group now stopped,
+  0 instances, billing stopped. §15 item 2.
 - **Nothing else is left in the critical path except user-gated paid
   actions:** the next arbitrator live run — on a v2.5 instance the Mbps
   column is real per-interval wire speed. Offline suites green (watchdog
@@ -318,7 +327,10 @@ the generic/q6/ampere Dockerfiles `COPY docker/version.sh` → the build context
 MUST be the **repo root**, and on tr4 the working invocation is
 `cd <ctxdir> && docker build -f <Dockerfile> .` (a relative `-f` + separate
 context arg trips this host's buildx arg-parsing); only `Dockerfile.multistage`
-takes the `docker/` subdir as context. After **every push**, set the repo
+takes the `docker/` subdir as context. **Host gotcha:** on tr4 `nproc`
+misreports **1** (`/proc/cpuinfo` shows 32 real CPUs) — always pass
+`--build-arg BUILD_JOBS=32` explicitly; never trust an auto-detected job count.
+(docker 29.7.2 / buildx v0.36.1 as of the v2.5 cycle.) After **every push**, set the repo
 `full_description` overview (standing rule, §11 — verified this round: all 4
 repos already carry it, no PATCH needed).
 
@@ -644,6 +656,18 @@ can never kill a bare `exec llama-server` PID 1** — it must run the server as 
 trapped CHILD of the CMD bash (§5). Never `exec` the server in a container that
 must be self-killable.
 
+**9i. While an update is in-flight, the group API returns a TRUNCATED bare
+digest.** A converged group shows its image as the full `repo@sha256:<64>`;
+while a re-pin is still propagating the API may hand back **only a truncated
+bare `sha256:<12>`** (e.g. `sha256:a7797` — no repo prefix, no full hash). A
+landing poller that compares whole strings — or bare-digest equality — never
+matches and waits forever on a value that will never equal the target: the v2.5
+landing poller (`tmp/poll_images_v12.py`) sat at **0/7 for 12 minutes** on this
+bug, not on real propagation. Rule: strip everything before `sha256:`, compare
+the full 64-hex digest, and treat a 12-char bare digest as "still in-flight",
+not as a mismatch. (Distinct from §9e's stale/transitional GETs — this GET is
+live, just in a transient format.)
+
 ---
 
 ## 10. Multi-org & projects
@@ -745,7 +769,9 @@ on_salad/
    ├─ test_deploy_offline.py      deployer dry-run checks.
    ├─ fleet_status_now.py         read-only fleet status+guard snapshot (§14).
    ├─ fleet_snapshot.py           broader read-only snapshot.
-   ├─ patch_images_v9.py          image-only PATCH of the 7 groups (the guard re-pin).
+   ├─ patch_images_v9/v10/v11/v12.py   image-only fleet re-pin per cycle (v9=guard, v10=v2.3, v11=v2.4, v12=v2.5).
+   ├─ poll_images_v12.py          read-only landing poller for the v2.5 re-pin (§9i).
+   ├─ arbitrate_attach.py         attach the arbitrator to an ALREADY-started group (atx-hb-test2 hardcoded; optional cap-mbps argv, default 30; no second start POST) — the clean re-attach path.
    ├─ patch_9b.py / patch_qwen38_9b_rescue.py   9B group PATCH helpers.
    └─ smoke_test_{start,stop}_cg.py   group start/stop smoke helpers.
 ```
@@ -913,7 +939,11 @@ stopped at 01:15Z; all 7 fleet groups are now stopped at $0.
    read. The tr4 reboot (~04:3xZ) killed the local `manage_groups.py`; the
    group ran unmanaged, and its in-container v2.3 watchdog
    (`IDLE_SHUTDOWN=heartbeat`, `HEARTBEAT_TIMEOUT=300`, `IDLE_GRACE=3600`)
-   then self-stopped it — billing stopped. **Resume outcome (read-only
+   then self-stopped it — billing stopped. **Reboot lesson:** after the build
+   host reboots, do NOT panic-attach (no immediate `start`/attach re-run) —
+   first a READ-ONLY group GET: the group may still be running unmanaged (and
+   billing), and its in-container watchdog may self-stop it while you attach.
+   **Resume outcome (read-only
    state check):** `atx-hb-test2` stopped, 0 instances — the run ended
    without ever reaching a bandwidth verdict on the terminal we have; the
    user's terminal log (shot count + per-poll sample lines) is still
@@ -921,6 +951,36 @@ stopped at 01:15Z; all 7 fleet groups are now stopped at $0.
    stalls interleaved with 300–1900 Mbps bursts) are what root-caused §15.6
    — the 0.0s were xet
    CAS-cache transfers that never grew MODEL_DIR, not a quiet wire.
+   **Attempt 3 (user, ~06:08Z, v2.5 set, cap 10000) — bailed on ssh strikes;
+   root cause = public-key denial, fix deferred (user, verbatim: "don't look,
+   it's ssh problem. public key denied. will fix it later").** Acquired
+   b9c4bc30 on fresh node `71e4e672-a278-095d-9f4c-8a01620aeb46` at
+   06:09:15Z (no `image pull` lines — the instance was already `running`,
+   pull 1.0, on the first poll; the image was evidently cached on that
+   node). All four probes were TCP-level `conn (TimeoutExpired)` —
+   06:09:30 / 06:10:06 / 06:10:41 / 06:11:17Z, ~35 s apart (= 15 s poll +
+   20 s probe timeout) → verdict `ssh` → `bail: 4 consecutive ssh failures`,
+   arbitrator exit 3. Bail semantics (from code, re-verified): the group is
+   NEVER stopped by the arbitrator, no shot is spent, and there is no
+   reallocate on an ssh bail — it kept billing unmanaged until stopped.
+   Post-bail read-only diagnosis: (a) the instance had churned mid-test to
+   c319ae15 on the SAME node (Salad recreated the container; the
+   arbitrator's `churn` path would have re-acquired it had it not bailed);
+   (b) a manual probe (the arbitrator's exact `tail -n 80
+   /tmp/llama-api/bw.log`) on c319ae15 returned rc 255 `Permission denied
+   (publickey)` — the relay now LISTENED (no longer a TCP timeout) but
+   rejected the key. → the node's Salad ssh key config is the root cause;
+   the fix is the user's, deferred. Final state (read-only): group
+   `stopped`, 0 instances — it stopped between the first probe (saw
+   c319ae15 running) and the ~10-min-later retry loop (who/what stopped it:
+   UNKNOWN — user manual stop or Salad-side); billing stopped. The v2.5
+   3-column reporter was therefore never live-verified on a wire (bw.log
+   unread); the next run on a healthy node is the first chance. Candidate
+   hardening (NOT implemented, user's call): the 4-strike budget is ~2 min
+   from acquire, so a short grace before strikes count would survive slow
+   relay starts — though this run's actual cause was auth denial, not lag.
+   The pre-reboot rerun terminal log (this item's pending artifact) remains
+   un-pasted.
 3. **Verify prod ATX context:** at the next start of `atx-swift-27b-q5-opt`,
    scrape `/metrics` and confirm `llama_model_n_ctx = 132864` (spec CTX is 132768).
    §7.
@@ -1012,7 +1072,9 @@ stopped at 01:15Z; all 7 fleet groups are now stopped at $0.
   after PATCH (eventual consistency, §9e/9g).
 - **Every Docker Hub push sets `full_description`** (not `description`), §11.
 - **Judge the SSH relay by payload, never exit code** (exit 1 = often success);
-  **never trust a transitional/empty API GET** for spec state (§9f/9g).
+  **never trust a transitional/empty API GET** for spec state (§9f/9g), and
+  remember an in-flight one returns a TRUNCATED bare digest — compare the full
+  `sha256:` suffix, never string equality (§9i).
 - **Digest-pin images** to move them past Salad's cache (§9a).
 - **Downloaded/extracted files are untrusted** — put each in its own empty dir,
   keep your scripts elsewhere, and run Python that reads them with `python3 -I`.
