@@ -52,15 +52,30 @@
   stdout and the old substring check matched it. The guard now checks ls's
   error markers first (combined streams) and requires an exact `/.ssh` line
   for presence; `_bw_read` hardened the same way. §9f.
-- **`atx-hb-test2` is the ONLY live group — the user's paid arbitrator
-  drop-test is in flight** (the other six are stopped at $0). Attempt 1's
-  node finished the download anyway (READY 04:03:01Z, "download complete",
-  zero shots — the bug ate the run's only reallocation opportunity); with the
-  fixed code the user is re-running `start --min-bw-mbps 10000` for the
-  3-reallocation demo. §15.2.
-- **Nothing else is left in the critical path except user-gated paid tests:**
-  the arbitrator drop-log live capture (§15.2) is running. Offline suites
-  green (watchdog 7/7, arbitrator 24/24).
+- **Bandwidth 0-Mbps bug: ROOT-CAUSED + FIXED in code (55aac06,
+  2026-10-11): the xet fix.** The v1 reporter measured
+  `MODEL_DIR` file growth, but the images bake `HF_XET_HIGH_PERFORMANCE=1`
+  and xet moves most shard bytes through its CAS cache **outside** MODEL_DIR
+  — the dir only grows at shard finalization, so the manager read 0.0 Mbps
+  for long stretches of a healthy download (spikes at finalizations: the
+  1081/616/0.0/877/0.0/295/0.0/1874 pattern from run 1). The reporter now
+  logs `epoch rx-bytes model-bytes` — the kernel NIC RX counter (the exact
+  counters `bmon` reads, read directly) is the bandwidth source; model bytes
+  are the human-facing MB display only. The manager computes rates from the
+  rx column and still parses the legacy 2-column log (rx := model), so old
+  images keep measuring at v1 accuracy in a mixed fleet. **The fix only
+  takes effect in rebuilt images** (the reporter is baked in); the manager
+  side is live code. §15.6.
+- **All 7 groups stopped at $0 — the in-flight drop-test ended.** The
+  tr4 reboot (~04:3xZ) killed the local `manage_groups.py` mid-rerun; the
+  unmanaged `atx-hb-test2` then self-stopped via its own v2.3 watchdog
+  (heartbeat timeout) — state verified read-only on resume (stopped,
+  0 instances). Billing is stopped. The user's rerun terminal log (shot
+  count + sample lines) is still the open artifact for §15.2.
+- **Nothing else is left in the critical path except user-gated paid
+  actions:** the v2.5 image rebuild (carries the bw fix) + fleet re-PATCH,
+  and the next arbitrator live run. Offline suites green (watchdog 7/7,
+  arbitrator 26/26).
 - **This Claude session runs on LOCAL vllm on tr4** (`qwen3.8-27b` fp8,
   `:8000`, TP2+MTP, since Oct 10) — NOT on a Salad group. Group stops never
   affect the session, and session turns never reset a group's watchdog.
@@ -851,7 +866,8 @@ stopped at 01:15Z; all 7 fleet groups are now stopped at $0.
 2. **Paid arbitrator live test:** `python3 utils/manage_groups.py start
    ma-casa-in-paris --min-bw-mbps 10000` (atx-hb-test2, user-run) — watch it
    `POST /reallocate` on a slow download (≤3 shots). §6. **Status 2026-10-11
-   — attempt 1 hit the guard false-positive, now fixed; user re-running.**
+   — attempt 1 hit the guard false-positive, now fixed; the rerun was in
+   flight when the tr4 reboot killed it — see outcome below.**
    Attempt 1 (started ~03:54Z, cap 10000): acquired ccf9203e on node
    0bf20a53 03:58:28Z; slow verdict ~04:01:27Z, but the guard reported
    `/.ssh present` (FALSE — the relay merged ls's own error text onto stdout;
@@ -875,10 +891,16 @@ stopped at 01:15Z; all 7 fleet groups are now stopped at $0.
    FRESH node `84b984b8` (neither attempt 1's 0bf20a53 nor the fast node).
    Pull completed (1.0), model download started, `ready=False` at last
    read. The tr4 reboot (~04:3xZ) killed the local `manage_groups.py`; the
-   group runs unmanaged, but the in-container v2.3 watchdog
+   group ran unmanaged, and its in-container v2.3 watchdog
    (`IDLE_SHUTDOWN=heartbeat`, `HEARTBEAT_TIMEOUT=300`, `IDLE_GRACE=3600`)
-   bounds the billing. On resume: read-only state check → user's terminal
-   log → verify shot count → then §15.6 (bmon/0-Mbps measurement bug).
+   then self-stopped it — billing stopped. **Resume outcome (read-only
+   state check):** `atx-hb-test2` stopped, 0 instances — the run ended
+   without ever reaching a bandwidth verdict on the terminal we have; the
+   user's terminal log (shot count + per-poll sample lines) is still
+   pending from the user. The run-1 sample lines the user pasted (0.0
+   stalls interleaved with 300–1900 Mbps bursts) are what root-caused §15.6
+   — the 0.0s were xet
+   CAS-cache transfers that never grew MODEL_DIR, not a quiet wire.
 3. **Verify prod ATX context:** at the next start of `atx-swift-27b-q5-opt`,
    scrape `/metrics` and confirm `llama_model_n_ctx = 132864` (spec CTX is 132768).
    §7.
@@ -913,19 +935,41 @@ stopped at 01:15Z; all 7 fleet groups are now stopped at $0.
    = nvtop/htop + aliases over the relay on any group's next start.
    `restart_policy`/`priority` are CREATE-ONLY, so any change to those still
    requires delete+recreate (§9c: use a fresh name, keep `MODEL_ALIAS` stable).
-6. **OPEN BUG (user-reported 2026-10-11, investigation deferred) — bandwidth
-   measurement discrepancy:** bmon INSIDE the container reported ~10 Mbps
-   (user's words — confirm units on resume; possibly 10,000) while the manager
-   reported 0 Mbps. Investigation angles: `docker/bw_reporter.py` (which dir it
-   sums — the `MODEL_DIR` env var — and its 10 s size-delta rate math) vs where
-   the HF download actually writes (`.incomplete` staging may live outside
-   MODEL_DIR ⇒ flat size ⇒ 0.0 samples while real traffic flows); check the
-   live `env` MODEL_DIR over the relay; cross-reference the 0.0 sample
-   timestamps against the bmon timeline. Run-1 context: 0.0 stalls were
-   interleaved with 300–1900 Mbps bursts and 13.8 GB did land in MODEL_DIR in
-   ~3 min, so the reporter does see growth — the dir question is prime suspect.
-   (Recorded 2026-10-11 right before the tr4 reboot; session checkpoint
-   mycelium #144/#145 has the resume order.)
+6. **RESOLVED (2026-10-11, code committed 55aac06) — the bandwidth 0-Mbps
+   discrepancy: xet, not a quiet wire.** bmon inside the container showed
+   steady traffic while the manager reported 0 Mbps (both test nodes,
+   0bf20a53 and 84b984b8). **Root cause:** the images bake
+   `HF_XET_HIGH_PERFORMANCE=1`, and xet moves most shard bytes through its
+   CAS cache **OUTSIDE** `MODEL_DIR` — the dir grows only when a finished
+   shard is finalized. The v1 reporter's MODEL_DIR-growth proxy therefore
+   read 0.0 through the long xet phases and spiked at finalizations (the
+   run-1 pattern: 1081.5/616.7/0.0/877.3/0.0/295.7/0.0/1874.5 Mbps). Ruled
+   out first: the rate math (`bytes*8/dt/1e6` — correct) and a MODEL_DIR
+   mismatch (13.8 GB did land in MODEL_DIR in ~3 min). **Fix:** the
+   reporter logs `epoch rx-bytes model-bytes`; the kernel NIC RX counter
+   (`/sys/class/net/<if>/statistics/rx_bytes`, summed over non-lo) is the
+   bandwidth source — the exact counters `bmon` reads, read directly (no
+   binary, no extra process, our own epoch timestamps over the shell-less
+   relay; the old anti-bmon "NIC noise" objection is KB/s, negligible vs an
+   Mbps cap over a 120 s median). The model column is the human-facing MB
+   progress display only. The manager rates from the rx column and parses
+   the legacy 2-column log as rx := model, so a mixed fleet still measures
+   (at v1 accuracy) until the fleet is re-imaged. Offline suite 26/26
+   incl. two new legacy-format scenarios.
+   - **The verdict, not just the display, was at risk:** the 0.0 intervals
+     poison the 120 s median too — a node with long xet phases could median
+     near 0.0 and eat reallocate shots it didn't deserve.
+   - **Per-poll display note:** the Mbps column is the LAST 10 s interval
+     (`rates[-1]`); with the rx counter it is now real per-interval wire
+     speed (much closer to what bmon shows) instead of flat model-growth
+     deltas.
+   - **bmon units:** the user's "~10 Mbps" figure is no longer needed to
+     discriminate — we read the same kernel counters bmon reads, so any
+     residual gap is display/interval, not source.
+   - **REMAINING (user-gated, paid):** the fix lives in the BAKED reporter —
+     it takes effect only in rebuilt images: a v2.5 set (tr4 build ~15 min
+     warm + push + digest re-pins + fleet re-PATCH; only NEW instances get
+     it). The manager side is already live (run from this repo on tr4).
 
 **Known open item (not urgent):** `qwen38-9b`'s env lacks `IDLE_GRACE` (it's
 `IDLE_SHUTDOWN=none`, so it's harmless). The other five `none` groups carry
@@ -956,6 +1000,11 @@ stopped at 01:15Z; all 7 fleet groups are now stopped at $0.
 ## 17. Recent git history (context for what each commit did)
 
 ```
+55aac06 bw: measure from the kernel RX counter, not MODEL_DIR growth (xet fix)
+b5177cc docs: PROGRESS.md — rerun in flight on fresh node 84b984b8 (fixed code), pull-% display fix, state at tr4 reboot
+b0b3800 arbitrator: render image pull progress as a real percent
+197b6d7 docs: PROGRESS.md — open item 6: bmon (in-container) vs manager 0 Mbps bandwidth measurement discrepancy, investigation deferred
+111dff5 docs: PROGRESS.md — /.ssh guard false-positive (relay stderr-merge) found live + fixed b9eae88
 b9eae88 arbitrator: fix /.ssh guard false-positive — relay merges stderr into stdout
 be50f71 docs: PROGRESS.md — v2.4 set current, guard smoke FULLY PASSED (user-confirmed cap-kill), build-cache correction, c04ded0 in history
 c04ded0 images: v2.4 set pushed (base/generic v11, q6 v13, ampere v9) — bashrc shell ergonomics + re-pins
