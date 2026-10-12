@@ -579,7 +579,10 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         path = urllib.parse.urlsplit(self.path).path.rstrip("/") or "/"
         if path in ("/healthz", "/health"):
-            self._json(200, {"ok": True})
+            # The nonce is the wrapper's ownership probe: a second cl_salad session
+            # on the same port gets THIS proxy's answer, which carries a different
+            # nonce, so it can tell "my proxy bound" from "someone else's proxy".
+            self._json(200, {"ok": True, "nonce": getattr(self.server, "nonce", "")})
         elif path.endswith("/models"):
             up = self._upstream()
             self._json(200, {"data": [{"id": up.model, "type": "model",
@@ -678,6 +681,9 @@ def main():
     ap.add_argument("--max-tokens-cap", type=int, default=12000,
                     help="hard ceiling on output tokens forwarded upstream")
     ap.add_argument("--timeout", type=int, default=600, help="upstream read timeout (s)")
+    ap.add_argument("--nonce", default="",
+                    help="echoed by /healthz so the wrapper can verify it is talking to THIS "
+                         "proxy (two sessions on one port otherwise look identical)")
     a = ap.parse_args()
 
     up = Upstream(a.upstream, a.keyfile, a.model,
@@ -685,6 +691,7 @@ def main():
                   max_tokens_cap=a.max_tokens_cap, timeout=a.timeout)
     srv = ThreadingHTTPServer((a.host, a.port), Handler)
     srv.upstream = up
+    srv.nonce = a.nonce
     sys.stderr.write("salad_proxy: http://%s:%d -> %s (model=%s) pid=%d\n" %
                      (a.host, a.port, a.upstream, a.model, os.getpid()))
     sys.stderr.flush()

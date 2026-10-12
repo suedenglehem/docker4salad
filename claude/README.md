@@ -53,6 +53,13 @@ cl_salad https://<dns> -p "Say hi"        # everything after the URL goes to cla
   `ANTHROPIC_BASE_URL=http://127.0.0.1:8093` + `ANTHROPIC_API_KEY=local`,
   and runs `claude --permission-mode bypassPermissions --model <alias>`.
   The proxy is killed when claude exits; claude's own exit code is returned.
+- **One session per port.** Before launching claude it verifies **our** proxy is
+  the one answering: the proxy echoes a per-session nonce on `/healthz`, so a
+  second session on the same port exits **3** with "the port is held by ANOTHER
+  cl_salad session" instead of silently running against the first session's proxy
+  (which dies when that session exits). Run the second session with
+  `--port 8094`. Verified 2026-10-13 against a local fake gateway: foreign proxy →
+  exit 3, free port → exit 0, two live sessions → second exits 3, no leaked proxies.
 - Token caps: `CLAUDE_CODE_MAX_CONTEXT_TOKENS` **64000** +
   `CLAUDE_CODE_MAX_OUTPUT_TOKENS` **16000** = 80000, deliberately under the
   served n_ctx **90112** (CTX_SIZE 90000, Q5_K_M). Lower them if you hit

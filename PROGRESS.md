@@ -126,7 +126,12 @@ and wraps it so it's usable from **Claude Code** and plain curl as an
   **llamAmpere** (a custom turbo-KV build) for the production "ATX" profile.
 - **Anthropic proxy:** `claude/salad_proxy.py` — a sidecar that serves only the
   Anthropic Messages API shape, converts to llama-server, and strips empty
-  `think` blocks (see §8).
+  `think` blocks (see §8). `cl_salad` verifies **its own** proxy owns the local
+  port before launching claude (the proxy echoes a per-session nonce on
+  `/healthz`): a second session on 8093 exits **3** with a "port held by another
+  session" message instead of running against the first session's proxy — run it
+  with `--port 8094`. (2026-10-13; a plain liveness probe passes in exactly that
+  collision case, so liveness alone is not ownership.)
 - **SSH access:** Salad exposes SSH into a running container
   (`ssh root@<ip> -p <port>`); that's how the user works inside the box and how
   the guard file `/.ssh` is touched (§3).
@@ -843,8 +848,8 @@ on_salad/
 │  ├─ llama_stats.py / stats.sh  /metrics helpers.
 │  └─ README.md                  (51 KB) the big image/deploy doc (linked from Hub).
 ├─ claude/
-│  ├─ salad_proxy.py             (698) Anthropic-only proxy + EmptyThinkStripper (§8).
-│  ├─ cl_salad                   Claude Code → Salad launcher (heartbeat default ON).
+│  ├─ salad_proxy.py             (705) Anthropic-only proxy + EmptyThinkStripper (§8); --nonce = /healthz ownership probe.
+│  ├─ cl_salad                   Claude Code → Salad launcher (heartbeat ON by default; exits 3 when the proxy port is another session's).
 │  ├─ chat_salad.sh              curl-based chat client (URL positional arg).
 │  ├─ cl_salad_deploy            deployer wrapper (auto-exports SALAD_HEARTBEAT).
 │  └─ curl_salad.sh / cube*      curl helpers + a small CUDA experiment (untracked).
@@ -882,7 +887,7 @@ on_salad/
                                   post.txt (the ATX operating point — deployer-defaults provenance), logs.
 ```
 Key file line counts (2026-10-10): `manage_groups.py` 942, `salad_client.py` 875,
-`salad_proxy.py` 698, `deploy_ampere.py` 725, `deploy_generic.py` 697,
+`salad_proxy.py` 705, `deploy_ampere.py` 725, `deploy_generic.py` 697,
 `deploy_qwen38_27b.py` 633, `deploy_qwen38_9b.py` 452, `deploy_qwen9b.py` 415,
 `idle_watchdog.py` 427, `bw_reporter.py` 124.
 
@@ -1254,7 +1259,8 @@ stopped at 01:15Z; all 7 fleet groups are now stopped at $0.
 ## 17. Recent git history (context for what each commit did)
 
 ```
-20abaa3 tools/: promote durable tooling out of gitignored tmp/ — §14 paths now resolve on a fresh clone; one-shot attempt artifacts deleted; test_deploy_offline + fleet_status_now de-staled
+57de156 cl_salad: verify OUR proxy owns the local port (nonce echoed on /healthz) — a second session exits 3 instead of hijacking the first session's proxy; + deploy/README.md command lines
+8443c93 tools/: promote durable tooling out of gitignored tmp/ — §14 paths now resolve on a fresh clone; one-shot attempt artifacts deleted; test_deploy_offline + fleet_status_now de-staled
 bd6d612 docs: PROGRESS.md — mycelium fold for cold-start on another box (attempt-3 outcome, §9i in-flight truncated-digest API gotcha, nproc trap, arbitrate_attach/reboot-lesson, §16 ref)
 49e8585 docs: PROGRESS.md — v2.5 set current (xet fix shipped to the fleet), 870bc05 in history
 870bc05 images: v2.5 set pushed (base/generic v12, q6 v14, ampere v10) — bw_reporter v2 kernel-RX (xet fix) + re-pins

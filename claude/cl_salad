@@ -117,6 +117,9 @@ echo "cl_salad: model ready on $GATEWAY_HOST — starting proxy on 127.0.0.1:$PR
 # ---- launch the proxy ----------------------------------------------------
 PROXY_PID=""
 HEARTBEAT_PID=""
+# Ownership token for the /healthz probe: two sessions on one port look
+# identical to a liveness check, so the proxy echoes this nonce back to us.
+PROXY_NONCE="cl_salad-$$-$(date +%s 2>/dev/null || echo 0)"
 cleanup() {
     [ -n "$PROXY_PID" ] && kill "$PROXY_PID" 2>/dev/null
     [ -n "$HEARTBEAT_PID" ] && kill "$HEARTBEAT_PID" 2>/dev/null
@@ -129,18 +132,38 @@ trap cleanup EXIT
     --model "$MODEL_ALIAS" \
     --keyfile "$KEYFILE" \
     --thinking "$THINKING" \
+    --nonce "$PROXY_NONCE" \
     >/tmp/cl_salad_proxy.$$.log 2>&1 &
 PROXY_PID=$!
+
+# OUR proxy answering on the port — not merely "something" answering.
+proxy_up() {
+    curl -s -m 2 "http://127.0.0.1:$PROXY_PORT/healthz" 2>/dev/null | grep -q "$PROXY_NONCE"
+}
 
 # wait for the proxy to bind
 i=0
 while [ "$i" -lt 25 ]; do
-    if curl -s -o /dev/null "http://127.0.0.1:$PROXY_PORT/healthz" 2>/dev/null; then
-        break
-    fi
+    proxy_up && break
     i=$((i + 1))
     sleep 0.2
 done
+
+# VERIFY OUR OWN proxy before launching claude. A second concurrent session hits
+# EADDRINUSE and its proxy exits 1; a liveness-only probe then sees the FIRST
+# session's proxy, and claude runs against a backend that dies when that session
+# exits (measured 2026-10-13: the plain healthz check passes in exactly that case).
+if ! proxy_up; then
+    echo "cl_salad: our proxy is not answering on 127.0.0.1:$PROXY_PORT — not starting claude." >&2
+    if curl -s -m 2 "http://127.0.0.1:$PROXY_PORT/healthz" 2>/dev/null | grep -q '"nonce"'; then
+        echo "cl_salad: the port is held by ANOTHER cl_salad session (its proxy answered)." >&2
+    elif [ -n "$PROXY_PID" ] && ! kill -0 "$PROXY_PID" 2>/dev/null; then
+        echo "cl_salad: the proxy exited. Its log (/tmp/cl_salad_proxy.$$.log):" >&2
+        tail -5 "/tmp/cl_salad_proxy.$$.log" >&2 2>/dev/null
+    fi
+    echo "cl_salad: run this session on a free port —  cl_salad_deploy --port $((PROXY_PORT + 1)) ..." >&2
+    exit 3
+fi
 
 # ---- heartbeat keepalive (opt-in: SALAD_HEARTBEAT=1) ----------------------
 # When the group runs with IDLE_SHUTDOWN=heartbeat, the in-container watchdog
