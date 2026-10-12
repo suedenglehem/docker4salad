@@ -1119,15 +1119,32 @@ Items 1–2 need a **paid** Salad start (burns credits) — the user decides whe
 2026-10-11: the approved guard smoke (item 1) is **FINISHED** — `atx-hb-test2`
 stopped at 01:15Z; all 7 fleet groups are now stopped at $0.
 
-> **NEXT UNFINISHED TASK (state 2026-10-13, tree clean, `main` == `origin/main`):**
-> items 1–6 below are all DONE / CLOSED / RESOLVED. The one open thread is **item 3's
-> aftermath — why the group ran ~19 min past ready without self-stopping**
-> (`HEARTBEAT_TIMEOUT=300`): read `/tmp/llama-api/watchdog.log` **BEFORE** stopping at
-> the next paid start, then decide if the SSH guard's 1200 s cap explains it (it should:
-> 19 min < 20 min) or the watchdog failed to arm. Zero-cost work was exhausted as of that
-> writing (tooling tracked in `tools/`, docs current, fleet on the v2.5 digests, every deployer
-> profile re-appliable with `--no-start`) — **superseded 2026-10-12 by the chat-template-url
-> feature block below**, whose remaining step is a user-gated image build + re-pin.
+> **NEXT UNFINISHED TASK (state 2026-10-12 late, `main` == `origin/main` @ `c2c07f3`, uncommitted:
+> `PROGRESS.md` + root `README.md`):**
+> items 1–6 below are all DONE / CLOSED / RESOLVED, and the **chat-template-url cycle is COMPLETE**:
+> built + pushed on tr4, all five deployers re-pinned, and **all 5 live fleet groups image-only
+> PATCHed onto the new digests and verified reading them** (`tools/patch_images_v13.py`; 5/5 with
+> `pending_change=False`, env byte-identical 19/19/18/22/19 keys, zero cost — no start triggered).
+> What remains is ALL USER-GATED:
+> **① the user's own `CHAT_TEMPLATE_URL` test** — set the key on `llm/qwen38-27b-q5` (unlocked, on
+> q6 v15) with `python3 -I tools/sl_set_env.py ma-casa-in-paris/llm/qwen38-27b-q5 CHAT_TEMPLATE_URL=<raw-url> --dry-run`
+> (drop `--dry-run` to send), then a paid start. `llm/atx-swift-27b-q5` is **PATCH-locked** by its
+> parked update — env edits there 400 until its next paid start.
+> **② item 3's aftermath** — why the group ran ~19 min past ready without self-stopping
+> (`HEARTBEAT_TIMEOUT=300`): read `/tmp/llama-api/watchdog.log` **BEFORE** stopping at the next paid
+> start, then decide if the SSH guard's 1200 s cap explains it (it should: 19 min < 20 min) or the
+> watchdog failed to arm. **③ tr4 is at `d1f5bff`** — `ssh b760one "cd /dd2/andrei/docker/on_salad && git pull"`
+> before the next build cycle.
+> Zero-cost work is exhausted: every group is queued on the chat-template-url images, so the next
+> paid start of any of them runs the new set. `utils/sl_admin.py describe` now dumps any group's
+> whole config (image/digest, resources, GPU names, CMD, probes, full env with secret VALUES
+> redacted, instance ids + ssh lines) — the read-only side of every future check.
+> **Root `README.md` rewritten 2026-10-12 (user's call, uncommitted):** the `## Most useful` section and
+> the tail are GONE; a new **`## TD;LR`** section sits **before `## Layout`** with the full command
+> sequence from a freshly created Salad account to Claude Code on a Salad GPU (web UI org/project →
+> keys on disk → `create-org`/`create-project --register-only` → `deploy --type q6 … --no-start` (free)
+> → `start --min-bw-mbps 100` (paid) + `wait` → `sl_curl.sh` smoke test → `sl_claude_deploy` /
+> `cl_salad`). Intro prose and the `## Layout` bullets kept verbatim (the `describe` bullet updated).
 >
 > **ADMIN SURFACE (2026-10-12, zero-cost, uncommitted at write time):**
 > `utils/manage_groups.py` → **`utils/sl_admin.py`** (`git mv`; every reference in

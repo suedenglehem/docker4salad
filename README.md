@@ -5,6 +5,49 @@ Salad uses it's own api key to secure acces to cloudflare gw, so, you have to ru
 Docker images can be : https://github.com/suedenglehem/docker4salad/blob/main/docker/README.md 
 Beware, there's auto-stop in these dockers after idling too long (useful not to pay much if you loose connection mid-flight)
 
+## TD;LR
+
+The run sequence: freshly created Salad account → Claude Code running on a Salad GPU. Steps 1–2 are the web UI (orgs and projects **cannot** be created through the public API), everything after is this repo. `yours` = your own org / project / group names; `https://<group>.salad.cloud` is the group's `networking.dns` (https, 443 — Cloudflare fronts it, the in-container port is not forwardable), printed by `start` / `list` / `describe`.
+
+**1. portal.salad.com** — sign up, create the **organization** and a **project**, copy the account **API key** (it is account-wide; group-scoped keys don't exist).
+
+```bash
+# 2. keys on disk — gitignored, chmod 600, never printed
+printf '%s' "<SALAD_API_KEY>" > deploy/salad_api.txt && chmod 600 deploy/salad_api.txt
+cp deploy/salad_api.txt claude/salad_api.txt          # the gateway stack reads its own copy
+printf '%s' "<HF_TOKEN>" > deploy/hft.txt && chmod 600 deploy/hft.txt
+
+# 3. register them in the fleet map (the API has no list-orgs / list-projects,
+#    so this tool walks utils/fleet.json)
+python3 utils/sl_admin.py create-org     yours --project your_project --register-only
+python3 utils/sl_admin.py create-project yours your_project --register-only
+
+# 4. CREATE the group — FREE (--no-start; CREATE and PATCH are free, only START bills)
+python3 utils/sl_admin.py deploy --type q6 --org yours --project your_project --group your_group \
+    -- --idle-shutdown heartbeat --stop-key deploy/salad_api.txt
+#   the same, straight from the deployer (its built-in defaults ARE the Claude Code
+#   backend profile: q6 mtp-vision image, Q5_K_M, CTX 90000, rtx3090):
+python3 -I deploy/deploy_qwen38_27b.py --org yours --project your_project --group your_group \
+    --idle-shutdown heartbeat --stop-key deploy/salad_api.txt --no-start
+
+# 5. START it — PAID. --min-bw-mbps is the bandwidth arbitrator: a slow HF download
+#    POSTs /reallocate (new node, max 3 shots, 4th host kept), the group is never stopped
+python3 utils/sl_admin.py start yours --min-bw-mbps 100
+python3 utils/sl_admin.py wait  yours          # polls until an instance reports ready
+
+# 6. smoke test the gateway (no proxy — known-answer questions)
+./claude/sl_curl.sh -url https://<group>.salad.cloud -m qwen38-27b
+
+# 7. Claude Code on the GPU — sl_claude_deploy resolves the gateway DNS from the group,
+#    starts it if stopped, waits for the model, then hands off to cl_salad, which runs
+#    the Anthropic↔OpenAI proxy on 127.0.0.1:8093 and launches claude against it
+claude/sl_claude_deploy --org yours --project your_project --group your_group
+claude/cl_salad https://<group>.salad.cloud    # group already live: proxy + claude only
+./claude/sl_chat.sh https://<group>.salad.cloud # plain chat instead of Claude Code
+```
+
+Free by construction: 1–4 cost nothing, 5 is the only paid step, and the group auto-stops itself when the client connection dies (`--idle-shutdown heartbeat` + the `/.ssh` presence guard — `touch /.ssh` after SSH-ing into the container, `rm /.ssh` on the way out). `python3 utils/sl_admin.py describe yours --project your_project --group your_group` dumps the whole config of a group (image + digests, resources, GPU classes, CMD, probes, full env with secret values redacted, instances + SSH lines).
+
 ## Layout
 
 - `salad_client.py` — stdlib-only Salad OpenAPI client (groups, projects, GPU classes, PATCH via `update_container_group`). API key from `deploy/salad_api.txt` (gitignored, never printed).
@@ -27,7 +70,7 @@ Beware, there's auto-stop in these dockers after idling too long (useful not to 
   - `utils/llama_stats.py` — host entry point for llama-server stats (generation/prompt tps, queue, token totals, spec-decode) scraped from `/metrics`. Run it from the host against a Salad gateway URL (Salad key auto-loaded from `deploy/salad_api.txt`) or any local server: `python3 utils/llama_stats.py https://<group>.salad.cloud [--raw] [--once | --interval N]` (defaults to a 5s loop). Implementation lives in `docker/llama_stats.py` (must be inside the build context); the in-container wrapper `stats.sh` is installed in the image by `Dockerfile.multistage`, aliased there as **`llama-stats`** (local-only stats, works over Salad's shell-less SSH exec: `ssh -p PORT root@IP llama-stats --once`).
   
   - `utils/billing.py` — per-org Salad portal credit balances (USD + live EUR column). The public API has no billing operation, so it logs into the portal backend with credentials from `utils/portal_vault.gpg` (GPG AES256, gitignored; passphrase via `$PORTAL_VAULT_PASS` or prompt). First run creates the vault: prompts for email/password/org slugs and verifies the login before encrypting.
-  - `utils/sl_admin.py` — the fleet admin for every known org/project: `list` (default, status table with age/uptime, instance counts, gateway URLs, SSH lines for running groups), `refresh` (live re-render, Ctrl-C), `start` (bills), `stop`, `wait` (poll one group until an instance reports ready), `stats` (llama-server stats — only when the group is fully ready: running, all replicas present, all instances `ready`; otherwise prints the state and exits 1), `delete` (typed-name confirm; leaves a name tombstone). Actions pick a group from a numbered table by # or name.
+  - `utils/sl_admin.py` — the fleet admin for every known org/project: `list` (default, status table with age/uptime, instance counts, gateway URLs, SSH lines for running groups), `refresh` (live re-render, Ctrl-C), `start` (bills), `stop`, `wait` (poll one group until an instance reports ready), `stats` (llama-server stats — only when the group is fully ready: running, all replicas present, all instances `ready`; otherwise prints the state and exits 1), `describe` (whole-config dump of one group: image repo/tag/manifest digest/Hub link + the `docker image inspect` line, resources and GPU classes by name, CMD, probes, the full env with secret values redacted, live instances with ids and SSH lines, `--raw` for the whole GET as JSON), `delete` (typed-name confirm; leaves a name tombstone). Actions pick a group from a numbered table by # or name.
     - `deploy` — **pick a DOCKER TYPE from a menu** (`q6` = the Claude Code backend, `generic` = any GGUF on vanilla lmss, `ampere` = the llamAmpere fork (sm_86 30-series cards), `9b` / `qwen9b` = plain 9B on base lmss) and it runs that deployer against an org/project/group, prompting for whatever you don't pass (`--type/--org/--project/--group`; flags after `--` go to the deployer verbatim). **Free by default** — it runs the deployer with `--no-start` (CREATE/PATCH are free, only START bills); `--start` is the paid opt-in and asks for a typed `y`.
     - `create-org` / `create-project` — orgs and projects **cannot be created through the public API** (live-probed 2026-10-13: every create/list path is 404; they exist only in the web UI). These actions attempt the portal backend (the web UI's own API, via the `billing.py` vault — undocumented, so a 404 is the expected answer; `--no-portal` skips it) and then **register** the org/project in `utils/fleet.json`, which is the map this tool walks (the Salad API has no list-orgs/list-projects). `--register-only` after creating in the web UI.
   
@@ -38,14 +81,3 @@ Beware, there's auto-stop in these dockers after idling too long (useful not to 
 - `tests/` — **local** run/test helpers for the compose services (nothing here touches the Salad API): `run_27b.sh` / `run_9b*.sh` (they cd into `docker/` themselves), `curl1.sh` / `curl2.sh` (API check / question→answer, read the key through a local `api.txt` symlink), `run-nvidia-smi.sh` (one-shot GPU info). See `tests/README.md`.
 
 - `claude/` — the Claude Code ↔ Salad gateway stack: `cl_salad` / `sl_claude_deploy` + `sl_proxy.py` (Anthropic↔OpenAI bridge), gateway test helpers (`sl_curl.sh`, `sl_chat.sh`), and the gateway `salad_api.txt`. See `claude/README.md`.
-
-## Most useful 
-
-After you've created organisation your_organisation (and projects, projects can't be created via api), you would 
-1) create a group in your_organizaion via sl_claude_deploy, one of deploy scripts,
-   or `sl_admin.py deploy` (menu: docker type -> org/project/group; free, it does not start)
-2) fire sl_admin.py start your_organisation --min-bw-mbps 100
-   (it will show urls of groups)
-3) fire claude or chat via cl_salad url_of_group_on_salad 
-
-
