@@ -13,7 +13,7 @@ Dockerfiles in this repo pass it):
       python3 utils/llama_stats.py https://<group>.salad.cloud
 
 Salad gateways require the Salad API key as a `Salad-Api-Key` header (same
-convention as claude/curl_salad.sh); for a *.salad.cloud target it is
+convention as claude/sl_curl.sh); for a *.salad.cloud target it is
 loaded automatically from salad_api.txt (deploy/salad_api.txt, or
 claude/salad_api.txt).
 If the server was started with --api-key, pass the LLM key too:
@@ -136,7 +136,7 @@ def _http_hint(url: str, code: int) -> str:
     if host.endswith(".salad.cloud") and code in (401, 403):
         return "\nhint: gateway rejected auth — Salad key missing/wrong, or pass --api-key for the LLM key."
     if code == 404:
-        return "\nhint: a Salad group gateway 404s on EVERY path while the group is STOPPED (python3 utils/manage_groups.py)."
+        return "\nhint: a Salad group gateway 404s on EVERY path while the group is STOPPED (python3 utils/sl_admin.py)."
     return ""
 
 
@@ -208,7 +208,7 @@ def main(argv: list) -> None:
             sys.exit(
                 f"cannot reach {url}: {reason}\n"
                 "is llama-server up? (in-container: `docker ps` + logs; "
-                "Salad: is the group RUNNING — `python3 utils/manage_groups.py`)"
+                "Salad: is the group RUNNING — `python3 utils/sl_admin.py`)"
             )
         print(body if raw else render(url, parse_metrics(body)))
         if interval <= 0:

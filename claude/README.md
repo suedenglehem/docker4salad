@@ -12,30 +12,30 @@ group. The two halves that don't natively fit together:
 Flow for a full session:
 
 ```
-cl_salad_deploy            cl_salad                    Claude Code
+sl_claude_deploy            cl_salad                    Claude Code
    │  (1) group status ──────▶  Salad mgmt API
    │  (2) start if stopped    │  (3) liveness check:
    │  (4) poll /v1/models     │      /v1/models == 200?
-   │      until 200           │  (5) start salad_proxy.py
+   │      until 200           │  (5) start sl_proxy.py
    └── export env, exec ─────▶│      on 127.0.0.1:8093
                               └──▶ ANTHROPIC_BASE_URL=127.0.0.1:8093, run claude
                                                      │
-                              salad_proxy.py ── Salad-Api-Key on every request ──▶ https://<group>.salad.cloud
+                              sl_proxy.py ── Salad-Api-Key on every request ──▶ https://<group>.salad.cloud
                                                      (Anthropic ↔ OpenAI translation)     └─▶ llama-server
 ```
 
 | File | What it is |
 |---|---|
 | **`cl_salad`** | The **runner**. Checks the gateway once, **dies (exit 2) if it's dead**, then starts the proxy and runs Claude Code against it. Does not start or manage the group. |
-| **`cl_salad_deploy`** | The **deploy half**. Looks up the group via the Salad management API, starts it if stopped (**this incurs cost**), waits for the model to be ready (default 45 min — a cold start re-downloads the model), then hands off to `cl_salad`. |
-| **`salad_proxy.py`** | Stdlib-only **Anthropic↔OpenAI bridge**, bound to 127.0.0.1 only (it holds the key — never exposed to the network). Translates `/v1/messages` ↔ `/v1/chat/completions`, streaming SSE and tool calls, injects `Salad-Api-Key` on every upstream request. |
-| **`curl_salad.sh`** | **Smoke test**: asks the model 2–3 known-answer questions straight through the gateway (no proxy). Fastest way to confirm a group is up and answering. |
-| **`chat_salad.sh`** | Interactive chat via Simon Willison's `llm` package, direct against the gateway (`llm -H` carries the Salad-Api-Key). |
+| **`sl_claude_deploy`** | The **deploy half**. Looks up the group via the Salad management API, starts it if stopped (**this incurs cost**), waits for the model to be ready (default 45 min — a cold start re-downloads the model), then hands off to `cl_salad`. |
+| **`sl_proxy.py`** | Stdlib-only **Anthropic↔OpenAI bridge**, bound to 127.0.0.1 only (it holds the key — never exposed to the network). Translates `/v1/messages` ↔ `/v1/chat/completions`, streaming SSE and tool calls, injects `Salad-Api-Key` on every upstream request. |
+| **`sl_curl.sh`** | **Smoke test**: asks the model 2–3 known-answer questions straight through the gateway (no proxy). Fastest way to confirm a group is up and answering. |
+| **`sl_chat.sh`** | Interactive chat via Simon Willison's `llm` package, direct against the gateway (`llm -H` carries the Salad-Api-Key). |
 | **`salad_api.txt`** | The Salad API key (67 B). Gitignored, chmod 600, **never printed**. Read by everything above; the gateway rejects requests that lack it. |
 
-`cl_salad` and `cl_salad_deploy` are also available on PATH via
+`cl_salad` and `sl_claude_deploy` are also available on PATH via
 `/usr/local/bin` symlinks (the scripts resolve their real directory, so the
-symlinks still find `salad_proxy.py` + `salad_api.txt` here).
+symlinks still find `sl_proxy.py` + `salad_api.txt` here).
 
 ## cl_salad — run Claude Code (group must already be live)
 
@@ -75,19 +75,19 @@ cl_salad https://<dns> -p "Say hi"        # everything after the URL goes to cla
   `HEARTBEAT_TIMEOUT` s after the pings stop, i.e. shortly after a dead
   connection (closed terminal, lost SSH), instead of billing for hours. ON by
   default so a bare `cl_salad https://<dns>` keeps its group alive (extra
-  keepalive is harmless on groups without the watchdog); `cl_salad_deploy`
+  keepalive is harmless on groups without the watchdog); `sl_claude_deploy`
   also exports it from the group env. The pinger dies with the session
   (EXIT trap).
 
-## cl_salad_deploy — start (if needed) + wait + run
+## sl_claude_deploy — start (if needed) + wait + run
 
 ```sh
-cl_salad_deploy                                  # defaults = prod group
-cl_salad_deploy --group qwen38-27b-q5            # another group, same org/project
-cl_salad_deploy --org akl-on-salad --project comfy --group qwen38-27b-q5
-cl_salad_deploy --status                         # print group status, exit
-cl_salad_deploy --no-run                         # start + wait only (no claude)
-cl_salad_deploy --group qwen38-27b-q5 -- -p "Say hi"   # -- ends option parsing
+sl_claude_deploy                                  # defaults = prod group
+sl_claude_deploy --group qwen38-27b-q5            # another group, same org/project
+sl_claude_deploy --org akl-on-salad --project comfy --group qwen38-27b-q5
+sl_claude_deploy --status                         # print group status, exit
+sl_claude_deploy --no-run                         # start + wait only (no claude)
+sl_claude_deploy --group qwen38-27b-q5 -- -p "Say hi"   # -- ends option parsing
 ```
 
 - Options come **before** any claude argument (the first non-option token ends
@@ -107,16 +107,16 @@ cl_salad_deploy --group qwen38-27b-q5 -- -p "Say hi"   # -- ends option parsing
   cl_salad's fast 200 path then takes over.
 - **Heartbeat auto-detect**: before the handoff it reads the group's
   `IDLE_SHUTDOWN` env from the management API; when it's `heartbeat` it
-  exports `SALAD_HEARTBEAT=1`, so cl_salad (and any `chat_salad.sh` run
+  exports `SALAD_HEARTBEAT=1`, so cl_salad (and any `sl_chat.sh` run
   against this gateway) keeps the group alive with a 1-token call every 30 s
   — the client follows the docker side. Both clients now default the pinger
   ON, so this is a convenience, not a requirement; `SALAD_HEARTBEAT=0` opts
   out.
 
-## salad_proxy.py — the bridge (run by the wrappers, standalone-able)
+## sl_proxy.py — the bridge (run by the wrappers, standalone-able)
 
 ```sh
-python3 salad_proxy.py --upstream https://<dns>/v1/chat/completions \
+python3 sl_proxy.py --upstream https://<dns>/v1/chat/completions \
     --model qwen38-27b --keyfile salad_api.txt --port 8093
 ```
 
@@ -135,10 +135,10 @@ through untouched. Server-side fix: the deployers now drop `--flag none`
 pairs from EXTRA_ARGS (`strip_none_value_args`), so llama.cpp keeps its
 default think parsing.
 
-## curl_salad.sh — smoke test (no proxy)
+## sl_curl.sh — smoke test (no proxy)
 
 ```sh
-./curl_salad.sh -url https://<group>.salad.cloud -m qwen38-27b
+./sl_curl.sh -url https://<group>.salad.cloud -m qwen38-27b
 # options: -url (required)  -p PORT (443 — Cloudflare fronts the access
 # domain, only standard ports; the in-container port 8888 is NOT forwardable)
 #          -api KEY (llama-server Bearer key — only sent if given; the deployed
@@ -150,12 +150,12 @@ Continues past a failed question (wants all results, not to stop at the first
 hiccup). Thinking is disabled in the payload — otherwise short max_tokens
 budgets get eaten by reasoning content and the answer comes back empty.
 
-## chat_salad.sh — chat via the `llm` package
+## sl_chat.sh — chat via the `llm` package
 
-Chat with the model from the terminal: `./chat_salad.sh` for interactive,
-`./chat_salad.sh "prompt"` for one-shot; extra args pass through to `llm`
+Chat with the model from the terminal: `./sl_chat.sh` for interactive,
+`./sl_chat.sh "prompt"` for one-shot; extra args pass through to `llm`
 (e.g. `-s "sys"`). A **leading URL argument** picks the gateway — same
-convention as `cl_salad`: `./chat_salad.sh https://<dns>.salad.cloud
+convention as `cl_salad`: `./sl_chat.sh https://<dns>.salad.cloud
 [prompt]`. `llm` 0.36+ sends the `Salad-Api-Key` header itself via `-H`, so
 it talks to the gateway **directly** — no proxy (the proxy is the Anthropic
 bridge `cl_salad` uses, and it does not serve OpenAI chat completions).

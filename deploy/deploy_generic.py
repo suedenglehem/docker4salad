@@ -128,7 +128,7 @@ MODEL_ALIAS = "atx-swift-27b"
 # key=none disables watchdog] + bw_reporter + iputils-ping + llama-stats,
 # trapped-child supervisor, exec-form entry.sh CMD) 2026-10-09' — bw_reporter.py
 # samples MODEL_DIR growth every 10 s into ${API_STATE_DIR}/bw.log (self-exits
-# on llama-server /health) so `manage_groups.py start --min-bw-mbps N` can read
+# on llama-server /health) so `sl_admin.py start --min-bw-mbps N` can read
 # it over SSH and reallocate a slow node; iputils-ping needs CAP_NET_RAW (Salad
 # workers may deny it); `llama-stats` = stats.sh symlink, local-only; on top of
 # watchdog v2.1 (arms on the group /ready endpoint, kills by POSTing the Salad
@@ -272,7 +272,7 @@ def parse_args() -> argparse.Namespace:
                         help="env IDLE_SHUTDOWN — in-container watchdog mode: none (off), "
                              "idle (self-stop after --idle-timeout s with no chat traffic), "
                              "heartbeat (self-stop after --heartbeat-timeout s with no client "
-                             "keepalive pings — run cl_salad/chat_salad.sh with "
+                             "keepalive pings — run cl_salad/sl_chat.sh with "
                              "SALAD_HEARTBEAT=1). Needs a watchdog-capable image "
                              "(version.sh prints the WATCHDOG generation). The watchdog arms "
                              "on the group's /ready endpoint and kills by POSTing the group "
@@ -685,7 +685,7 @@ def main() -> int:
              if args.extra_args != "none"
              else " (EXTRA_ARGS=none — no extra args)"))
     print(f"      3. gateway answers only after the probe passes (/ready, ~40-min window, first probe at 30 s):")
-    print(f"         claude/curl_salad.sh -url https://{dns} -m {args.model_alias}")
+    print(f"         claude/sl_curl.sh -url https://{dns} -m {args.model_alias}")
     return 0
 
 

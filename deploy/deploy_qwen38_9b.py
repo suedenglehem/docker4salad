@@ -37,7 +37,7 @@ gets 120 s + 20 x 60 s (~22 min) before being failed, which covers the ~5.4 GB
 model download. NO 1200 s initial delay.
 
 MODEL_ALIAS=qwen9b (kept from the old group) so the existing smoke test
-curl_salad.sh -url https://<dns> -m qwen9b keeps working against the new DNS.
+sl_curl.sh -url https://<dns> -m qwen9b keeps working against the new DNS.
 
 SALAD_API_KEY is read from deploy/salad_api.txt by salad_client (never printed).
 
@@ -84,7 +84,7 @@ GROUP_NAME = "qwen38-9b"
 # live build with version.sh in the container.
 # cuda128-v8 (2026-10-09): bandwidth reporter + tools — bw_reporter.py samples
 # MODEL_DIR growth every 10 s into ${API_STATE_DIR}/bw.log (self-exits when
-# llama-server /health goes ok) so `manage_groups.py start --min-bw-mbps N`
+# llama-server /health goes ok) so `sl_admin.py start --min-bw-mbps N`
 # can read it over SSH and reallocate a slow node; plus iputils-ping (needs
 # CAP_NET_RAW — Salad workers may deny it), scp (openssh-client, already
 # shipped) and the `llama-stats` command (symlink to stats.sh, local-only).
@@ -179,7 +179,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--model-file", default="Qwen3.8-9B-Q4_K_M.gguf", help="env MODEL_FILE")
     parser.add_argument("--model-alias", default="qwen9b",
                         help='env MODEL_ALIAS (the name the model registers under; kept "qwen9b" '
-                             "so the existing curl_salad.sh -m qwen9b smoke test keeps working)")
+                             "so the existing sl_curl.sh -m qwen9b smoke test keeps working)")
     parser.add_argument("--ctx-size", default="32768", help="env CTX_SIZE")
     parser.add_argument("--n-gpu-layers", default="99", help="env N_GPU_LAYERS")
     parser.add_argument("--gpu-id", default="0",
@@ -188,7 +188,7 @@ def parse_args() -> argparse.Namespace:
                         help="env IDLE_SHUTDOWN — in-container watchdog mode: none (off), "
                              "idle (self-stop after --idle-timeout s with no chat traffic), "
                              "heartbeat (self-stop after --heartbeat-timeout s with no client "
-                             "keepalive pings — run cl_salad/chat_salad.sh with "
+                             "keepalive pings — run cl_salad/sl_chat.sh with "
                              "SALAD_HEARTBEAT=1). Needs a watchdog-capable image "
                              "(version.sh prints the WATCHDOG generation). The watchdog arms "
                              "on the group's /ready endpoint and kills by POSTing the group "
@@ -440,7 +440,7 @@ def main() -> int:
     print(f"        from salad_client import StartContainerGroupRequest, start_container_group")
     print(f"        start_container_group(StartContainerGroupRequest('{org}','{project}','{group}'))")
     print(f"      Once it has a live instance, smoke-test with:")
-    print(f"      claude/curl_salad.sh -url https://{net.get('dns')} -m {args.model_alias}")
+    print(f"      claude/sl_curl.sh -url https://{net.get('dns')} -m {args.model_alias}")
     return 0
 
 

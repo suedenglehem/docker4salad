@@ -234,11 +234,11 @@ COPY qwen3.8.q6.jinja ${LLAMA_CPP_DIR}/qwen3.8.q6.jinja
 #   bw_reporter.py - HF-download bandwidth sampler (started by the entry
 #                 script right before the model download; appends
 #                 `epoch bytes` lines to ${API_STATE_DIR}/bw.log every 10 s
-#                 for the manage_groups.py bandwidth arbitrator to read over
+#                 for the sl_admin.py bandwidth arbitrator to read over
 #                 SSH; self-exits when llama-server /health answers ok).
 # SSH-presence guard (no daemon): the user touches /.ssh after logging in
 #                 over SSH; idle_watchdog.py holds off its self-stop while the
-#                 file exists, and the manage_groups.py bandwidth arbitrator
+#                 file exists, and the sl_admin.py bandwidth arbitrator
 #                 spends no /reallocate shot. `rm /.ssh` resumes normal
 #                 billing hygiene.
 COPY llm.sh /usr/local/bin/llm.sh
@@ -379,7 +379,7 @@ ENV API_KEY=
 #   idle      -> kill llama-server (container exits, group stops) after
 #                IDLE_TIMEOUT seconds with no chat traffic.
 #   heartbeat -> same, after HEARTBEAT_TIMEOUT seconds with no client pings
-#                (the cl_salad/chat_salad.sh keepalive pingers).
+#                (the cl_salad/sl_chat.sh keepalive pingers).
 # The watchdog arms only after the group's /ready endpoint (api_app :9999 —
 # the exact endpoint the Salad probe polls) is ok, never mid-download, and
 # gives up after IDLE_GRACE seconds of never-ready; it then holds

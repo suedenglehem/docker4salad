@@ -1,28 +1,28 @@
 #!/bin/sh
-# cl_salad_deploy — the deploy half of the old cl_salad: look up the group's
+# sl_claude_deploy — the deploy half of the old cl_salad: look up the group's
 # status, start it if it's stopped, wait for the model to be ready, then hand
 # off to cl_salad to run Claude Code.
 #
 # Every variable cl_salad reads from the SALAD_* env can instead be set with
 # an option here; an option beats the env var, the env var beats the default.
 # If no --url is given, the gateway DNS is looked up from the group itself
-# (networking.dns), so `cl_salad_deploy --group <name>` is enough.
+# (networking.dns), so `sl_claude_deploy --group <name>` is enough.
 #
 # Options must come BEFORE any claude argument (the first non-option token
 # ends option parsing and everything from there goes to claude). Put `--`
 # before claude flags if a flag name could clash with an option.
 #
 # Usage:
-#   cl_salad_deploy [options] [claude args...]
+#   sl_claude_deploy [options] [claude args...]
 #
 # Examples:
-#   cl_salad_deploy                                  # defaults = prod group
-#   cl_salad_deploy --group qwen38-27b-q5            # the v5 test group
-#   cl_salad_deploy --org akl-on-salad --project comfy --group qwen38-27b-q5
-#   cl_salad_deploy --url https://<dns> --port 8094  # other gateway / proxy port
-#   cl_salad_deploy --status                         # print group status, exit
-#   cl_salad_deploy --no-run                         # start + wait, no claude
-#   cl_salad_deploy --group qwen38-27b-q5 -- -p "Say hi"
+#   sl_claude_deploy                                  # defaults = prod group
+#   sl_claude_deploy --group qwen38-27b-q5            # the v5 test group
+#   sl_claude_deploy --org akl-on-salad --project comfy --group qwen38-27b-q5
+#   sl_claude_deploy --url https://<dns> --port 8094  # other gateway / proxy port
+#   sl_claude_deploy --status                         # print group status, exit
+#   sl_claude_deploy --no-run                         # start + wait, no claude
+#   sl_claude_deploy --group qwen38-27b-q5 -- -p "Say hi"
 #
 # Options (what each sets, and the default):
 #   --url URL            gateway URL or bare DNS  (SALAD_GATEWAY_HOST;
@@ -93,7 +93,7 @@ URL="${URL:-${SALAD_GATEWAY_HOST:-}}"
 
 SALAD_KEY="$(tr -d '[:space:]' < "$KEYFILE" 2>/dev/null || true)"
 if [ -z "$SALAD_KEY" ]; then
-    echo "cl_salad_deploy: cannot read Salad key from $KEYFILE" >&2
+    echo "sl_claude_deploy: cannot read Salad key from $KEYFILE" >&2
     exit 1
 fi
 
@@ -140,8 +140,8 @@ print(env.get("IDLE_SHUTDOWN") or "")'
 GATEWAY_HOST="$URL"
 [ -n "$GATEWAY_HOST" ] || GATEWAY_HOST="$(group_dns)"
 if [ -z "$GATEWAY_HOST" ]; then
-    echo "cl_salad_deploy: no --url given and could not look up the gateway DNS" >&2
-    echo "cl_salad_deploy: for $ORG/$PROJ/$GROUP (group missing? API error?). Pass --url." >&2
+    echo "sl_claude_deploy: no --url given and could not look up the gateway DNS" >&2
+    echo "sl_claude_deploy: for $ORG/$PROJ/$GROUP (group missing? API error?). Pass --url." >&2
     exit 1
 fi
 GATEWAY_HOST="${GATEWAY_HOST#http://}"
@@ -167,8 +167,8 @@ wait_ready() {
         if [ $((checked % 12)) -eq 0 ]; then    # group-status check every ~60 s
             st="$(group_status)"
             [ "$st" = "stopped" ] && {
-                echo "cl_salad_deploy: group $GROUP went back to 'stopped' while waiting." >&2
-                echo "cl_salad_deploy: it is failing to start — check the Salad UI, don't wait." >&2
+                echo "sl_claude_deploy: group $GROUP went back to 'stopped' while waiting." >&2
+                echo "sl_claude_deploy: it is failing to start — check the Salad UI, don't wait." >&2
                 return 1
             }
         fi
@@ -189,45 +189,45 @@ fi
 st="$(group_status)"
 case "$st" in
     running)
-        echo "cl_salad_deploy: group $GROUP running — waiting for model readiness (timeout ${TIMEOUT}s)..." >&2
+        echo "sl_claude_deploy: group $GROUP running — waiting for model readiness (timeout ${TIMEOUT}s)..." >&2
         ;;
     stopped|"")
-        echo "cl_salad_deploy: group $GROUP is '${st:-stopped}' — starting it (this incurs cost)..." >&2
+        echo "sl_claude_deploy: group $GROUP is '${st:-stopped}' — starting it (this incurs cost)..." >&2
         curl -sS -X POST -H "Salad-Api-Key: $SALAD_KEY" -o /dev/null \
             "$SALAD_API/organizations/$ORG/projects/$PROJ/containers/$GROUP/start" 2>/dev/null
-        echo "cl_salad_deploy: start requested — waiting for the group to come up (timeout ${TIMEOUT}s)..." >&2
+        echo "sl_claude_deploy: start requested — waiting for the group to come up (timeout ${TIMEOUT}s)..." >&2
         ;;
     *)
-        echo "cl_salad_deploy: group $GROUP status '$st' — waiting for model readiness (timeout ${TIMEOUT}s)..." >&2
+        echo "sl_claude_deploy: group $GROUP status '$st' — waiting for model readiness (timeout ${TIMEOUT}s)..." >&2
         ;;
 esac
 if ! wait_ready "$TIMEOUT"; then
-    echo "cl_salad_deploy: timed out after ${TIMEOUT}s waiting for $GATEWAY_HOST/v1/models." >&2
-    echo "cl_salad_deploy: a fresh start re-downloads the model; it may still be" >&2
-    echo "cl_salad_deploy: starting. Re-run with --status to check, or --no-run to" >&2
-    echo "cl_salad_deploy: keep waiting without launching claude." >&2
+    echo "sl_claude_deploy: timed out after ${TIMEOUT}s waiting for $GATEWAY_HOST/v1/models." >&2
+    echo "sl_claude_deploy: a fresh start re-downloads the model; it may still be" >&2
+    echo "sl_claude_deploy: starting. Re-run with --status to check, or --no-run to" >&2
+    echo "sl_claude_deploy: keep waiting without launching claude." >&2
     exit 2
 fi
 
-echo "cl_salad_deploy: model ready on $GATEWAY_HOST (group $GROUP)." >&2
+echo "sl_claude_deploy: model ready on $GATEWAY_HOST (group $GROUP)." >&2
 
 # ---- hand off to cl_salad ----------------------------------------------------
 if [ "$NO_RUN" = "1" ]; then
-    echo "cl_salad_deploy: done (no claude, per --no-run). To run Claude Code:" >&2
-    echo "cl_salad_deploy:   cl_salad $GATEWAY_HOST" >&2
+    echo "sl_claude_deploy: done (no claude, per --no-run). To run Claude Code:" >&2
+    echo "sl_claude_deploy:   cl_salad $GATEWAY_HOST" >&2
     exit 0
 fi
 
 # Heartbeat auto-detect: when the group runs with IDLE_SHUTDOWN=heartbeat,
 # the client IS the lifeline — the in-container watchdog self-stops the group
 # HEARTBEAT_TIMEOUT s after keepalive pings stop. Export SALAD_HEARTBEAT=1 so
-# cl_salad (and any chat_salad.sh the user runs against this gateway) pings a
+# cl_salad (and any sl_chat.sh the user runs against this gateway) pings a
 # 1-token completion every 30 s. A manually-set SALAD_HEARTBEAT is respected
 # for 'idle'/'none' groups (extra keepalive is harmless).
 IDLE_MODE="$(group_idle_mode)"
 if [ "$IDLE_MODE" = "heartbeat" ]; then
     export SALAD_HEARTBEAT=1
-    echo "cl_salad_deploy: group runs IDLE_SHUTDOWN=heartbeat — keepalive enabled (SALAD_HEARTBEAT=1)" >&2
+    echo "sl_claude_deploy: group runs IDLE_SHUTDOWN=heartbeat — keepalive enabled (SALAD_HEARTBEAT=1)" >&2
 fi
 
 # Export the resolved configuration; cl_salad picks it up, re-checks the

@@ -24,7 +24,7 @@ existing group keeps today's behavior):
   idle      - kill when llama-server has served no chat traffic for
               IDLE_TIMEOUT seconds.
   heartbeat - same timer, HEARTBEAT_TIMEOUT seconds: the client pingers
-              (claude/cl_salad, claude/chat_salad.sh, opt-in SALAD_HEARTBEAT=1)
+              (claude/cl_salad, claude/sl_chat.sh, opt-in SALAD_HEARTBEAT=1)
               keep the group alive with 1-token completions through the
               gateway; pings stopping for the window means the client died.
 

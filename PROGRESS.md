@@ -91,7 +91,7 @@
   v2.5 image set (2026-10-11)** — built, pushed, re-pinned and fleet
   re-PATCHed 7/7 (no starts); only NEW instances run the fixed reporter.
 - **All 7 groups stopped at $0 — the in-flight drop-test ended.** The
-  tr4 reboot (~04:3xZ) killed the local `manage_groups.py` mid-rerun; the
+  tr4 reboot (~04:3xZ) killed the local `sl_admin.py` mid-rerun; the
   unmanaged `atx-hb-test2` then self-stopped via its own v2.3 watchdog
   (heartbeat timeout) — state verified read-only on resume (stopped,
   0 instances). Billing is stopped. The user's rerun terminal log (shot
@@ -124,7 +124,7 @@ and wraps it so it's usable from **Claude Code** and plain curl as an
 
 - **Inference:** `llama.cpp`'s `llama-server`, plus a second fork —
   **llamAmpere** (a custom turbo-KV build) for the production "ATX" profile.
-- **Anthropic proxy:** `claude/salad_proxy.py` — a sidecar that serves only the
+- **Anthropic proxy:** `claude/sl_proxy.py` — a sidecar that serves only the
   Anthropic Messages API shape, converts to llama-server, and strips empty
   `think` blocks (see §8). `cl_salad` verifies **its own** proxy owns the local
   port before launching claude (the proxy echoes a per-session nonce on
@@ -138,13 +138,13 @@ and wraps it so it's usable from **Claude Code** and plain curl as an
 - **Idle/heartbeat self-shutdown watchdog** (`docker/idle_watchdog.py`): stops
   the group (via the Salad stop API, then SIGTERM) when idle or when the client
   heartbeat goes quiet — so an unattended group stops *billing*. §5.
-- **Bandwidth arbitrator** (`utils/manage_groups.py --min-bw-mbps`): during the
+- **Bandwidth arbitrator** (`utils/sl_admin.py --min-bw-mbps`): during the
   HF model download, if throughput is too slow it relocates the instance to a
   faster node via `POST …/reallocate` (never stop/SIGTERM). §6.
 - **Deployers** (`deploy/*.py`): create/patch Salad container groups, digest-pin
   the image, inject the full env, manage the stop key.
-- **Clients:** `claude/cl_salad`, `claude/chat_salad.sh`, `claude/salad_proxy.py`.
-- **Manager:** `utils/manage_groups.py` — list/start/stop/wait/stats + the
+- **Clients:** `claude/cl_salad`, `claude/sl_chat.sh`, `claude/sl_proxy.py`.
+- **Manager:** `utils/sl_admin.py` — list/start/stop/wait/stats + the
   arbitrator. `utils/billing.py` — cost tracking.
 
 **Images** are on Docker Hub under **`boris271142/`**. There are 4 current
@@ -259,7 +259,7 @@ failure counts as **absent** (fail-open toward the
 kill = the billing-hygiene default — a broken guard doesn't accidentally keep a
 group billing forever).
 
-**Arbitrator side** (`utils/manage_groups.py` → `_bw_ssh_guard()`, ~line 571):
+**Arbitrator side** (`utils/sl_admin.py` → `_bw_ssh_guard()`, ~line 571):
 before spending a reallocate shot it probes `ls /.ssh` over SSH. The **payload
 decides** (Salad's relay exits 1 even on success — §9): stdout naming the file ⇒
 **present → hold, no shot**; `cannot access` in stderr ⇒ **absent → spend the
@@ -466,7 +466,7 @@ wholesale-replaced (§9). `--stop-key <file>` reads the account key from a file,
 never prints it; `redact()` masks HF_TOKEN + SALAD_STOP_KEY in output.
 
 **Client heartbeat** (the thing that keeps an *active* session from idling out):
-`cl_salad` / `chat_salad.sh` send a 1-token completion through the gateway every
+`cl_salad` / `sl_chat.sh` send a 1-token completion through the gateway every
 ~30 s. **`SALAD_HEARTBEAT=1` is now the default** (opt out `=0`; harmless on
 watchdog-less groups). Keep `HEARTBEAT_TIMEOUT` ≥ ~2× the 30 s pinger.
 
@@ -478,7 +478,7 @@ unarmed and the group ran the whole session with self-stop impossible. Fix:
 
 ---
 
-## 6. Bandwidth arbitrator (`manage_groups.py --min-bw-mbps`)
+## 6. Bandwidth arbitrator (`sl_admin.py --min-bw-mbps`)
 
 During the HF model download (10–30 GB GGUFs on slow residential nodes can take
 hours), if median bandwidth is below a cap, relocate the instance to a faster
@@ -490,9 +490,9 @@ keep the 4th** and let it finish. Cap via `--min-bw-mbps` (default 30). The
 container only **reports** bandwidth (`docker/bw_reporter.py` samples
 `MODEL_DIR` size every 10 s → `/tmp/llama-api/bw.log`); all verdicts live in the
 manager. The logic exists **only when the group is started via
-`manage_groups.py`** (the orchestrator reads the log over SSH and decides).
+`sl_admin.py`** (the orchestrator reads the log over SSH and decides).
 
-**Constants** (`manage_groups.py`, ~line 114): `BW_POLL_INTERVAL=15`,
+**Constants** (`sl_admin.py`, ~line 114): `BW_POLL_INTERVAL=15`,
 `BW_RAMP_GRACE=60` (skip first minute), `BW_VERDICT_WINDOW=120` (median over
 last 2 min), `BW_MIN_SAMPLES=6`, `BW_MAX_SHOTS=3`, `BW_SSH_TIMEOUT=20`,
 `BW_SSH_STRIKES=4`, `BW_ALLOC_TIMEOUT=600`, `BW_PULL_TIMEOUT=900` (stuck pull =
@@ -615,13 +615,13 @@ rounding), not Q6_K (Q6_K @ 90 K needs ~3.1 GiB KV, only ~1 GiB headroom). A 32 
 worker (5090) could serve full Q6_K at ~120 K+.
 
 **Double-`think` echo on ATX groups (fixed 2026-10-09):** with
-`enable_thinking=false` (what `salad_proxy` sends) the template ends the prompt
+`enable_thinking=false` (what `sl_proxy` sends) the template ends the prompt
 with the CLOSED empty block `think\n\n/think\n\n` as the generation prefix; the
 model echoes it; llama-server strips think blocks **only** with its default
 reasoning parser — but ATX groups' `EXTRA_ARGS` carried `--reasoning-format none`
 (copied from the ATX post.txt), so the echo passed through. q6 groups use the
 default parser → stripped → "didn't have that before." Fixes: (1)
-`claude/salad_proxy.py` **`EmptyThinkStripper`** removes *empty* think blocks from
+`claude/sl_proxy.py` **`EmptyThinkStripper`** removes *empty* think blocks from
 response text (streaming state machine + non-streaming regex; real non-empty
 blocks pass through so `--thinking 1` still works); (2) `deploy_ampere.py` /
 `deploy_generic.py` **`strip_none_value_args()`** drops `--flag none` **pairs**
@@ -672,7 +672,7 @@ while instances are still allocating/downloading/creating. The counts
 real signal is per-instance: `GET …/instances` → each instance's boolean
 `ready`. Group ready = `running` AND ≥1 instance `ready=true`; before the first
 instance the list can be empty while the group already shows `running` — keep
-polling. `manage_groups.py wait` implements exactly this.
+polling. `sl_admin.py wait` implements exactly this.
 
 **9e. PATCH env is WHOLESALE replace, not merge.** `container.environment_variables`
 is replaced — deployers must always send the **full** env dict. A new key lands
@@ -850,18 +850,25 @@ on_salad/
 │  ├─ api_app.py / run_api.py    the Anthropic-only proxy app.
 │  ├─ llama_stats.py / stats.sh  /metrics helpers.
 │  └─ README.md                  (51 KB) the big image/deploy doc (linked from Hub).
-├─ claude/
-│  ├─ salad_proxy.py             (705) Anthropic-only proxy + EmptyThinkStripper (§8); --nonce = /healthz ownership probe.
-│  ├─ cl_salad                   Claude Code → Salad launcher (heartbeat ON by default; exits 3 when the proxy port is another session's).
-│  ├─ chat_salad.sh              curl-based chat client (URL positional arg).
-│  ├─ cl_salad_deploy            deployer wrapper (auto-exports SALAD_HEARTBEAT).
-│  └─ curl_salad.sh              the gateway smoke test (2–3 known-answer questions).
+├─ claude/                        (renamed 2026-10-12 → the `sl_` prefix: salad_proxy.py→sl_proxy.py,
+│  │                              chat_salad.sh→sl_chat.sh, curl_salad.sh→sl_curl.sh,
+│  │                              cl_salad_deploy→sl_claude_deploy. `cl_salad` keeps its name.)
+│  ├─ sl_proxy.py              (705) Anthropic-only proxy + EmptyThinkStripper (§8); --nonce = /healthz ownership probe.
+│  ├─ cl_salad                 (203) Claude Code → Salad launcher (heartbeat ON by default; exits 3 when the proxy port is another session's). NOT renamed.
+│  ├─ sl_chat.sh               (137) curl-based chat client (URL positional arg).
+│  ├─ sl_claude_deploy         (242) deployer wrapper (auto-exports SALAD_HEARTBEAT).
+│  └─ sl_curl.sh               (104) the gateway smoke test (2–3 known-answer questions).
 │                                 (A `cube.cpp` CUDA experiment lived here briefly: added
 │                                 801520e, deleted fa0e06c — the 17 KB binary is in git
 │                                 HISTORY at 801520e even though the tree is clean.)
 ├─ utils/
-│  ├─ manage_groups.py           (975) list/start/stop/wait/stats + bandwidth
-│  │                              arbitrator (§6). --min-bw-mbps.
+│  ├─ sl_admin.py          (1500) the fleet admin: list/start/stop/wait/stats/delete,
+│  │                              bandwidth arbitrator (§6, --min-bw-mbps),
+│  │                              create-org / create-project (fleet.json register),
+│  │                              deploy (prompted DOCKER TYPE → its deployer).
+│  │                              Renamed from manage_groups.py 2026-10-12. Writes
+│  │                              `fleet.json` (the org→project map; created on the
+│  │                              first create-org/create-project, absent until then).
 │  ├─ billing.py                 cost tracking.
 │  ├─ llama_stats.py             /metrics scrape helper.
 │  └─ portal_vault.gpg           a gpg key (vault). Treat as secret.
@@ -871,7 +878,8 @@ on_salad/
 │  ├─ salad/                     scraped Salad docs (api-usage.mdx etc.).
 │  └─ SaladCloud API Knowledge Setup for Cline.md
 ├─ .clinerules/salad-api.md      Salad API notes for the Cline agent.
-├─ tests/                        one-off curl/run scripts (curl1.sh, curl2.sh, run_*.sh).
+├─ tests/                        **LOCAL** Docker run/test scripts (curl1.sh, curl2.sh, run_*.sh)
+│  │                              + README.md — localhost only, never the Salad API (added 2026-10-12).
 ├─ llama.cpp/                    vendored llama.cpp checkout (submodule-ish, 31 dirs).
 ├─ tools/                        **TRACKED tooling** (promoted from tmp/ 2026-10-13, so the
 │  │                              paths §14 cites resolve on a fresh clone — tmp/ is gitignored):
@@ -892,8 +900,9 @@ on_salad/
                                   check_images_v11.py, smoke_test_{start,stop}_cg.py, _grpimg.json,
                                   post.txt (the ATX operating point — deployer-defaults provenance), logs.
 ```
-Key file line counts (2026-10-10): `manage_groups.py` 942, `salad_client.py` 875,
-`salad_proxy.py` 705, `deploy_ampere.py` 725, `deploy_generic.py` 697,
+Key file line counts (2026-10-10; `sl_admin.py` re-counted 2026-10-12 after the
+create/deploy additions): `sl_admin.py` 1500, `salad_client.py` 875,
+`sl_proxy.py` 705, `deploy_ampere.py` 725, `deploy_generic.py` 697,
 `deploy_qwen38_27b.py` 633, `deploy_qwen38_9b.py` 452, `deploy_qwen9b.py` 415,
 `idle_watchdog.py` 427, `bw_reporter.py` 124.
 
@@ -934,14 +943,14 @@ python3 -I tools/fleet_status_now.py
 # The 2nd positional is the ORG (ma-casa-in-paris or akl-on-salad) — `llm` is a
 # PROJECT, not a valid 2nd positional. The group is picked INTERACTIVELY
 # (# or exact name) at the prompt, then y/N-confirmed for start/stop/delete:
-python3 utils/manage_groups.py list  ma-casa-in-paris
-python3 utils/manage_groups.py wait  ma-casa-in-paris     # polls per-instance `ready` (§9d)
-python3 utils/manage_groups.py stats ma-casa-in-paris
+python3 utils/sl_admin.py list  ma-casa-in-paris
+python3 utils/sl_admin.py wait  ma-casa-in-paris     # polls per-instance `ready` (§9d)
+python3 utils/sl_admin.py stats ma-casa-in-paris
 
 # PAID start (burns credits — coordinate with the user). Add the arbitrator:
-python3 utils/manage_groups.py start ma-casa-in-paris --min-bw-mbps 30   # bandwidth-aware start (§6)
+python3 utils/sl_admin.py start ma-casa-in-paris --min-bw-mbps 30   # bandwidth-aware start (§6)
 # non-interactive variant (pipe the prompt answers: name, confirm):
-printf 'atx-hb-test2\ny\n' | python3 utils/manage_groups.py start ma-casa-in-paris --min-bw-mbps 30
+printf 'atx-hb-test2\ny\n' | python3 utils/sl_admin.py start ma-casa-in-paris --min-bw-mbps 30
 
 # Deploy / zero-cost re-pin (deployers PATCH the full env; applies at next PAID start):
 python3 deploy/deploy_ampere.py     --project llm --group atx-swift-27b-q5-opt --no-start \
@@ -958,7 +967,7 @@ python3 deploy/deploy_qwen38_27b.py --project qwen38-27b --group qwen38-27b-q5 -
 # before starting anything:
 python3 -I deploy/deploy_ampere.py --project llm --group atx-swift-27b-q5-med \
     --idle-shutdown heartbeat --stop-key deploy/salad_api.txt --no-start
-# Then the PAID start is the USER's call (manage_groups.py start … --min-bw-mbps 100).
+# Then the PAID start is the USER's call (sl_admin.py start … --min-bw-mbps 100).
 # VERIFY THE SERVED CONTEXT (the /metrics n_ctx gauge does NOT exist in this build — §9l):
 #   argv is the proof, and the image has no procps, so over the shell-less relay (§9f),
 #   ONE plain command per call (the relay exits 1 even on success — judge by payload):
@@ -980,7 +989,7 @@ docker build -f docker/Dockerfile.lmss_generic       .       --build-arg BUILD_J
 # (derivatives' context MUST be repo root — they COPY docker/version.sh)
 docker push boris271142/<repo>:<tag>     # then PATCH the repo full_description (§11)
 
-# SSH into a RUNNING container (get ip/port from `manage_groups list` / /instances):
+# SSH into a RUNNING container (get ip/port from `sl_admin list` / /instances):
 ssh root@<ip> -p <port> 'tail -40 /tmp/llama-api/watchdog.log'   # ONE plain cmd, no shell (§9f)
 # the GUARD:  touch /.ssh  (when you log in)   /   rm /.ssh  (when you leave)
 
@@ -1010,6 +1019,21 @@ stopped at 01:15Z; all 7 fleet groups are now stopped at $0.
 > 19 min < 20 min) or the watchdog failed to arm. Zero-cost work is exhausted: tooling is
 > tracked in `tools/`, docs are current, the fleet is on the v2.5 digests, and every
 > deployer profile is re-appliable with `--no-start`.
+>
+> **ADMIN SURFACE (2026-10-12, zero-cost, uncommitted at write time):**
+> `utils/manage_groups.py` → **`utils/sl_admin.py`** (`git mv`; every reference in
+> README / utils / docs / docker / deploy / tools updated — 0 occurrences of the old
+> name remain). New actions: **`deploy`** (numbered DOCKER-TYPE menu
+> `q6|generic|ampere|9b|qwen9b` → org → project → group; `--type/--org/--project/--group`
+> skip a prompt; flags after `--` are forwarded verbatim; runs the deployer with
+> `--no-start` so it is FREE, `--start` needs a typed `y`; the 9B deployers accept no
+> `--no-start` — they create STOPPED and never bill) and **`create-org` /
+> `create-project`** (the public API cannot create orgs/projects — live-probed 404,
+> `tools/probe_org_create.py`; so: portal attempt via the billing vault, `--no-portal`
+> to skip, then REGISTER in `utils/fleet.json`, which now overlays `KNOWN_PROJECTS`;
+> `--register-only` after a web-UI create). Verified offline: arbitrator harness still
+> 26/26 on the renamed module, `list` unchanged, the paid gate aborts before any API
+> call, and name validation + fleet.json merge/clobber-guard were exercised in a temp dir.
 
 > **BACKEND NOTE (correction, 2026-10-11):** this Claude session is served by
 > the **local vllm on tr4** (`qwen3.8-27b` fp8, `:8000`, TP2 + MTP, running
@@ -1057,7 +1081,7 @@ stopped at 01:15Z; all 7 fleet groups are now stopped at $0.
      launches can be delayed here, so verify the watcher's "armed" timestamp
      before trusting it.) Offline suites — watchdog 7/7, arbitrator 26/26,
      deploy green (re-run 2026-10-13 from `tools/`, all green).
-2. **Paid arbitrator live test:** `python3 utils/manage_groups.py start
+2. **Paid arbitrator live test:** `python3 utils/sl_admin.py start
    ma-casa-in-paris --min-bw-mbps 10000` (atx-hb-test2, user-run) — watch it
    `POST /reallocate` on a slow download (≤3 shots). §6. **Status 2026-10-11
    — attempt 1 hit the guard false-positive, now fixed; the rerun was in
@@ -1084,7 +1108,7 @@ stopped at 01:15Z; all 7 fleet groups are now stopped at $0.
    cycle) — and the new instance `b85289df` placed on
    FRESH node `84b984b8` (neither attempt 1's 0bf20a53 nor the fast node).
    Pull completed (1.0), model download started, `ready=False` at last
-   read. The tr4 reboot (~04:3xZ) killed the local `manage_groups.py`; the
+   read. The tr4 reboot (~04:3xZ) killed the local `sl_admin.py`; the
    group ran unmanaged, and its in-container v2.3 watchdog
    (`IDLE_SHUTDOWN=heartbeat`, `HEARTBEAT_TIMEOUT=300`, `IDLE_GRACE=3600`)
    then self-stopped it — billing stopped. **Reboot lesson:** after the build
@@ -1146,7 +1170,7 @@ stopped at 01:15Z; all 7 fleet groups are now stopped at $0.
    **Attempt #2 2026-10-13: placed fast (pull 100 % at 142 s — ampere v10 already
    cached on machine `702ff4d9`), then the USER stopped it for slow network**
    (verifier killed; no verdict, no argv capture). Next start is the arbitrator's
-   occasion, per the user: `manage_groups.py start ma-casa-in-paris
+   occasion, per the user: `sl_admin.py start ma-casa-in-paris
    --min-bw-mbps 100`. Verification is then two facts, in this order: (1) the
    llama-server **argv** over SSH — `nvidia-smi --query-compute-apps=pid
    --format=csv,noheader`, then `cat /proc/<pid>/cmdline | tr '\0' ' '` (the ampere
@@ -1157,7 +1181,7 @@ stopped at 01:15Z; all 7 fleet groups are now stopped at $0.
    argv" is essentially conclusive on its own.
 
    **DONE 2026-10-13 — VERIFIED (attempt #3, arbitrator start, user-launched
-   `manage_groups.py start ma-casa-in-paris --min-bw-mbps 100`):** the arbitrator
+   `sl_admin.py start ma-casa-in-paris --min-bw-mbps 100`):** the arbitrator
    ran live for the first time and **reallocated once** (instance `4c86e5f3` @
    `87804ed4` → `700ecc4a` @ `7429adb8`, 00:37:17Z); ready 00:49:03Z. Two proofs:
    (1) **argv** (the user's `ps` method, via `nvidia-smi` pid → `/proc/399/cmdline`):
@@ -1284,7 +1308,7 @@ stopped at 01:15Z; all 7 fleet groups are now stopped at $0.
 428ed5a docs: PROGRESS.md §15 — arbitrator ssh-strike grace hardening CLOSED as not needed (user: "i confirm, it works")
 fa0e06c readme (user): README line + claude/cube, claude/cube.cpp DELETED from the tree
 801520e readme (user): claude/cube (17 KB CUDA experiment binary) + cube.cpp ADDED — the binary stays in git history even after fa0e06c; only a history rewrite removes it
-84f1de3 README: the "Most useful" 3-step flow (create group → manage_groups.py start --min-bw-mbps → cl_salad <dns>) + docker4salad docker/README.md link + auto-stop warning (user's own wording)
+84f1de3 README: the "Most useful" 3-step flow (create group → sl_admin.py start --min-bw-mbps → cl_salad <dns>) + docker4salad docker/README.md link + auto-stop warning (user's own wording)
 2a5ed08 cl_salad: verify OUR proxy owns the local port (nonce echoed on /healthz) — a second session exits 3 instead of hijacking the first session's proxy; + deploy/README.md command lines
 8443c93 tools/: promote durable tooling out of gitignored tmp/ — §14 paths now resolve on a fresh clone; one-shot attempt artifacts deleted; test_deploy_offline + fleet_status_now de-staled
 bd6d612 docs: PROGRESS.md — mycelium fold for cold-start on another box (attempt-3 outcome, §9i in-flight truncated-digest API gotcha, nproc trap, arbitrate_attach/reboot-lesson, §16 ref)

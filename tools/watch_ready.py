@@ -5,7 +5,7 @@ Polls the group + its instances every 30 s and prints ONLY transitions:
 status change, a new instance id (= a /reallocate landed), ready=True (with the
 ssh line, so the argv capture can run), and group stopped. Exits on ready.
 
-Started by the user via: manage_groups.py start ma-casa-in-paris --min-bw-mbps 100
+Started by the user via: sl_admin.py start ma-casa-in-paris --min-bw-mbps 100
 """
 import os
 import sys

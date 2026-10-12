@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""salad_proxy.py — local Anthropic<->OpenAI bridge for a llama.cpp server behind a Salad public gateway.
+"""sl_proxy.py — local Anthropic<->OpenAI bridge for a llama.cpp server behind a Salad public gateway.
 
 Claude Code speaks the Anthropic Messages API; the Salad container runs
 llama-server, which is OpenAI-only. This stdlib-only proxy:
@@ -268,7 +268,7 @@ def anthropic_to_openai(body, up):
         payload["stream"] = True
         payload["stream_options"] = {"include_usage": True}
     if not up.thinking:
-        # keep the Qwen answer clean; the smoke test (curl_salad.sh) used this too
+        # keep the Qwen answer clean; the smoke test (sl_curl.sh) used this too
         payload["chat_template_kwargs"] = {"enable_thinking": False}
     return payload
 
@@ -551,7 +551,7 @@ class StreamBuilder:
 # --------------------------------------------------------------------------- #
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
-    server_version = "salad_proxy/1.0"
+    server_version = "sl_proxy/1.0"
 
     def log_message(self, *a):
         pass  # quiet; the wrapper captures stderr to a log file
@@ -692,7 +692,7 @@ def main():
     srv = ThreadingHTTPServer((a.host, a.port), Handler)
     srv.upstream = up
     srv.nonce = a.nonce
-    sys.stderr.write("salad_proxy: http://%s:%d -> %s (model=%s) pid=%d\n" %
+    sys.stderr.write("sl_proxy: http://%s:%d -> %s (model=%s) pid=%d\n" %
                      (a.host, a.port, a.upstream, a.model, os.getpid()))
     sys.stderr.flush()
     try:

@@ -6,18 +6,20 @@ stdlib-only Python, run from the repo root: `python3 utils/<script>`.
 
 | script | what it does |
 |---|---|
-| `manage_groups.py` | group manager: `list` / `refresh` / `start` / `stop` / `wait` / `stats` / `delete` |
+| `sl_admin.py` | the fleet admin: `list` / `refresh` / `start` / `stop` / `wait` / `stats` / `delete` / `create-org` / `create-project` / `deploy` |
 | `llama_stats.py` | llama-server stats (tps / queue / totals) from the host |
 | `billing.py` | per-org portal credit balances (USD + live EUR) |
 
-## manage_groups.py
+## sl_admin.py
 
-Status and control for every group in the account's known orgs/projects
-(`ma-casa-in-paris`, `akl-on-salad` — fixed map in `KNOWN_PROJECTS`, add new
-projects there; the Salad API has no list-orgs/list-projects operation).
+Status and control for every group in the account's known orgs/projects. The
+Salad API has no list-orgs/list-projects operation, so the tool walks a map:
+`KNOWN_PROJECTS` in the script (the zero-config default: `ma-casa-in-paris`,
+`akl-on-salad`) overlaid by `utils/fleet.json` — which `create-org` /
+`create-project` write, so a new org/project is data, not a code edit.
 
 ```
-python3 utils/manage_groups.py [ACTION] [ORG] [--interval N]
+python3 utils/sl_admin.py [ACTION] [ORG] [--interval N]
 ```
 
 - `list` (default) — one-shot table: status, age, uptime, instance counts,
@@ -38,6 +40,28 @@ python3 utils/manage_groups.py [ACTION] [ORG] [--interval N]
   scraping (`wait` to block until ready, then re-run). When it is, it hands
   off to the canonical `docker/llama_stats.py` against the gateway URL with
   `--interval N` (default 5 s, Ctrl-C stops).
+- `deploy` — pick a **DOCKER TYPE** from the profiles our images support
+  (`q6` = the Claude Code backend, `generic` = any GGUF on vanilla lmss,
+  `ampere` = the llamAmpere fork on sm_86 cards, `9b` / `qwen9b` = plain 9B on
+  base lmss) and run its deployer against an org/project/group. Everything is
+  prompted when not given on the command line (`--type`, `--org`,
+  `--project`, `--group`), and flags after `--` go to the deployer verbatim
+  (`--ctx-size`, `--gpu`, `--model-repo`, `--idle-shutdown`, …).
+  **Zero cost by default** — the deployer runs with `--no-start` (CREATE and
+  PATCH are free, only START bills). `--start` is the paid opt-in and asks you
+  to type `y`; the 9B deployers create the group STOPPED and never start, so
+  they bill nothing either way.
+- `create-org` / `create-project` — the honest version of "create an
+  organization". Live-probed 2026-10-13 (`tools/probe_org_create.py`): the
+  public API has NO create-org/create-project and NO list-orgs/list-projects —
+  every one of those paths is 404, and orgs/projects exist only in the web UI.
+  So these actions (1) ATTEMPT the portal backend (what the web UI calls, via
+  the `billing.py` vault — undocumented and unverified, so a 404 there is the
+  expected answer, not a bug; `--no-portal` skips it) and (2) REGISTER the
+  org/project in `utils/fleet.json` so the rest of the tool sees it.
+  Registration always works; after creating in the web UI, re-run with
+  `--register-only`. Names are validated against Salad's own rule
+  (`^[a-z][a-z0-9-]{0,61}[a-z0-9]$`, 2–63 chars).
 
 The Salad API key is loaded from `deploy/salad_api.txt` via
 `salad_client.py` (repo root).

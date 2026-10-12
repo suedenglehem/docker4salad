@@ -5,7 +5,7 @@ Started as a background helper by every image entry script (the 5th
 `nohup … &` line, right before the `hf download` block). Its ONLY job: sample
 the container's network RX counter every 10 s and append
 `epoch rx-bytes model-bytes` lines to ${API_STATE_DIR}/bw.log while the model
-downloads. The bandwidth arbitrator (utils/manage_groups.py, manager side)
+downloads. The bandwidth arbitrator (utils/sl_admin.py, manager side)
 reads that log over SSH — one plain `tail` command, since Salad's SSH exec
 has no shell — and decides whether the node's download speed clears the
 group's --min-bw-mbps cap; below the cap it POSTs the Salad instance

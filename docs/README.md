@@ -12,7 +12,7 @@ The two keys to the whole setup:
 
 - **Claude Code talks Anthropic; the model talks OpenAI.** The Salad container
   runs `llama-server` (OpenAI-only: `/v1/chat/completions`, `/v1/models`). Claude
-  Code speaks the Anthropic Messages API (`/v1/messages`). `salad_proxy.py`
+  Code speaks the Anthropic Messages API (`/v1/messages`). `sl_proxy.py`
   translates between the two — you never do it by hand.
 - **The Salad gateway needs a key on every request.** The group's container
   gateway has auth on, so each request must carry a `Salad-Api-Key` header.
@@ -26,19 +26,20 @@ The two keys to the whole setup:
 | Script | Where | What it does |
 |---|---|---|
 | **`cl_salad`** | `claude/` (also `/usr/local/bin/cl_salad`) | **The Claude Code runner.** Checks the gateway once, **dies if it's dead**, then starts the proxy and runs Claude Code against the model. |
-| **`cl_salad_deploy`** | `claude/` | **The deploy half.** Looks up the group's status, starts it if stopped (costs), waits for the model, then hands off to `cl_salad`. |
-| **`salad_proxy.py`** | `claude/` | Stdlib Anthropic↔OpenAI bridge. Injects `Salad-Api-Key`, translates requests + streaming SSE + tool calls. Run by `cl_salad`. |
+| **`sl_claude_deploy`** | `claude/` | **The deploy half.** Looks up the group's status, starts it if stopped (costs), waits for the model, then hands off to `cl_salad`. |
+| **`sl_proxy.py`** | `claude/` | Stdlib Anthropic↔OpenAI bridge. Injects `Salad-Api-Key`, translates requests + streaming SSE + tool calls. Run by `cl_salad`. |
 | `version.sh` | `docker/` | Run **inside a running instance** (via SSH) to confirm *which build* is actually live and what it's downloading. |
 | `idle_watchdog.py` | `docker/` (installed in the image) | In-container **idle/heartbeat self-shutdown (v2.2)**: arms on the group `/ready` endpoint (the probe's own), holds `IDLE_ARM_GRACE`, then after `IDLE_TIMEOUT`/`HEARTBEAT_TIMEOUT` s of no traffic **POSTs the Salad group `/stop`** (account-wide key, `SALAD_STOP_KEY=b64:<base64>` obfuscated storage, decoded at startup) and SIGTERMs the container — the only kill that truly stops billing (a bare self-exit gets RESCHEDULED, paid test 2026-10-09). Key `none`/missing/undecodable **disables the watchdog**. **SSH-presence guard**: while `/.ssh` exists (the user touched it after logging in over SSH) the kill is held off and the arbitrator spends no reallocate shot; `SSH_GUARD=0` disables. Deployers: `--idle-shutdown none|idle|heartbeat` + `--stop-key <file>` + `--ssh-guard 1|0`. |
 | `stats.sh` | `docker/` | Run **inside a running instance**: llama-server stats — tps, queue, token totals (scrapes the local `/metrics`). Aliased **`llama-stats`** in the image (local-only; works under Salad's shell-less SSH exec). |
-| `bw_reporter.py` | `docker/` (installed in the image) | In-container **HF-download bandwidth sampler**: appends `epoch bytes` (size of `MODEL_DIR`, `os.lstat` sum) to `${API_STATE_DIR}/bw.log` every 10 s and self-exits when llama-server `/health` is ok. Reports only — no verdicts, no API calls. Read over SSH by the `manage_groups.py` **bandwidth arbitrator** (`start --min-bw-mbps`). |
+| `bw_reporter.py` | `docker/` (installed in the image) | In-container **HF-download bandwidth sampler**: appends `epoch bytes` (size of `MODEL_DIR`, `os.lstat` sum) to `${API_STATE_DIR}/bw.log` every 10 s and self-exits when llama-server `/health` is ok. Reports only — no verdicts, no API calls. Read over SSH by the `sl_admin.py` **bandwidth arbitrator** (`start --min-bw-mbps`). |
 | `utils/llama_stats.py` | `utils/` | Same stats **from the host**, against a Salad gateway URL (key auto-loaded) or a local server. |
-| `curl_salad.sh` | `claude/` | Quick smoke test — asks the running model 2-3 simple questions through the gateway. |
+| `sl_curl.sh` | `claude/` | Quick smoke test — asks the running model 2-3 simple questions through the gateway. |
 | `salad_client.py` | repo root | Stdlib-only SaladCloud OpenAPI client (create/start/stop/delete/patch groups, GPU classes, projects). |
 | `deploy/deploy_qwen38_27b.py` | `deploy/` | **Canonical 27B deployer** — creates/updates the `qwen38-27b-q6k` group (baked MTP + vision image, main model fetched at runtime) and starts it. |
 | `deploy/deploy_generic.py` | `deploy/` | Model-agnostic deployer on the **vanilla `lmss_generic` image**: any GGUF via `--model-repo` / `--model-file`, draft + vision opt-in, `--gpu` takes any card the org lists. |
 | `deploy/deploy_ampere.py` | `deploy/` | Deployer for the **llamAmpere fork image** (turbo5/turbo4 KV cache — full 132k ATX ctx on a 24 GB card; ATX-Swift production profile is the built-in default; `--gpu` limited to the org's sm_86 30-series cards). |
 | `deploy/deploy_qwen38_9b.py` / `deploy/deploy_qwen9b.py` | `deploy/` | 9B deployers (`qwen38-9b`, `qwen9b`) — plain, no draft/vision/template. |
+| **`utils/sl_admin.py`** | `utils/` | **The fleet admin.** `list`/`refresh`/`start`/`stop`/`wait`/`stats`/`delete` over every known org+project, the **bandwidth arbitrator** (`start --min-bw-mbps`), `deploy` (menu: pick a DOCKER TYPE → runs its deployer, free by default), and `create-org`/`create-project` (portal attempt + `fleet.json` registration — the public API cannot create orgs/projects). |
 
 Everything runs against org **`ma-casa-in-paris`**, project **`qwen38-27b`**.
 
@@ -50,13 +51,13 @@ Everything runs against org **`ma-casa-in-paris`**, project **`qwen38-27b`**.
 
 The thing you'll type. It mirrors `/usr/local/bin/clov` (a wrapper that points
 the `claude` CLI at a local model), except it speaks to a Salad public gateway,
-so it first stands up the local `salad_proxy.py` and lets the proxy carry the
+so it first stands up the local `sl_proxy.py` and lets the proxy carry the
 `Salad-Api-Key`.
 
 It is a **dumb runner**: it does not start or manage the group. It checks the
 gateway **once** and **dies immediately if it is not serving** (exit 2) — that
 is the whole contract. To start a stopped group and wait for the model, use
-`cl_salad_deploy`.
+`sl_claude_deploy`.
 
 The **gateway URL is the first argument** — it's the one thing that changes when
 the group is recreated, so you point `cl_salad` at a new group by passing the new
@@ -76,15 +77,15 @@ What it does, in order:
 
 1. Resolves the **gateway URL** — first argument if given, else
    `SALAD_GATEWAY_HOST`, else the built-in default — and its own **real**
-   directory (follows the `/usr/local/bin` symlink) so it finds `salad_proxy.py`
+   directory (follows the `/usr/local/bin` symlink) so it finds `sl_proxy.py`
    and `salad_api.txt` next to the real file.
 2. Reads the Salad key from `salad_api.txt` — **never printed**; exits if empty.
 3. **Liveness check, one shot:** `GET /v1/models` with the key. Only `200`
    (group running **and** model loaded) continues; anything else exits 2 with a
    per-code hint — `404` group stopped / model still loading → run
-   `cl_salad_deploy`; `403` gateway rejects the group (deleted / wrong URL or
+   `sl_claude_deploy`; `403` gateway rejects the group (deleted / wrong URL or
    key); `000` host unreachable (DNS / connection).
-4. Starts `salad_proxy.py` on `127.0.0.1:8093` (loopback only — it holds the key)
+4. Starts `sl_proxy.py` on `127.0.0.1:8093` (loopback only — it holds the key)
    pointing at `https://<gateway>/v1/chat/completions`, and waits for `/healthz`.
 5. Exports `ANTHROPIC_BASE_URL` / `ANTHROPIC_API_KEY` and the token caps, then
    runs `claude --permission-mode bypassPermissions --model qwen38-27b "$@"`.
@@ -102,7 +103,7 @@ What it does, in order:
 | `CLAUDE_CODE_MAX_CONTEXT_TOKENS` | `64000` | Input token cap (see [token caps](#token-caps-vs-context-length)). |
 | `CLAUDE_CODE_MAX_OUTPUT_TOKENS` | `16000` | Output token cap. |
 
-### `cl_salad_deploy` — start the group, wait, then run
+### `sl_claude_deploy` — start the group, wait, then run
 
 The deploy half, split out of the old all-in-one `cl_salad`. It looks the group
 up via the management API, **starts it if it's stopped** (a fresh start
@@ -111,13 +112,13 @@ gateway serves the model, then hands off to `cl_salad` with the resolved
 configuration exported — so the proxy / claude logic lives in exactly one place.
 
 ```bash
-cl_salad_deploy                                  # defaults = prod group
-cl_salad_deploy --group qwen38-27b-q5            # the v5 test group
-cl_salad_deploy --org akl-on-salad --project comfy --group qwen38-27b-q5
-cl_salad_deploy --url https://<dns>              # other gateway / new DNS
-cl_salad_deploy --status                         # print group status, exit
-cl_salad_deploy --no-run                         # start + wait, no claude
-cl_salad_deploy --group qwen38-27b-q5 -- -p "Say hi"
+sl_claude_deploy                                  # defaults = prod group
+sl_claude_deploy --group qwen38-27b-q5            # the v5 test group
+sl_claude_deploy --org akl-on-salad --project comfy --group qwen38-27b-q5
+sl_claude_deploy --url https://<dns>              # other gateway / new DNS
+sl_claude_deploy --status                         # print group status, exit
+sl_claude_deploy --no-run                         # start + wait, no claude
+sl_claude_deploy --group qwen38-27b-q5 -- -p "Say hi"
 ```
 
 **Options** (an option beats the env var, the env var beats the default; options
@@ -144,7 +145,7 @@ While waiting, it checks the group status every ~60 s and bails early if the
 group flips back to `stopped` (it is failing to start — check the Salad UI
 rather than burning the timeout).
 
-### `salad_proxy.py` — the Anthropic↔OpenAI bridge
+### `sl_proxy.py` — the Anthropic↔OpenAI bridge
 
 Stdlib-only (no dependencies), loopback-only. It's what makes a raw
 `llama-server` usable by Claude Code.
@@ -163,7 +164,7 @@ Stdlib-only (no dependencies), loopback-only. It's what makes a raw
 Run it directly if you don't want the wrapper:
 
 ```bash
-python3 claude/salad_proxy.py \
+python3 claude/sl_proxy.py \
   --upstream https://<gateway>/v1/chat/completions \
   --model qwen38-27b \
   --keyfile claude/salad_api.txt \
@@ -213,15 +214,15 @@ length, and — when a draft model is enabled — spec-decode accept rate. `--ra
 dumps the raw Prometheus body; `llamacpp:*` metrics not rendered above are
 listed under "other" so a rename in a future llama.cpp build is visible.
 
-### Bandwidth arbitrator — `manage_groups.py start --min-bw-mbps N`
+### Bandwidth arbitrator — `sl_admin.py start --min-bw-mbps N`
 
 HF model downloads (10–30 GB GGUFs) on Salad's residential-node fleet can crawl at
 single-digit Mbps, turning a cold start into hours. The arbitrator keeps the download
 on a host that is fast enough. Available **only** when the group is started through
-`manage_groups.py` — the container side just reports, the manager owns every verdict.
+`sl_admin.py` — the container side just reports, the manager owns every verdict.
 
 ```bash
-python3 utils/manage_groups.py start ma-casa-in-paris --min-bw-mbps 30
+python3 utils/sl_admin.py start ma-casa-in-paris --min-bw-mbps 30
 ```
 
 1. **Acquire** — poll the API until a live instance is `running` with SSH fields and a
@@ -252,13 +253,13 @@ Needs the bw_reporter images: base/generic `cuda128-v8`, q6 `cuda128-v10`,
 ampere `cuda130-v6`. Offline harness (zero credits): `python3 -I
 tmp/test_arbitrator_offline.py`.
 
-### `curl_salad.sh` — quick smoke test
+### `sl_curl.sh` — quick smoke test
 
 Asks the running model a couple of simple questions through the public gateway.
 Fastest way to confirm the model is up and answering.
 
 ```bash
-./claude/curl_salad.sh -url https://<gateway> -m qwen38-27b
+./claude/sl_curl.sh -url https://<gateway> -m qwen38-27b
 ```
 
 - `-url` — the gateway access domain. `-p` — public port, **default 443** (the
@@ -321,10 +322,58 @@ never printed).
   over the policy, so an existing `always` group needs no delete+recreate).
 - **All five — SSH-presence guard**: `--ssh-guard 1` (default; `0` = off) → sent as
   `SSH_GUARD`. While `/.ssh` EXISTS in the container the watchdog never stops the group
-  and the `manage_groups.py` bandwidth arbitrator spends no `/reallocate` shot.
+  and the `sl_admin.py` bandwidth arbitrator spends no `/reallocate` shot.
   Contract: `touch /.ssh` after logging in over SSH, `rm /.ssh` on the way out. Harmless
   on images predating the guard (the env is unread). See `docker/README.md` →
   *Idle/heartbeat self-shutdown* + *Working inside the container over SSH*.
+
+### `sl_admin.py deploy` — the menu front-end for those deployers
+
+```bash
+python3 utils/sl_admin.py deploy                                  # prompted all the way down
+python3 utils/sl_admin.py deploy --type ampere --project llm --group my-atx
+python3 utils/sl_admin.py deploy --type generic --group my-gguf -- \
+        --model-repo Some/Org --model-file Model-Q5_K_M.gguf --ctx-size 32768
+```
+
+It prompts a **DOCKER TYPE** (one per deployer: `q6`, `generic`, `ampere`, `9b`,
+`qwen9b`), then org → project → group name (each skippable with
+`--org/--project/--group`), then runs that deployer with `--org/--project/
+--group` and everything after `--` verbatim. **Zero cost by default**: the
+deployer runs with `--no-start` (CREATE and PATCH are free; only START bills).
+`--start` is the paid opt-in and requires a typed `y`. The 9B deployers create
+the group STOPPED (autostart off) and never start, so they bill nothing.
+
+### Organization / project creation — the honest state
+
+Live-probed 2026-10-13 (`tools/probe_org_create.py`): the **public API cannot
+create or list orgs/projects** — `GET/POST /organizations`,
+`GET /organizations/{org}`, `GET /organizations/{org}/projects` and
+`POST /organizations/{org}/projects` all answer **404** (the OpenAPI spec's 24
+paths are all `/organizations/{org}/...`; none on the collection itself). Orgs
+and projects are created in the **web UI** (portal.salad.com), whose backend
+`portal-api.salad.com/api/portal` is undocumented and is what `utils/billing.py`
+logs into.
+
+So `create-org` / `create-project` do two things:
+
+1. **ATTEMPT** the portal endpoint with the billing vault's credentials
+   (`--no-portal` skips it). Undocumented and unverified — a 404 there is the
+   expected answer, not a bug.
+2. **REGISTER** the org/project in `utils/fleet.json`, the org→project map the
+   tool walks (the API has no list-orgs/list-projects, so the map is
+   `KNOWN_PROJECTS` in the script overlaid by that file). Registration is the
+   part that always works: create in the web UI, then
+   `create-org <slug> --register-only`.
+
+```bash
+python3 utils/sl_admin.py create-org my-new-org --project default
+python3 utils/sl_admin.py create-project my-new-org llm
+```
+
+Names are validated against Salad's own rule
+(`^[a-z][a-z0-9-]{0,61}[a-z0-9]$` — 2–63 chars, lowercase, start `[a-z]`, end
+`[a-z0-9]`).
 
 ---
 
@@ -334,22 +383,22 @@ never printed).
 
 ```bash
 cl_salad           # group is up → straight to claude
-cl_salad_deploy    # group might be asleep → start it, wait, then claude
+sl_claude_deploy    # group might be asleep → start it, wait, then claude
 ```
 
 - `cl_salad` checks the gateway **once** and dies if it's not serving (exit 2,
   with a hint per failure code). It never starts anything.
-- `cl_salad_deploy` starts a stopped group (**this costs money** — a fresh start
+- `sl_claude_deploy` starts a stopped group (**this costs money** — a fresh start
   re-downloads the model, ~30 min) and waits for readiness, then runs
-  `cl_salad`. `cl_salad_deploy --status` is the cheap way to peek first, and
+  `cl_salad`. `sl_claude_deploy --status` is the cheap way to peek first, and
   `--no-run` starts + waits without launching claude.
 - If the gateway DNS has changed (the group was recreated), point either one at
-  it: `cl_salad https://<new-dns>` / `cl_salad_deploy --url https://<new-dns>`.
+  it: `cl_salad https://<new-dns>` / `sl_claude_deploy --url https://<new-dns>`.
 
 ### 2. Smoke-test with curl
 
 ```bash
-./claude/curl_salad.sh -url https://<gateway> -m qwen38-27b
+./claude/sl_curl.sh -url https://<gateway> -m qwen38-27b
 ```
 
 Expect short correct answers to the built-in questions. If you get an empty
@@ -366,7 +415,7 @@ python3 deploy/deploy_qwen38_27b.py --gpu rtx5090      # switch card (re-point +
 ```
 
 After a deploy, "running" only means the **container process** is up — the model
-may still be downloading. Confirm readiness with `curl_salad.sh`, and confirm the
+may still be downloading. Confirm readiness with `sl_curl.sh`, and confirm the
 **live build** with `version.sh` in the container.
 
 ### 4. Verify what's actually running
@@ -402,7 +451,7 @@ curl -s https://<gateway>/v1/models -H "Salad-Api-Key: $(tr -d '[:space:]' < cla
 - **Group DELETE leaves a name tombstone.** Recreating a just-deleted group name
   400s with `name_conflict` for a while (name-specific, not a create outage).
   Use a fresh group name; keep `MODEL_ALIAS` stable so clients don't notice.
-- **On-demand groups cost money when they start.** `cl_salad_deploy` warns
+- **On-demand groups cost money when they start.** `sl_claude_deploy` warns
   before starting a stopped group; `--status` is the free way to peek first,
   and `cl_salad` alone never starts anything.
 - **The chat template is server-side.** It lives in the GGUF (or `--chat-template-file`
@@ -451,12 +500,13 @@ on_salad/
 │   └── run-nvidia-smi.sh
 ├── claude/
 │   ├── cl_salad                    # ★ Claude Code runner (dies if gateway dead)
-│   ├── cl_salad_deploy             # ★ deploy half: start + wait, then cl_salad
-│   ├── salad_proxy.py              # Anthropic↔OpenAI bridge
-│   ├── curl_salad.sh               # gateway smoke test
+│   ├── sl_claude_deploy             # ★ deploy half: start + wait, then cl_salad
+│   ├── sl_proxy.py              # Anthropic↔OpenAI bridge
+│   ├── sl_curl.sh               # gateway smoke test
 │   └── salad_api.txt               # gateway key (gitignored)
 ├── utils/
-│   ├── manage_groups.py            # group manager: list/refresh/start/stop/wait/stats/delete + bandwidth arbitrator (start --min-bw-mbps)
+│   ├── sl_admin.py            # the fleet admin: list/refresh/start/stop/wait/stats/delete + bandwidth arbitrator (start --min-bw-mbps) + deploy (DOCKER TYPE menu) + create-org/create-project
+│   ├── fleet.json             # org→project map create-org/create-project write (created on first use)
 │   ├── llama_stats.py              # stats entry point (delegates to docker/llama_stats.py)
 │   ├── billing.py                  # per-org portal credit balances (USD + EUR)
 │   ├── portal_vault.gpg            # billing vault (GPG AES256, gitignored)
@@ -479,7 +529,7 @@ Three key files, all **gitignored** and `chmod 600`, none ever printed:
 
 | File | What it is | Used by |
 |---|---|---|
-| `deploy/salad_api.txt` (mirrored in `claude/`) | SaladCloud API key → `Salad-Api-Key` header | `cl_salad`, `cl_salad_deploy`, `salad_proxy.py`, `curl_salad.sh`, `salad_client.py`, deploy scripts |
+| `deploy/salad_api.txt` (mirrored in `claude/`) | SaladCloud API key → `Salad-Api-Key` header | `cl_salad`, `sl_claude_deploy`, `sl_proxy.py`, `sl_curl.sh`, `salad_client.py`, deploy scripts |
 | `deploy/hft.txt` | HuggingFace token (validated, added to group env for authenticated downloads) | deploy/update scripts |
 | `docker/api.txt` | llama-server Bearer key (only if the model needs one) | local run scripts |
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Offline harness for the manage_groups.py bandwidth arbitrator — ZERO credits.
+"""Offline harness for the sl_admin.py bandwidth arbitrator — ZERO credits.
 
 Fakes the three Salad API calls the arbitrator makes (get_container_group,
 list_container_group_instances, reallocate_container_group_instance), puts a
@@ -40,7 +40,7 @@ sys.path.insert(0, REPO)
 os.environ["PATH"] = os.path.join(REPO, "tools", "fakebin") + os.pathsep + os.environ["PATH"]
 
 import salad_client as sc  # noqa: E402  (repo import, after sys.path fix)
-import utils.manage_groups as mg  # noqa: E402
+import utils.sl_admin as mg  # noqa: E402
 
 # --- virtual clock: sleeps advance it, timeouts fire instantly in sim time ---
 CLOCK = [1_000.0]

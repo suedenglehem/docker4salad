@@ -6,11 +6,11 @@
 # OpenAI chat completions at all.
 #
 # Usage:
-#   ./chat_salad.sh                 # interactive chat (default gateway)
-#   ./chat_salad.sh https://<dns>.salad.cloud        # interactive, that gateway
-#   ./chat_salad.sh "your prompt"   # one-shot, then exit
-#   ./chat_salad.sh https://<dns>.salad.cloud "prompt"   # one-shot, that gateway
-#   ./chat_salad.sh -s "sys" "prompt"   # extra args pass through to llm
+#   ./sl_chat.sh                 # interactive chat (default gateway)
+#   ./sl_chat.sh https://<dns>.salad.cloud        # interactive, that gateway
+#   ./sl_chat.sh "your prompt"   # one-shot, then exit
+#   ./sl_chat.sh https://<dns>.salad.cloud "prompt"   # one-shot, that gateway
+#   ./sl_chat.sh -s "sys" "prompt"   # extra args pass through to llm
 #
 # Config via env:
 #   SALAD_UPSTREAM   access domain (default: the atx-hb-test2 gateway
@@ -40,7 +40,7 @@ MODEL="${SALAD_MODEL:-atx-swift-27b-opt}"
 KEYFILE="${SALAD_KEYFILE:-salad_api.txt}"
 
 # A leading URL argument overrides SALAD_UPSTREAM (cl_salad takes the gateway
-# URL as its first argument — chat_salad follows the same convention).
+# URL as its first argument — sl_chat follows the same convention).
 if [ $# -gt 0 ]; then
   case "$1" in
     http://*|https://*)
@@ -72,17 +72,17 @@ while [ "$code" != "200" ] && [ "${SALAD_WAIT:-0}" = "1" ] && [ $i -lt 60 ]; do
 done
 
 if [ "$code" != "200" ]; then
-  echo "chat_salad: gateway $UPSTREAM is not serving (HTTP $code) — not starting chat." >&2
+  echo "sl_chat: gateway $UPSTREAM is not serving (HTTP $code) — not starting chat." >&2
   case "$code" in
-    000) echo "chat_salad: cannot reach the host at all (DNS / connection)." >&2
-         echo "chat_salad: check the URL, or start the group with cl_salad_deploy." >&2 ;;
-    404) echo "chat_salad: the group is not serving — it is stopped, or the model is" >&2
-         echo "chat_salad: still loading. Start it with cl_salad_deploy (which waits" >&2
-         echo "chat_salad: for readiness) and re-run chat_salad." >&2 ;;
-    403) echo "chat_salad: the gateway rejects this key/group — it may be deleted, or" >&2
-         echo "chat_salad: the URL / key may be wrong. Check with cl_salad_deploy --status." >&2 ;;
-    *)   echo "chat_salad: unexpected response from /v1/models — the group may be" >&2
-         echo "chat_salad: (re)starting. Use cl_salad_deploy, which waits for readiness." >&2 ;;
+    000) echo "sl_chat: cannot reach the host at all (DNS / connection)." >&2
+         echo "sl_chat: check the URL, or start the group with sl_claude_deploy." >&2 ;;
+    404) echo "sl_chat: the group is not serving — it is stopped, or the model is" >&2
+         echo "sl_chat: still loading. Start it with sl_claude_deploy (which waits" >&2
+         echo "sl_chat: for readiness) and re-run sl_chat." >&2 ;;
+    403) echo "sl_chat: the gateway rejects this key/group — it may be deleted, or" >&2
+         echo "sl_chat: the URL / key may be wrong. Check with sl_claude_deploy --status." >&2 ;;
+    *)   echo "sl_chat: unexpected response from /v1/models — the group may be" >&2
+         echo "sl_chat: (re)starting. Use sl_claude_deploy, which waits for readiness." >&2 ;;
   esac
   exit 2
 fi
@@ -113,7 +113,7 @@ if [ "${SALAD_HEARTBEAT:-1}" = "1" ]; then
     done
   ) &
   HEARTBEAT_PID=$!
-  echo "chat_salad: heartbeat keepalive ON (1-token call every 30 s; the group self-stops when this chat dies)" >&2
+  echo "sl_chat: heartbeat keepalive ON (1-token call every 30 s; the group self-stops when this chat dies)" >&2
 fi
 
 # ---- chat --------------------------------------------------------------------

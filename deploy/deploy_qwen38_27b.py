@@ -9,7 +9,7 @@ tombstone (salad-group-name-tombstone memory) — still 400 name_conflict
 24h+ after its 2026-10-01 DELETE, so the user approved the name
 'qwen38-27b-Q6K'; the API name pattern is lowercase-only, hence
 'qwen38-27b-q6k'. The served alias stays 'qwen38-27b' (MODEL_ALIAS env,
-llama-server --alias), so clients and curl_salad.sh -m are unaffected.
+llama-server --alias), so clients and sl_curl.sh -m are unaffected.
 
 Serves the baked image `lmss_jonathancoletti_qwen38_q6_mtp_vision` (a
 FROM boris271142/lmss:cuda128-v3 extension, Dockerfile.lmss_q6_mtp_vision):
@@ -117,7 +117,7 @@ PROJECT_NAME = "qwen38-27b"
 # 'qwen38-27b' itself is stuck in the DELETE name-conflict tombstone.
 GROUP_NAME = "qwen38-27b-q6k"
 # Served model name (llama-server --alias) — deliberately NOT the group
-# name; curl_salad.sh -m and the Claude Code client reference it.
+# name; sl_curl.sh -m and the Claude Code client reference it.
 MODEL_ALIAS = "qwen38-27b"
 
 # Digest-pinned: the API accepts the @sha256 ref verbatim, and it is the
@@ -128,7 +128,7 @@ MODEL_ALIAS = "qwen38-27b"
 # disables watchdog] + bw_reporter + iputils-ping + llama-stats, trapped-child
 # supervisor, exec-form entry.sh CMD) 2026-10-09' — bw_reporter.py samples
 # MODEL_DIR growth every 10 s into ${API_STATE_DIR}/bw.log (self-exits on
-# llama-server /health) so `manage_groups.py start --min-bw-mbps N` can read it
+# llama-server /health) so `sl_admin.py start --min-bw-mbps N` can read it
 # over SSH and reallocate a slow node; iputils-ping needs CAP_NET_RAW (Salad
 # workers may deny it); `llama-stats` = stats.sh symlink, local-only; on top of
 # watchdog v2.1 (arms on the group /ready endpoint,
@@ -229,7 +229,7 @@ def parse_args() -> argparse.Namespace:
                         help="env IDLE_SHUTDOWN — in-container watchdog mode: none (off), "
                              "idle (self-stop after --idle-timeout s with no chat traffic), "
                              "heartbeat (self-stop after --heartbeat-timeout s with no client "
-                             "keepalive pings — run cl_salad/chat_salad.sh with "
+                             "keepalive pings — run cl_salad/sl_chat.sh with "
                              "SALAD_HEARTBEAT=1). Needs a watchdog-capable image "
                              "(version.sh prints the WATCHDOG generation). The watchdog arms "
                              "on the group's /ready endpoint and kills by POSTing the group "
@@ -355,7 +355,7 @@ def build_env(name: str, ctx_size: str, use_draft_model: str, hf_token: str | No
         "CTX_SIZE": ctx_size,
         "N_GPU_LAYERS": "99",
         "NAME": name,
-        # Served alias stays 'qwen38-27b' (clients + curl_salad.sh -m),
+        # Served alias stays 'qwen38-27b' (clients + sl_curl.sh -m),
         # independent of the group name.
         "MODEL_ALIAS": MODEL_ALIAS,
         # Claude Code template: '1' = dump the gguf's own template at startup
@@ -621,7 +621,7 @@ def main() -> int:
           f"{'(no --model-draft, USE_DRAFT_MODEL=none)' if args.use_draft_model == 'none' else '--model-draft ...draft-Q8_0.gguf'} "
           f"--alias {MODEL_ALIAS}")
     print(f"      3. gateway answers only after the probe passes (/ready, ~40-min window, first probe at 30 s):")
-    print(f"         claude/curl_salad.sh -url https://{dns} -m {MODEL_ALIAS}")
+    print(f"         claude/sl_curl.sh -url https://{dns} -m {MODEL_ALIAS}")
     return 0
 
 

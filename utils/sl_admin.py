@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""Manage Salad container groups — list, live-refresh, start, stop, wait, stats, delete.
+"""Manage the Salad fleet — list, live-refresh, start, stop, wait, stats, delete,
+create-org, create-project, deploy.
 
 Usage:
-  python3 utils/manage_groups.py [ACTION] [ORG] [--interval N]
+  python3 utils/sl_admin.py [ACTION] [ORG] [--interval N]
 
   ACTION    list (default)  one-shot status table
             refresh         re-render the table every N seconds (Ctrl-C to stop)
@@ -20,6 +21,11 @@ Usage:
                             ready"). Otherwise it prints the state and exits 1
                             without scraping
             delete          pick a group and delete it — IRREVERSIBLE
+            create-org      register (and try to create) a new ORGANIZATION
+            create-project  register (and try to create) a new PROJECT in an org
+            deploy          pick a DOCKER TYPE (the profiles our images support)
+                            and run its deployer against an org/project/group —
+                            ZERO COST by default (--no-start; --start bills)
   ORG       ma-casa-in-paris | akl-on-salad (default: every known org)
   --interval N
             poll period in seconds for refresh / wait / stats (default 5)
@@ -42,18 +48,60 @@ Usage:
             (persistent ssh failure, alloc timeout, reallocate API failure,
             missing bw.log = old image). Ctrl-C leaves the group running.
 
-  python3 utils/manage_groups.py                     # status, all known orgs
-  python3 utils/manage_groups.py akl-on-salad        # one org
-  python3 utils/manage_groups.py refresh             # live table, Ctrl-C to stop
-  python3 utils/manage_groups.py delete              # numbered table -> prompt -> confirm
-  python3 utils/manage_groups.py start akl-on-salad  # start a group in that org
-  python3 utils/manage_groups.py start --min-bw-mbps 30   # start + arbitrator
-  python3 utils/manage_groups.py wait                # after start: poll until ready
-  python3 utils/manage_groups.py stats               # stats, only if fully ready
+  deploy flags
+  --type T
+            the DOCKER TYPE key (see the `deploy` action's table). Prompted
+            with a numbered menu when absent.
+  --org O / --project P / --group G
+            answer the corresponding prompt on the command line; anything
+            unspecified is prompted (org/project from the fleet map, group
+            name with the type's default in brackets).
+  --start
+            PAID opt-in: run the deployer without `--no-start`, after typing
+            'y' at the confirmation. Default is config-only (CREATE/PATCH are
+            free; only START bills). The 9B deployers create the group STOPPED
+            and never start, so nothing bills on those types either way.
+  -- <flags>
+            everything after `--` is passed to the deployer verbatim
+            (--ctx-size, --gpu, --model-repo, --idle-shutdown, …).
+  create flags
+  --project P        (create-org) project to register with the org; repeatable
+  --register-only    skip the API/portal attempts, only write fleet.json
+  --no-portal        skip the portal (web-UI backend) attempt
+
+  python3 utils/sl_admin.py                     # status, all known orgs
+  python3 utils/sl_admin.py akl-on-salad        # one org
+  python3 utils/sl_admin.py refresh             # live table, Ctrl-C to stop
+  python3 utils/sl_admin.py delete              # numbered table -> prompt -> confirm
+  python3 utils/sl_admin.py start akl-on-salad  # start a group in that org
+  python3 utils/sl_admin.py start --min-bw-mbps 30   # start + arbitrator
+  python3 utils/sl_admin.py wait                # after start: poll until ready
+  python3 utils/sl_admin.py stats               # stats, only if fully ready
+  python3 utils/sl_admin.py deploy              # prompt: docker type -> org/project/group
+  python3 utils/sl_admin.py deploy --type ampere --project llm --group my-atx
+  python3 utils/sl_admin.py deploy --type generic --group my-gguf -- \
+      --model-repo Some/Org --model-file Model-Q5_K_M.gguf --ctx-size 32768
+  python3 utils/sl_admin.py create-org my-new-org --project default
+  python3 utils/sl_admin.py create-project my-new-org llm
+
+ORGANIZATION / PROJECT CREATION — the honest state (live-probed 2026-10-13,
+tools/probe_org_create.py): the PUBLIC API (api.salad.com/api/public) has NO
+create-org, NO create-project, NO list-orgs and NO list-projects — every one of
+those paths answers 404 (the OpenAPI spec's 24 paths are all
+`/organizations/{org}/...`, none on the collection itself). Orgs and projects
+are created in the WEB UI (portal.salad.com), whose backend
+(portal-api.salad.com/api/portal) is what utils/billing.py logs into. So
+`create-org` / `create-project` do two things: (1) ATTEMPT the portal endpoint
+with the billing vault's credentials (best-effort, `--no-portal` to skip — the
+portal API is undocumented and unverified, so a 404 there is expected, not a
+bug), and
+(2) REGISTER the org/project in the local fleet map (utils/fleet.json) so the
+rest of this tool sees it. Registration is the part that always works; use
+`--register-only` after you create in the web UI.
 
 The SaladCloud API has no list-orgs / list-projects operations, so this walks
-a fixed map of the account's orgs and their projects. Add new projects to
-KNOWN_PROJECTS below when you create them in the web UI.
+a fixed map of the account's orgs and their projects: KNOWN_PROJECTS below,
+overlaid by utils/fleet.json (tracked; what create-org/create-project write).
 
 For every group (active or not) it prints: status, age (since creation),
 uptime (time in the current state), instance counts, and the gateway URL from
@@ -74,7 +122,10 @@ Notes:
 
 from __future__ import annotations
 
+import getpass
+import json
 import os
+import re
 import runpy
 import statistics
 import subprocess
@@ -82,19 +133,60 @@ import sys
 import time
 from datetime import datetime, timezone
 
-# salad_client.py lives at the repo root; running this as utils/manage_groups.py
+# salad_client.py lives at the repo root; running this as utils/sl_admin.py
 # puts utils/ on sys.path, not the root.
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import salad_client as sc
 
 # org -> projects known to exist in this account (web-UI created; no list API).
+# fleet.json (next to this file, TRACKED) overlays this map — create-org /
+# create-project write there, so the built-in map stays the zero-config default
+# for a fresh clone and the account's real shape lives in data, not in code.
 KNOWN_PROJECTS: dict[str, tuple[str, ...]] = {
     "ma-casa-in-paris": ("qwen38-27b", "llm"),
     "akl-on-salad": ("default", "comfy"),
 }
+FLEET_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fleet.json")
 
-ACTIONS = ("list", "refresh", "start", "stop", "wait", "stats", "delete")
+# Salad's own name rules (OpenAPI OrganizationName / ProjectName): 2-63 chars,
+# lowercase, start [a-z], end [a-z0-9], inner [a-z0-9-].
+SALAD_NAME_RE = re.compile(r"^[a-z][a-z0-9-]{0,61}[a-z0-9]$")
+
+# The portal backend the WEB UI uses (utils/billing.py logs into this).
+PORTAL_BASE = "https://portal-api.salad.com/api/portal"
+
+ACTIONS = ("list", "refresh", "start", "stop", "wait", "stats", "delete",
+           "create-org", "create-project", "deploy")
+
+# --- deploy: the docker types we support (one entry per deployer) ------------
+# Each is (script, one-line profile, default group, accepts_--no-start). The
+# deployers own the profiles; this table only routes the prompt. Flags after
+# `--` in `deploy … -- <flags>` go to the deployer verbatim, so anything the
+# deployer accepts (--ctx-size, --gpu, --model-repo, --idle-shutdown, …) is
+# reachable. The 9B deployers create the group STOPPED (autostart off) and
+# have no --no-start flag — they never bill, so nothing to pass and nothing
+# to confirm.
+DOCKER_TYPES: dict[str, tuple[str, str, str, bool]] = {
+    "q6":      ("deploy_qwen38_27b.py",
+                "27B q6 MTP+vision (the Claude Code backend) — Q5_K_M @ CTX 90000, rtx3090",
+                "qwen38-27b-q6k", True),
+    "generic": ("deploy_generic.py",
+                "vanilla lmss_generic — ANY GGUF (--model-repo/--model-file), any GPU class",
+                "atx-swift-27b-q5", True),
+    "ampere":  ("deploy_ampere.py",
+                "llamAmpere fork (turbo5/turbo4 KV) — ATX profile CTX 132768, sm_86 30-series ONLY",
+                "atx-swift-27b-q5-opt", True),
+    "9b":      ("deploy_qwen38_9b.py",
+                "plain 9B on base lmss — CREATE-ONLY (refuses an existing group)",
+                "qwen38-9b", False),
+    "qwen9b":  ("deploy_qwen9b.py",
+                "plain 9B on base lmss — CREATE-ONLY (refuses an existing group)",
+                "qwen9b", False),
+}
+DEPLOY_DIR = os.path.normpath(
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "deploy")
+)
 
 # The canonical /metrics scraper (single source of truth; it lives in docker/
 # because that directory is Dockerfile.multistage's build context). Delegated
@@ -131,6 +223,77 @@ BW_SSH_OPTS = (
     "-o", "BatchMode=yes",
     "-o", "LogLevel=ERROR",
 )
+
+
+def _fleet() -> dict[str, tuple[str, ...]]:
+    """The account's org -> projects map: KNOWN_PROJECTS overlaid by fleet.json.
+
+    fleet.json is tracked data: {"organizations": {"slug": ["project", …]}}.
+    A malformed/unreadable file is ignored with a warning — the built-in map
+    must keep working (this file is the tool's spine; a typo in data must not
+    make `list` unusable).
+    """
+    fleet = {org: tuple(projects) for org, projects in KNOWN_PROJECTS.items()}
+    try:
+        with open(FLEET_FILE, encoding="utf-8") as fh:
+            data = json.load(fh)
+    except FileNotFoundError:
+        return fleet
+    except (OSError, ValueError) as e:
+        print(f"warning: ignoring {FLEET_FILE}: {e}", file=sys.stderr)
+        return fleet
+    orgs = data.get("organizations") if isinstance(data, dict) else None
+    if isinstance(orgs, dict):
+        for org, projects in orgs.items():
+            if isinstance(projects, (list, tuple)):
+                fleet[org] = tuple(dict.fromkeys((*fleet.get(org, ()), *projects)))
+    return fleet
+
+
+def _save_fleet(org: str, projects: tuple[str, ...]) -> None:
+    """Merge one org + its projects into fleet.json (idempotent, creates it)."""
+    data: dict = {}
+    try:
+        with open(FLEET_FILE, encoding="utf-8") as fh:
+            data = json.load(fh)
+    except FileNotFoundError:
+        data = {}
+    except (OSError, ValueError) as e:
+        print(f"error: {FLEET_FILE} is unreadable, refusing to write it: {e}", file=sys.stderr)
+        raise SystemExit(2)
+    if not isinstance(data, dict):
+        print(f"error: {FLEET_FILE} is not a JSON object, refusing to write it", file=sys.stderr)
+        raise SystemExit(2)
+    orgs = data.setdefault("organizations", {})
+    if not isinstance(orgs, dict):
+        print(f"error: {FLEET_FILE} 'organizations' is not an object, refusing to write it",
+              file=sys.stderr)
+        raise SystemExit(2)
+    orgs[org] = sorted(dict.fromkeys((*orgs.get(org, []), *projects)))
+    with open(FLEET_FILE, "w", encoding="utf-8") as fh:
+        json.dump(data, fh, indent=2, sort_keys=True)
+        fh.write("\n")
+    print(f"registered in {os.path.relpath(FLEET_FILE, os.getcwd())}: "
+          f"{org} -> {', '.join(orgs[org])}")
+
+
+def _pick_numbered(items: list[str], title: str, default: int = 0) -> int | None:
+    """Numbered menu on stdin. Returns the 0-based pick, `default` on an empty
+    line, None on EOF/Ctrl-C (the caller treats that as abort)."""
+    print(f"{title} ({len(items)} options):")
+    for i, item in enumerate(items, 1):
+        print(f"  {i}. {item}")
+    hint = f" [Enter = {default + 1}]" if default else ""
+    while True:
+        try:
+            raw = input(f"  pick 1-{len(items)}{hint}: ").strip()
+        except EOFError:
+            return None
+        if not raw:
+            return default
+        if raw.isdigit() and 1 <= int(raw) <= len(items):
+            return int(raw) - 1
+        print(f"  not a number in 1-{len(items)} — try again (Ctrl-C aborts)")
 
 
 def _url(group: sc.ContainerGroupInfo) -> str | None:
@@ -377,9 +540,9 @@ def _run_action(action: str, sel: tuple[str, str, sc.ContainerGroupInfo], key: s
         if action == "start":
             sc.start_container_group(sc.StartContainerGroupRequest(org, project, name), api_key=key)
             print(f"202 Accepted — {name} is starting.")
-            print(f"wait for it to become ready:  python3 utils/manage_groups.py wait {org}")
+            print(f"wait for it to become ready:  python3 utils/sl_admin.py wait {org}")
             print(
-                f"then run Claude Code:        cl_salad_deploy --org {org} --project {project} --group {name}"
+                f"then run Claude Code:        sl_claude_deploy --org {org} --project {project} --group {name}"
             )
         elif action == "stop":
             sc.stop_container_group(sc.StopContainerGroupRequest(org, project, name), api_key=key)
@@ -396,7 +559,7 @@ def _run_action(action: str, sel: tuple[str, str, sc.ContainerGroupInfo], key: s
                 if e.status_code == 404:
                     print("verified: group no longer exists.")
                 else:
-                    print(f"note: verification GET returned HTTP {e.status_code} — re-check with: python3 utils/manage_groups.py")
+                    print(f"note: verification GET returned HTTP {e.status_code} — re-check with: python3 utils/sl_admin.py")
         else:
             return 2
         return 0
@@ -503,7 +666,7 @@ def _stats(scope: str, name: str, key: str, interval: float) -> int:
 
     if status != "running":
         print(f"not fully ready — no stats:  {name}  {state}")
-        print(f"it is {status} — start it first:  python3 utils/manage_groups.py start {org}")
+        print(f"it is {status} — start it first:  python3 utils/sl_admin.py start {org}")
         return 1
     if live is None:
         print(f"cannot verify readiness — instance list failed:  {name}  {state}")
@@ -517,7 +680,7 @@ def _stats(scope: str, name: str, key: str, interval: float) -> int:
         if not_ready:
             detail.append("not ready yet: " + ",".join(_instance_frag(i) for i in not_ready))
         print(f"not fully ready — no stats:  {name}  {state}")
-        print("; ".join(detail) + f" — wait for it, then re-run stats:  python3 utils/manage_groups.py wait {org}")
+        print("; ".join(detail) + f" — wait for it, then re-run stats:  python3 utils/sl_admin.py wait {org}")
         return 1
 
     url = _url(g)
@@ -854,13 +1017,279 @@ def _arbitrate(
         shots += 1
 
 
+def _portal_session():
+    """Portal (web-UI backend) session from the billing vault.
+
+    Returns (billing_module, cookie), or None when the vault is missing or the
+    passphrase is not available. Credentials come from utils/portal_vault.gpg
+    (same vault utils/billing.py uses) and are NEVER printed.
+    """
+    vault = os.path.join(os.path.dirname(os.path.abspath(__file__)), "portal_vault.gpg")
+    if not os.path.exists(vault):
+        print(f"portal: no vault at {os.path.relpath(vault, os.getcwd())} "
+              f"(run `python3 utils/billing.py` once to create it)")
+        return None
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    try:
+        import billing
+    except ImportError as e:
+        print(f"portal: cannot import utils/billing.py: {e}")
+        return None
+    phrase = os.environ.get("PORTAL_VAULT_PASS")
+    try:
+        data = billing.load_vault(vault, phrase or getpass.getpass("portal vault passphrase: "))
+        cookie = billing.login(data["user"], data["password"])
+    except SystemExit as e:  # billing raises SystemExit on decrypt/login failure
+        print(f"portal: {e}")
+        return None
+    except (KeyError, OSError, ValueError) as e:
+        print(f"portal: vault unusable: {e}")
+        return None
+    return billing, cookie
+
+
+def _portal_call(billing, cookie: str, path: str, body: dict | None) -> tuple[int, str]:
+    """One portal call. Returns (status, short body excerpt) — excerpts are
+    truncated so a portal payload can never dump account detail into the log."""
+    url = f"{PORTAL_BASE}{path}"
+    data = json.dumps(body).encode() if body is not None else None
+    status, _headers, raw = billing._request(url, data=data, cookie=cookie)
+    return status, raw.decode("utf-8", "replace")[:300]
+
+
+def _create_names(slug: str, projects: tuple[str, ...]) -> bool:
+    """Validate against Salad's own pattern (2-63, lowercase, [a-z] start)."""
+    bad = [n for n in (slug, *projects) if not SALAD_NAME_RE.match(n)]
+    for name in bad:
+        print(f"error: {name!r} violates Salad's name rule "
+              f"^[a-z][a-z0-9-]{{0,61}}[a-z0-9]$ (2-63 chars, lowercase, "
+              f"starts [a-z], ends [a-z0-9])", file=sys.stderr)
+    return not bad
+
+
+def _create_org(slug: str, projects: tuple[str, ...], key: str,
+                register_only: bool, use_portal: bool) -> int:
+    """Create/register an ORGANIZATION.
+
+    The public API cannot create orgs (live-probed 404 on POST /organizations,
+    2026-10-13, tools/probe_org_create.py) — the portal backend is the web UI's
+    own path and is undocumented, so this attempts it and reports the real
+    status. Registration in fleet.json is what the tool needs, and it always
+    works.
+    """
+    if not _create_names(slug, projects):
+        return 2
+    print(f"org: {slug}  projects: {', '.join(projects)}")
+
+    created = False
+    if not register_only:
+        # 1) The public API: documented-absent, attempted anyway so the tool
+        #    reports today's truth instead of a cached assumption.
+        try:
+            status, reason, _h, raw = sc._http(
+                "POST", "/organizations", key, body={"name": slug}, timeout=30.0
+            )
+            print(f"public API POST /organizations -> {status} {reason} — org created")
+            created = status in (201, 202)
+        except sc.SaladApiError as e:
+            print(f"public API POST /organizations -> {e.status_code} "
+                  f"{'(no such endpoint — expected, orgs are not API-creatable)' if e.status_code == 404 else e.raw_body[:200]}")
+
+        # 2) The portal backend (what the web UI calls). Undocumented: a 404
+        #    here is an expected answer, not a failure of this tool.
+        if use_portal:
+            session = _portal_session()
+            if session is None:
+                print("portal: skipped (no session) — create the org in the web UI, "
+                      "then re-run with --register-only")
+            else:
+                billing, cookie = session
+                status, excerpt = _portal_call(billing, cookie, "/organizations", {"name": slug})
+                if status in (200, 201, 202):
+                    print(f"portal POST /organizations -> {status} — org created")
+                    created = True
+                elif status == 404:
+                    print("portal POST /organizations -> 404 (no such endpoint; the web UI "
+                          "uses a path we have not identified) — create it in the web UI")
+                else:
+                    print(f"portal POST /organizations -> {status} {excerpt}")
+
+        if not created:
+            print("next: create the organization at https://portal.salad.com (web UI), "
+                  "then re-run with --register-only to add it to the fleet map")
+
+    _save_fleet(slug, projects)
+    print(f"{'created' if created else 'registered'}: {slug} — "
+          f"`python3 utils/sl_admin.py list {slug}` should now walk it")
+    return 0
+
+
+def _create_project(org: str, project: str, key: str,
+                    register_only: bool, use_portal: bool) -> int:
+    """Create/register a PROJECT in an org. Same API reality as _create_org
+    (POST /organizations/{org}/projects is 404 on the public API — the
+    salad_client.create_project docstring's 2026-08-31 probe is dead)."""
+    if not _create_names(org, (project,)):
+        return 2
+    print(f"org: {org}  project: {project}")
+
+    created = False
+    if not register_only:
+        try:
+            res = sc.create_project(org, project, api_key=key)
+            print(f"public API POST /organizations/{org}/projects -> {res.status_code} "
+                  f"{res.reason_phrase} — project created")
+            created = True
+        except sc.SaladApiError as e:
+            print(f"public API POST /organizations/{org}/projects -> {e.status_code} "
+                  f"{'(no such endpoint — expected, projects are not API-creatable)' if e.status_code == 404 else e.raw_body[:200]}")
+        if use_portal:
+            session = _portal_session()
+            if session is None:
+                print("portal: skipped (no session) — create the project in the web UI, "
+                      "then re-run with --register-only")
+            else:
+                billing, cookie = session
+                status, excerpt = _portal_call(
+                    billing, cookie, f"/organizations/{org}/projects", {"name": project}
+                )
+                if status in (200, 201, 202):
+                    print(f"portal POST projects -> {status} — project created")
+                    created = True
+                elif status == 404:
+                    print("portal POST projects -> 404 (no such endpoint) — create it in the web UI")
+                else:
+                    print(f"portal POST projects -> {status} {excerpt}")
+        if not created:
+            print(f"next: create the project inside {org} at https://portal.salad.com, "
+                  "then re-run with --register-only")
+
+    _save_fleet(org, (project,))
+    print(f"{'created' if created else 'registered'}: {org}/{project}")
+    return 0
+
+
+def _deploy(key: str, type_key: str | None, org: str | None, project: str | None,
+            group: str | None, start: bool, extra: list[str]) -> int:
+    """Deploy a group by picking a DOCKER TYPE (one of the profiles our images
+    support) and routing to its deployer.
+
+    Zero cost by default: the deployer runs with --no-start (CREATE/PATCH are
+    free, only START bills). `--start` is the paid opt-in and is confirmed.
+    """
+    types = list(DOCKER_TYPES)
+    if type_key is None:
+        pick = _pick_numbered(
+            [f"{k} — {DOCKER_TYPES[k][1]}" for k in types], "docker type")
+        if pick is None:
+            print("aborted — nothing done.")
+            return 1
+        type_key = types[pick]
+    elif type_key not in DOCKER_TYPES:
+        print(f"error: unknown docker type {type_key!r}; supported: {', '.join(types)}",
+              file=sys.stderr)
+        return 2
+
+    script, profile, default_group, accepts_no_start = DOCKER_TYPES[type_key]
+    path = os.path.join(DEPLOY_DIR, script)
+    if not os.path.exists(path):
+        print(f"error: deployer not found at {path}", file=sys.stderr)
+        return 2
+    print(f"type: {type_key} — {profile}")
+
+    fleet = _fleet()
+    if org is None:
+        pick = _pick_numbered(list(fleet), "organization")
+        if pick is None:
+            print("aborted — nothing done.")
+            return 1
+        org = list(fleet)[pick]
+    projects = list(fleet.get(org, ()))
+    if not projects:
+        print(f"error: {org} has no known projects — add one with create-project "
+              f"(or --register-only after creating it in the web UI)", file=sys.stderr)
+        return 2
+    if project is None:
+        pick = _pick_numbered(projects, "project")
+        if pick is None:
+            print("aborted — nothing done.")
+            return 1
+        project = projects[pick]
+    if group is None:
+        try:
+            group = input(f"  group name [{default_group}]: ").strip() or default_group
+        except EOFError:
+            print("aborted — nothing done.")
+            return 1
+    if not SALAD_NAME_RE.match(group):
+        print(f"error: group name {group!r} violates Salad's name rule "
+              f"^[a-z][a-z0-9-]{{0,61}}[a-z0-9]$", file=sys.stderr)
+        return 2
+
+    cmd = [sys.executable, "-I", path, "--org", org, "--project", project, "--group", group]
+    if not start and accepts_no_start:
+        cmd.append("--no-start")
+    cmd.extend(extra)
+
+    # Does THIS run bill? Deployers that accept --no-start bill only when we
+    # omit it. The 9B deployers create the group STOPPED (autostart off,
+    # scheduled scaling) and never start anything, so `--start` on those types
+    # bills nothing here — the paid start is a later `start` action.
+    will_bill = start and accepts_no_start
+
+    print(f"\ncommand: {' '.join(cmd)}")
+    print(f"target:  {org}/{project}/{group}  "
+          f"{'START (bills per second)' if will_bill else 'config only, NO start (free)'}")
+    if not accepts_no_start:
+        print("note:  this deployer creates the group STOPPED (autostart off) — "
+              "it never starts, so nothing bills; start it later with the `start` action")
+    if will_bill:
+        try:
+            if input("  type 'y' to START this group (it bills): ").strip().lower() != "y":
+                print("aborted — nothing done.")
+                return 1
+        except EOFError:
+            print("aborted — nothing done.")
+            return 1
+
+    rc = subprocess.call(cmd)
+    if rc != 0:
+        print(f"deployer exited {rc} — see its own output above")
+        return rc
+
+    # Read-only confirmation of what the group is now, including its gateway URL
+    # (networking.dns — the access URL; there is no top-level `endpoint` field).
+    try:
+        g = sc.get_container_group(org, project, group, api_key=key)
+        print(f"group:   {g.name}  status={g.current_status or '?'}  url={_url(g) or '-'}")
+        if not will_bill:
+            print("next: the paid start is your call — "
+                  f"`python3 utils/sl_admin.py start {org} --min-bw-mbps 100`")
+        print(f"claude:  python3 claude/cl_salad {_url(g) or '<gateway-url>'}")
+    except sc.SaladApiError as e:
+        print(f"deployer succeeded, but the status GET failed: HTTP {e.status_code}")
+    return 0
+
+
 def main(argv: list[str]) -> int:
     interval = 5.0
     min_bw_mbps: float | None = None
+    type_key: str | None = None
+    org_flag: str | None = None
+    project_flag: str | None = None
+    group_flag: str | None = None
+    projects_flag: list[str] = []
+    start = register_only = False
+    use_portal = True
     positional: list[str] = []
+    extra: list[str] = []
     i = 1
     while i < len(argv):
         arg = argv[i]
+        if arg == "--":
+            # Everything after `--` goes to the deployer verbatim (deploy only).
+            extra = argv[i + 1:]
+            break
         if arg == "--interval":
             if i + 1 >= len(argv):
                 print("error: --interval needs a value", file=sys.stderr)
@@ -889,51 +1318,147 @@ def main(argv: list[str]) -> int:
                 return 2
             i += 2
             continue
+        if arg in ("--type", "--org", "--project", "--group"):
+            if i + 1 >= len(argv):
+                print(f"error: {arg} needs a value", file=sys.stderr)
+                return 2
+            val = argv[i + 1]
+            if arg == "--type":
+                type_key = val
+            elif arg == "--org":
+                org_flag = val
+            elif arg == "--project":
+                project_flag = val          # last one wins (deploy)
+                projects_flag.append(val)   # all of them (create-org)
+            else:
+                group_flag = val
+            i += 2
+            continue
+        if arg == "--start":
+            start = True
+            i += 1
+            continue
+        if arg == "--register-only":
+            register_only = True
+            i += 1
+            continue
+        if arg == "--no-portal":
+            use_portal = False
+            i += 1
+            continue
         if arg in ("-h", "--help"):
             print(__doc__.strip())
             return 0
         positional.append(arg)
         i += 1
 
-    if len(positional) > 2:
-        print(__doc__.strip(), file=sys.stderr)
-        return 2
-
-    action, org = "list", None
+    action: str | None = None
     for p in positional:
         if p in ACTIONS:
-            if action != "list":
+            if action is not None and action != p:
                 print(f"error: only one action (got {action!r} and {p!r})", file=sys.stderr)
                 return 2
             action = p
-        elif p in KNOWN_PROJECTS:
-            if org is not None:
-                print(f"error: only one org (got {org!r} and {p!r})", file=sys.stderr)
-                return 2
-            org = p
-        else:
-            print(
-                f"error: unknown action or org: {p!r}\n"
-                f"actions: {', '.join(ACTIONS)}\n"
-                "known orgs: " + ", ".join(KNOWN_PROJECTS) + "\n"
-                "(add the org's projects to KNOWN_PROJECTS in manage_groups.py)",
-                file=sys.stderr,
-            )
-            return 2
+    action = action or "list"
+    rest = [p for p in positional if p not in ACTIONS]
+
+    # Flags that only mean something to one action — say so instead of ignoring
+    # them silently.
+    if type_key is not None and action != "deploy":
+        print("error: --type applies to `deploy` only", file=sys.stderr)
+        return 2
+    if group_flag is not None and action != "deploy":
+        print("error: --group applies to `deploy` only", file=sys.stderr)
+        return 2
+    if (register_only or not use_portal) and action not in ("create-org", "create-project"):
+        print("error: --register-only / --no-portal apply to `create-org` and "
+              "`create-project` only", file=sys.stderr)
+        return 2
+    if start and action != "deploy":
+        print("error: --start applies to `deploy` only (the paid start for other "
+              "groups is the `start` action)", file=sys.stderr)
+        return 2
+    if extra and action != "deploy":
+        print("error: flags after `--` are passed to the deployer — `deploy` only",
+              file=sys.stderr)
+        return 2
 
     if min_bw_mbps is not None and action != "start":
         print("error: --min-bw-mbps applies to `start` only (the arbitrator "
               "watches the HF download after a start)", file=sys.stderr)
         return 2
 
-    orgs = [org] if org is not None else list(KNOWN_PROJECTS)
+    fleet = _fleet()
+    org = None
+    if action not in ("create-org", "create-project", "deploy"):
+        for p in rest:
+            if p in fleet:
+                if org is not None:
+                    print(f"error: only one org (got {org!r} and {p!r})", file=sys.stderr)
+                    return 2
+                org = p
+            else:
+                print(
+                    f"error: not an action, and not a known org: {p!r}\n"
+                    f"actions: {', '.join(ACTIONS)}\n"
+                    "known orgs: " + ", ".join(fleet) + "\n"
+                    f"(register a new org/project with `create-project <org> <project> "
+                    f"--register-only` — it writes "
+                    f"{os.path.relpath(FLEET_FILE, os.getcwd())})",
+                    file=sys.stderr,
+                )
+                return 2
+
+    key: str | None = None
     try:
         key = sc.load_api_key()
     except sc.SaladApiError as e:
-        print(f"error: {e}", file=sys.stderr)
-        return 1
+        # Registering an org/project in the fleet map needs no key; everything
+        # else talks to the API.
+        if not (register_only and action in ("create-org", "create-project")):
+            print(f"error: {e}", file=sys.stderr)
+            return 1
+
+    orgs = [org] if org is not None else list(fleet)
 
     try:
+        if action == "create-org":
+            slug = rest[0] if rest else None
+            if slug is None:
+                try:
+                    slug = input("new organization slug: ").strip()
+                except EOFError:
+                    print("aborted — nothing done.")
+                    return 1
+            if not slug:
+                print("error: an organization slug is required", file=sys.stderr)
+                return 2
+            return _create_org(slug, tuple(projects_flag) or ("default",), key,
+                               register_only, use_portal)
+
+        if action == "create-project":
+            org = org_flag or (rest[0] if rest else None)
+            project = project_flag or (rest[1] if len(rest) > 1 else None)
+            if org is None:
+                pick = _pick_numbered(list(fleet), "organization")
+                if pick is None:
+                    print("aborted — nothing done.")
+                    return 1
+                org = list(fleet)[pick]
+            if project is None:
+                try:
+                    project = input("new project slug: ").strip()
+                except EOFError:
+                    print("aborted — nothing done.")
+                    return 1
+            if not project:
+                print("error: a project slug is required", file=sys.stderr)
+                return 2
+            return _create_project(org, project, key, register_only, use_portal)
+
+        if action == "deploy":
+            return _deploy(key, type_key, org_flag, project_flag, group_flag,
+                           start, extra)
         if action == "list":
             _print_table(_rows(orgs, key), key)
             print(f"actions: {', '.join(ACTIONS)} — see --help")

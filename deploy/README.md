@@ -56,7 +56,7 @@ python3 -I tools/patch_9b.py            # see tools/patch_qwen38_9b_rescue.py fo
   PATCHes 400 until the paid start. No cancel endpoint.
 - **Image refs are digest-pinned** (worker caches are repo-name keyed, tags never
   re-pull). Fleet-wide re-pin: `python3 -I tools/patch_images_v12.py --dry-run`.
-- **Paid start is the user's call.** `python3 utils/manage_groups.py start
+- **Paid start is the user's call.** `python3 utils/sl_admin.py start
   ma-casa-in-paris --min-bw-mbps 100` (bandwidth arbitrator: slow node →
   `/reallocate`, max 3 shots, never stops the group).
 - **Verify the served context** after a start — `/metrics` has NO n_ctx gauge:
@@ -67,4 +67,4 @@ python3 -I tools/patch_9b.py            # see tools/patch_qwen38_9b_rescue.py fo
 - The group **access URL is `networking.dns`** (https, 443, Cloudflare-fronted).
   There is no top-level `endpoint` field.
 - `running` ≠ ready: readiness is the per-instance `ready` boolean
-  (`python3 utils/manage_groups.py wait <org>`).
+  (`python3 utils/sl_admin.py wait <org>`).

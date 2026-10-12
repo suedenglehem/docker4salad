@@ -43,7 +43,7 @@ index 0 inside the container.
 MODEL_ALIAS=qwen9b so the served model registers under a name that is
 unambiguous in /v1/models and in the request body's "model" field (the image's
 built-in default alias is qwen38-27b). llama-server matches the model name
-loosely, so curl_salad.sh's default -m qwen still works too.
+loosely, so sl_curl.sh's default -m qwen still works too.
 
 SALAD_API_KEY is read from deploy/salad_api.txt by salad_client (never printed).
 
@@ -84,7 +84,7 @@ GROUP_NAME = "qwen9b"
 # Digest-pinned (the airtight lever against the worker image cache, keyed by
 # REPO NAME — see deploy_qwen38_9b.py's note). cuda128-v8 (2026-10-09):
 # bw_reporter.py (MODEL_DIR growth -> ${API_STATE_DIR}/bw.log every 10 s, feeds
-# `manage_groups.py start --min-bw-mbps`) + iputils-ping (CAP_NET_RAW) + scp +
+# `sl_admin.py start --min-bw-mbps`) + iputils-ping (CAP_NET_RAW) + scp +
 # the `llama-stats` command; on top of cuda128-v7's
 # watchdog v2.1 (arms on the group /ready endpoint, kills by POSTing the Salad
 # group /stop with SALAD_STOP_KEY from --stop-key — stored b64-obfuscated,
@@ -169,7 +169,7 @@ def parse_args() -> argparse.Namespace:
                         help="env IDLE_SHUTDOWN — in-container watchdog mode: none (off), "
                              "idle (self-stop after --idle-timeout s with no chat traffic), "
                              "heartbeat (self-stop after --heartbeat-timeout s with no client "
-                             "keepalive pings — run cl_salad/chat_salad.sh with "
+                             "keepalive pings — run cl_salad/sl_chat.sh with "
                              "SALAD_HEARTBEAT=1). Needs a watchdog-capable image "
                              "(version.sh prints the WATCHDOG generation). The watchdog arms "
                              "on the group's /ready endpoint and kills by POSTing the group "
@@ -403,7 +403,7 @@ def main() -> int:
     print(f"        from salad_client import StartContainerGroupRequest, start_container_group")
     print(f"        start_container_group(StartContainerGroupRequest('{org}','{project}','{group}'))")
     print(f"      Once it has a live instance, smoke-test with:")
-    print(f"      claude/curl_salad.sh -url https://{net.get('dns')} -m {args.model_alias}")
+    print(f"      claude/sl_curl.sh -url https://{net.get('dns')} -m {args.model_alias}")
     return 0
 
 

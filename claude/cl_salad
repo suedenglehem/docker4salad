@@ -5,7 +5,7 @@
 # Simple runner: it does NOT start or manage the group. It checks the
 # gateway ONCE and dies immediately if it is dead (group stopped, model
 # not loaded, host unreachable). To start a group and wait for the model
-# to load, use cl_salad_deploy.
+# to load, use sl_claude_deploy.
 #
 # Usage:
 #   cl_salad [GATEWAY_URL] [claude args...]
@@ -19,7 +19,7 @@
 #
 # Mirrors /usr/local/bin/clov (cl_tr4v), but:
 #   * the upstream is a Salad public gateway (llama.cpp, OpenAI-only), so a local
-#     Anthropic<->OpenAI proxy (salad_proxy.py) is started first
+#     Anthropic<->OpenAI proxy (sl_proxy.py) is started first
 #   * the proxy injects Salad-Api-Key on every request, so you never add it
 #
 # Env overrides (all optional):
@@ -42,7 +42,7 @@
 set -u
 
 # Resolve this script's real directory, following symlinks — so a
-# /usr/local/bin/cl_salad symlink still finds salad_proxy.py + salad_api.txt
+# /usr/local/bin/cl_salad symlink still finds sl_proxy.py + salad_api.txt
 # next to the real file, not in /usr/local/bin. (readlink -f falls back to the
 # literal path if it's missing.)
 _SELF="$(readlink -f "$0" 2>/dev/null || echo "$0")"
@@ -100,14 +100,14 @@ if [ "$code" != "200" ]; then
     echo "cl_salad: gateway $GATEWAY_HOST is dead (HTTP $code) — not starting claude." >&2
     case "$code" in
         000) echo "cl_salad: cannot reach the host at all (DNS / connection)." >&2
-             echo "cl_salad: check the URL, or start the group with cl_salad_deploy." >&2 ;;
+             echo "cl_salad: check the URL, or start the group with sl_claude_deploy." >&2 ;;
         404) echo "cl_salad: the group is not serving — it is stopped, or the model is" >&2
-             echo "cl_salad: still loading. Start it with cl_salad_deploy (which waits" >&2
+             echo "cl_salad: still loading. Start it with sl_claude_deploy (which waits" >&2
              echo "cl_salad: for readiness) and re-run cl_salad." >&2 ;;
         403) echo "cl_salad: the gateway rejects this group — it may be deleted, or the" >&2
-             echo "cl_salad: URL / key may be wrong. Check with cl_salad_deploy --status." >&2 ;;
+             echo "cl_salad: URL / key may be wrong. Check with sl_claude_deploy --status." >&2 ;;
         *)   echo "cl_salad: unexpected response from /v1/models — the group may be" >&2
-             echo "cl_salad: (re)starting. Use cl_salad_deploy, which waits for readiness." >&2 ;;
+             echo "cl_salad: (re)starting. Use sl_claude_deploy, which waits for readiness." >&2 ;;
     esac
     exit 2
 fi
@@ -126,7 +126,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
-"$PY" "$HERE/salad_proxy.py" \
+"$PY" "$HERE/sl_proxy.py" \
     --port "$PROXY_PORT" \
     --upstream "$GATEWAY_BASE/v1/chat/completions" \
     --model "$MODEL_ALIAS" \
@@ -161,7 +161,7 @@ if ! proxy_up; then
         echo "cl_salad: the proxy exited. Its log (/tmp/cl_salad_proxy.$$.log):" >&2
         tail -5 "/tmp/cl_salad_proxy.$$.log" >&2 2>/dev/null
     fi
-    echo "cl_salad: run this session on a free port —  cl_salad_deploy --port $((PROXY_PORT + 1)) ..." >&2
+    echo "cl_salad: run this session on a free port —  sl_claude_deploy --port $((PROXY_PORT + 1)) ..." >&2
     exit 3
 fi
 
@@ -173,7 +173,7 @@ fi
 # (closed terminal, lost SSH) instead of billing for hours. Real chat traffic
 # also counts as activity — the pinger is just the floor. ON BY DEFAULT: a
 # bare `cl_salad https://<dns>` on a heartbeat group must keep it alive
-# (SALAD_HEARTBEAT=0 opts out). cl_salad_deploy also exports it from the
+# (SALAD_HEARTBEAT=0 opts out). sl_claude_deploy also exports it from the
 # group env.
 if [ "${SALAD_HEARTBEAT:-1}" = "1" ]; then
     (
