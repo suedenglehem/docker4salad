@@ -1112,6 +1112,13 @@ stopped at 01:15Z; all 7 fleet groups are now stopped at $0.
    hardening (NOT implemented, user's call): the 4-strike budget is ~2 min
    from acquire, so a short grace before strikes count would survive slow
    relay starts — though this run's actual cause was auth denial, not lag.
+   **CLOSED 2026-10-13 — hardening NOT needed (user: "i confirm, it works").**
+   The arbitrator ran live on a healthy node with the v2.5 set and behaved:
+   `bw.log` read over the relay, ONE `/reallocate` spent (instance 4c86e5f3
+   @87804ed4 → 700ecc4a @7429adb8 at 00:37:17Z), that host kept, ready
+   00:49:03Z, group never stopped. The public-key denial is gone, so the
+   strike path is cold. Revisit the grace window only if a real slow-relay
+   bail shows up (4 strikes in ~2 min from acquire, exit 3, no shot spent).
    The pre-reboot rerun terminal log (this item's pending artifact) remains
    un-pasted.
 3. **Verify prod ATX context:** at the next start of `atx-swift-27b-q5-opt`,
