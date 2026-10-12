@@ -821,16 +821,18 @@ pullable).
 ```
 on_salad/
 ├─ README.md                     top-level overview + deployer-flag table
-├─ salad_client.py               (875 ln) Salad REST client. UpdateContainerGroupRequest
+├─ salad_client.py               (877 ln) Salad REST client. UpdateContainerGroupRequest
 │                                 is a merge-patch (unset fields omitted; env, when
 │                                 present, replaced wholesale). get_container_group(
 │                                 …).raw = full group dict. update_container_group(…).
 ├─ deploy/
-│  ├─ deploy_qwen38_27b.py       (633) 27B vanilla/q6 profile; pinned q6 v11.
-│  ├─ deploy_qwen38_9b.py        (452) 9B; base v9. **CREATE-ONLY** (refuses existing group).
-│  ├─ deploy_qwen9b.py           (415) 9B (base v9); the other 9B deployer.
-│  ├─ deploy_generic.py          (697) vanilla any-model; generic v9; --gpu any card.
-│  ├─ deploy_ampere.py           (725) llamAmpere ATX prod profile; ampere v7; sm_86 only.
+│  ├─ deploy_qwen38_27b.py       (633) 27B vanilla/q6 profile; pinned q6 v14 @a779732c02b2.
+│  ├─ deploy_qwen38_9b.py        (452) 9B; base v12 @0586ba35fb43. **CREATE-ONLY** (refuses existing group).
+│  ├─ deploy_qwen9b.py           (415) 9B (base v12); the other 9B deployer.
+│  ├─ deploy_generic.py          (697) vanilla any-model; generic v12 @2fc912ae0050; --gpu any card.
+│  ├─ deploy_ampere.py           (725) llamAmpere ATX prod profile; ampere v10 @28417137144d; sm_86 only.
+│  ├─ README.md                  the deployer command lines (5 deployers, zero-cost re-apply,
+│  │                              watchdog arming, "rules that bite"). Written 2026-10-13.
 │  ├─ salad_api.txt              the Salad API key (ACCOUNT key; all orgs). NEVER print.
 │  └─ hft.txt                    HF token. NEVER print.
 ├─ docker/
@@ -839,8 +841,9 @@ on_salad/
 │  ├─ Dockerfile.lmss_q6_mtp_vision   q6 baked; FROM base v9 @digest. (repo root)
 │  ├─ Dockerfile.lmss_generic_ampere llamAmpere fork. (repo root)
 │  ├─ entry_{base,generic,q6,ampere}.sh  startup scripts (trapped-child tail; §5/§9h)
-│  ├─ idle_watchdog.py           (427) self-shutdown watchdog v2.2 (§3/§5).
-│  ├─ bw_reporter.py             (124) in-image bandwidth sampler → /tmp/llama-api/bw.log.
+│  ├─ idle_watchdog.py           (467) self-shutdown watchdog v2.3 (guard + 1200 s cap; §3/§5).
+│  ├─ bw_reporter.py             (160) in-image bandwidth sampler → /tmp/llama-api/bw.log
+│  │                              (v2: kernel RX counter, xet-proof — §15 item 6).
 │  ├─ claude_template.sh         startup dump+patch of the Claude chat template.
 │  ├─ qwen3.8.q6.jinja           the (patched) Qwen template.
 │  ├─ version.sh                 prints the image build id / generation fingerprint.
@@ -852,9 +855,12 @@ on_salad/
 │  ├─ cl_salad                   Claude Code → Salad launcher (heartbeat ON by default; exits 3 when the proxy port is another session's).
 │  ├─ chat_salad.sh              curl-based chat client (URL positional arg).
 │  ├─ cl_salad_deploy            deployer wrapper (auto-exports SALAD_HEARTBEAT).
-│  └─ curl_salad.sh / cube*      curl helpers + a small CUDA experiment (untracked).
+│  └─ curl_salad.sh              the gateway smoke test (2–3 known-answer questions).
+│                                 (A `cube.cpp` CUDA experiment lived here briefly: added
+│                                 801520e, deleted fa0e06c — the 17 KB binary is in git
+│                                 HISTORY at 801520e even though the tree is clean.)
 ├─ utils/
-│  ├─ manage_groups.py           (942) list/start/stop/wait/stats + bandwidth
+│  ├─ manage_groups.py           (975) list/start/stop/wait/stats + bandwidth
 │  │                              arbitrator (§6). --min-bw-mbps.
 │  ├─ billing.py                 cost tracking.
 │  ├─ llama_stats.py             /metrics scrape helper.
@@ -995,6 +1001,15 @@ check `llama-server` argv + `/models` contents.
 Items 1–2 need a **paid** Salad start (burns credits) — the user decides when.
 2026-10-11: the approved guard smoke (item 1) is **FINISHED** — `atx-hb-test2`
 stopped at 01:15Z; all 7 fleet groups are now stopped at $0.
+
+> **NEXT UNFINISHED TASK (state 2026-10-13, tree clean, `main` == `origin/main`):**
+> items 1–6 below are all DONE / CLOSED / RESOLVED. The one open thread is **item 3's
+> aftermath — why the group ran ~19 min past ready without self-stopping**
+> (`HEARTBEAT_TIMEOUT=300`): read `/tmp/llama-api/watchdog.log` **BEFORE** stopping at
+> the next paid start, then decide if the SSH guard's 1200 s cap explains it (it should:
+> 19 min < 20 min) or the watchdog failed to arm. Zero-cost work is exhausted: tooling is
+> tracked in `tools/`, docs are current, the fleet is on the v2.5 digests, and every
+> deployer profile is re-appliable with `--no-start`.
 
 > **BACKEND NOTE (correction, 2026-10-11):** this Claude session is served by
 > the **local vllm on tr4** (`qwen3.8-27b` fp8, `:8000`, TP2 + MTP, running
@@ -1266,6 +1281,9 @@ stopped at 01:15Z; all 7 fleet groups are now stopped at $0.
 ## 17. Recent git history (context for what each commit did)
 
 ```
+428ed5a docs: PROGRESS.md §15 — arbitrator ssh-strike grace hardening CLOSED as not needed (user: "i confirm, it works")
+fa0e06c readme (user): README line + claude/cube, claude/cube.cpp DELETED from the tree
+801520e readme (user): claude/cube (17 KB CUDA experiment binary) + cube.cpp ADDED — the binary stays in git history even after fa0e06c; only a history rewrite removes it
 84f1de3 README: the "Most useful" 3-step flow (create group → manage_groups.py start --min-bw-mbps → cl_salad <dns>) + docker4salad docker/README.md link + auto-stop warning (user's own wording)
 2a5ed08 cl_salad: verify OUR proxy owns the local port (nonce echoed on /healthz) — a second session exits 3 instead of hijacking the first session's proxy; + deploy/README.md command lines
 8443c93 tools/: promote durable tooling out of gitignored tmp/ — §14 paths now resolve on a fresh clone; one-shot attempt artifacts deleted; test_deploy_offline + fleet_status_now de-staled
