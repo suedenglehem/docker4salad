@@ -18,10 +18,10 @@ USER = "boris271142"
 README_URL = "https://github.com/suedenglehem/docker4salad/blob/main/docker/README.md"
 
 STANDARD = {
-    "lmss": "llama.cpp CUDA 12.8 runtime + Anthropic-only /v1/messages proxy + idle/heartbeat watchdog (v2.3: /.ssh presence guard with 20-min max-hold cap) + bw_reporter + llama-stats. Base image of the family.\n" + README_URL,
-    "lmss_generic": "Generic any-model llama.cpp image (CUDA 12.8): main/draft/vision models hf-downloaded at runtime; DRAFT_MODEL/VISION_MODEL/SPEC_TYPE/CLAUDE_TEMPLATE/EXTRA_ARGS control surface; watchdog v2.3 (/.ssh guard, 20-min max-hold cap).\n" + README_URL,
-    "lmss_jonathancoletti_qwen38_q6_mtp_vision": "Baked Qwen3.8-27B (draft + vision in image, main model hf-downloaded at runtime), MTP speculation, Claude Code template patch, watchdog v2.3 (/.ssh guard, 20-min max-hold cap).\n" + README_URL,
-    "lmss_generic_ampere": "llamAmpere turbo-KV fork (turbo5/turbo4 KV cache, CUDA 13.0.2, sm_86/sm_89) for ATX on 24 GB cards; watchdog v2.3 (/.ssh guard, 20-min max-hold cap).\n" + README_URL,
+    "lmss": "llama.cpp CUDA 12.8 runtime + Anthropic-only /v1/messages proxy + idle/heartbeat watchdog (v2.3: /.ssh presence guard with 20-min max-hold cap) + bw_reporter + llama-stats + CHAT_TEMPLATE_URL (custom chat template downloaded from a URL, validated). Base image of the family.\n" + README_URL,
+    "lmss_generic": "Generic any-model llama.cpp image (CUDA 12.8): main/draft/vision models hf-downloaded at runtime; DRAFT_MODEL/VISION_MODEL/SPEC_TYPE/CLAUDE_TEMPLATE/CHAT_TEMPLATE_URL/EXTRA_ARGS control surface; watchdog v2.3 (/.ssh guard, 20-min max-hold cap).\n" + README_URL,
+    "lmss_jonathancoletti_qwen38_q6_mtp_vision": "Baked Qwen3.8-27B (draft + vision in image, main model hf-downloaded at runtime), MTP speculation, Claude Code template patch, CHAT_TEMPLATE_URL (custom template from a URL), watchdog v2.3 (/.ssh guard, 20-min max-hold cap).\n" + README_URL,
+    "lmss_generic_ampere": "llamAmpere turbo-KV fork (turbo5/turbo4 KV cache, CUDA 13.0.2, sm_86/sm_89) for ATX on 24 GB cards; CHAT_TEMPLATE_URL (custom template from a URL); watchdog v2.3 (/.ssh guard, 20-min max-hold cap).\n" + README_URL,
 }
 
 

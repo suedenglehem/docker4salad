@@ -27,7 +27,8 @@
 ## 0. TL;DR — state as of 2026-10-12
 
 - **Work is back on the PRIMARY box** (`i714700k`, `/dd2` on `/dev/sdi1`, 28 CPUs;
-  builds here use `--build-arg BUILD_JOBS=4` per the user). The v2.5 image set was
+  builds here use `--build-arg BUILD_JOBS=24` per the user (raised from 4 on
+  2026-10-12)). The v2.5 image set was
   **copied from tr4** rather than rebuilt (`tools/copy_images_from_tr4.sh`:
   `ssh tr4 'docker save … | pigz' | pigz -d | docker load`) — loaded IDs match the
   Hub digests exactly, ~11 s/image. The nproc trap (`nproc`=1) is present on this
@@ -109,6 +110,15 @@
   actions:** the next arbitrator live run — on a v2.5 instance the Mbps
   column is real per-interval wire speed. Offline suites green (watchdog
   arbitrator 26/26).
+- **Custom chat template from a URL (added 2026-10-12, §8):** `CHAT_TEMPLATE_URL` is the
+  **third template source** — `docker/chat_template_url.sh` downloads it at startup, validates
+  it (size / UTF-8 / Jinja markup / not-HTML), serves it via `--chat-template-file`. It **wins
+  over `CHAT_TEMPLATE` and `CLAUDE_TEMPLATE`**, the Claude patch is **not** applied to it, and a
+  rejected download **kills the container** (STOPPED group, not billed). All five deployers take
+  `--chat-template-url` (config-time rc2 guard). Images bumped: generic **v13** / q6 **v15** /
+  ampere **v11** + `ENV CHAT_TEMPLATE_URL=none` baked. **Not built/pushed yet — the deployers
+  still pin the older digests, so the flag needs a user-built image + re-pin to take effect on a
+  live group.** Offline suite `tools/test_chat_template_offline.py`: 46/46 green (2026-10-12).
 - **This Claude session runs on LOCAL vllm on tr4** (`qwen3.8-27b` fp8,
   `:8000`, TP2+MTP, since Oct 10) — NOT on a Salad group. Group stops never
   affect the session, and session turns never reset a group's watchdog.
@@ -360,8 +370,9 @@ misreports **1** on tr4 (`/proc/cpuinfo` shows 32 real CPUs) **and on the primar
 box** (verified 2026-10-12: `nproc`=1, `/proc/cpuinfo` 28 × i7-14700K, affinity
 mask 0-27, no readable cgroup v2 `cpu.max`) — always pass
 `--build-arg BUILD_JOBS=N` explicitly; never trust an auto-detected job count.
-The user's instruction for builds on the primary box is **4 CPUs**
-(`--build-arg BUILD_JOBS=4`). (docker 29.7.2 / buildx v0.36.1 as of the v2.5 cycle.)
+The user's instruction for builds on the primary box is **24 CPUs**
+(`--build-arg BUILD_JOBS=24`, raised from 4 on 2026-10-12; the box has 28).
+(docker 29.7.2 / buildx v0.36.1 as of the v2.5 cycle.)
 **Copying beats rebuilding** when the images already exist on the other box:
 `ssh andrei@tr4 "docker save <ref> | pigz -p 8" | pigz -dc | docker load` — one
 image per pipe (a break costs one image, not the set), no temp tarballs, ~11 s
@@ -605,6 +616,26 @@ never the problem; it just had to actually be loaded. Verified live on Salad
 (canary `27*43`→`1161` = no loop; mid-conversation system message → 200
 `end_turn`).
 
+**THIRD template source — `CHAT_TEMPLATE_URL` (added 2026-10-12, `docker/chat_template_url.sh`):**
+the two existing sources both need the file *inside* the image (`CHAT_TEMPLATE=<baked path>`,
+`CLAUDE_TEMPLATE=1` = dump + patch), so a custom template meant building an image. Now
+`CHAT_TEMPLATE_URL=<http(s) url>` downloads one at startup (same shape as the old
+`DRAFT_MODEL_URL` / `VISION_MODEL_URL` mechanism) and serves it via `--chat-template-file`.
+**Precedence: the URL wins over both** (most explicit source), and the Claude patch is **not**
+applied to a downloaded template — served as its author wrote it (the helper prints a NOTE when
+the download carries the `raise_exception('System message must be at the beginning.')` marker =
+it will break Claude Code). Validation is hard-fail by design: 1 B–2 MiB, strict UTF-8, must
+contain `{{`/`{%`, must not start like HTML, download to `…jinja.part.$$` + `mv` only a validated
+file, cache re-validated before reuse; anything rejected → non-zero exit → under the entry
+script's `set -euo pipefail` the **container dies** → `restart_policy=never` → STOPPED group
+(loud, not billed). "Downloaded something, hope it is a template" is exactly what the path-loop
+burned us on. Deployers: `--chat-template-url` (all five; validated at config time, rc 2, free).
+Images: generic **v13** / q6 **v15** / ampere **v11** (build ids bumped; `ENV CHAT_TEMPLATE_URL=none`
+baked so existing groups are safe) — **the deployers still pin the older digests, so the flag needs
+a user-built/pushed image + re-pin to take effect.** Suite: `python3 -I tools/test_chat_template_offline.py`
+(46 checks, all pass 2026-10-12: good/html/empty/oversized/non-UTF-8/git-lfs-pointer/404, cache
+reuse + re-validate + drop, scheme rules, stdout contract, `set -e` caller propagation).
+
 **MTP requirement:** the image hardcodes `--spec-type draft-mtp`, so the served
 GGUF must contain the MTP/nextn layers — the `noMTP-*` files crash the server.
 (`USE_DRAFT_MODEL=none` means use the GGUF's *embedded* MTP head.)
@@ -826,13 +857,16 @@ on_salad/
 │                                 present, replaced wholesale). get_container_group(
 │                                 …).raw = full group dict. update_container_group(…).
 ├─ deploy/
-│  ├─ deploy_qwen38_27b.py       (633) 27B vanilla/q6 profile; pinned q6 v14 @a779732c02b2.
-│  ├─ deploy_qwen38_9b.py        (452) 9B; base v12 @0586ba35fb43. **CREATE-ONLY** (refuses existing group).
-│  ├─ deploy_qwen9b.py           (415) 9B (base v12); the other 9B deployer.
-│  ├─ deploy_generic.py          (697) vanilla any-model; generic v12 @2fc912ae0050; --gpu any card.
-│  ├─ deploy_ampere.py           (725) llamAmpere ATX prod profile; ampere v10 @28417137144d; sm_86 only.
+│  ├─ deploy_qwen38_27b.py       (669) 27B vanilla/q6 profile; pinned q6 v14 @a779732c02b2.
+│  ├─ deploy_qwen38_9b.py        (471) 9B; base v12 @0586ba35fb43. **CREATE-ONLY** (refuses existing group).
+│  ├─ deploy_qwen9b.py           (435) 9B (base v12); the other 9B deployer.
+│  ├─ deploy_generic.py          (735) vanilla any-model; generic v12 @2fc912ae0050; --gpu any card.
+│  ├─ deploy_ampere.py           (761) llamAmpere ATX prod profile; ampere v10 @28417137144d; sm_86 only.
+│  │                              All five gained `--chat-template-url` (2026-10-12, §8) — the
+│  │                              deployers' image pins predate it, so it needs a re-pin.
 │  ├─ README.md                  the deployer command lines (5 deployers, zero-cost re-apply,
-│  │                              watchdog arming, "rules that bite"). Written 2026-10-13.
+│  │                              watchdog arming, custom-template-from-URL, "rules that bite").
+│  │                              Written 2026-10-13.
 │  ├─ salad_api.txt              the Salad API key (ACCOUNT key; all orgs). NEVER print.
 │  └─ hft.txt                    HF token. NEVER print.
 ├─ docker/
@@ -845,6 +879,8 @@ on_salad/
 │  ├─ bw_reporter.py             (160) in-image bandwidth sampler → /tmp/llama-api/bw.log
 │  │                              (v2: kernel RX counter, xet-proof — §15 item 6).
 │  ├─ claude_template.sh         startup dump+patch of the Claude chat template.
+│  ├─ chat_template_url.sh       (124) download + validate a CUSTOM template from CHAT_TEMPLATE_URL
+│  │                              (wins over CHAT_TEMPLATE/CLAUDE_TEMPLATE; hard-fail on junk — §8).
 │  ├─ qwen3.8.q6.jinja           the (patched) Qwen template.
 │  ├─ version.sh                 prints the image build id / generation fingerprint.
 │  ├─ api_app.py / run_api.py    the Anthropic-only proxy app.
@@ -959,6 +995,19 @@ python3 deploy/deploy_qwen38_27b.py --project qwen38-27b --group qwen38-27b-q5 -
 # NOTE: qwen38-9b's deployer is CREATE-ONLY — PATCH it via salad_client.update_container_group
 #       (see tools/patch_9b.py / tools/patch_qwen38_9b_rescue.py).
 
+# CUSTOM chat template from a URL (wins over CLAUDE_TEMPLATE; needs a chat-template-url
+# image = generic v13 / q6 v15 / ampere v11 — re-pin first; use a RAW url, not a blob page).
+# Canonical test URL = this repo's own Claude-patched template (live-verified 2026-10-12:
+# 8941 bytes sha256 e8912f4cc41c, identical to docker/qwen3.8.q6.jinja, no NOTE):
+python3 deploy/deploy_generic.py --project llm --group my-group \
+    --model-repo Some/Org --model-file Model-Q5_K_M.gguf \
+    --chat-template-url https://raw.githubusercontent.com/suedenglehem/docker4salad/main/docker/qwen3.8.q6.jinja \
+    --no-start
+# The helper itself, straight on the host (curl path — no image needed):
+bash docker/chat_template_url.sh \
+  https://raw.githubusercontent.com/suedenglehem/docker4salad/main/docker/qwen3.8.q6.jinja /tmp/t.jinja
+python3 -I tools/test_chat_template_offline.py     # the offline suite (46 checks)
+
 # Image-only fleet re-pin (env untouched):  python3 -I tools/patch_images_v9.py  (--dry-run ok)
 
 # RECREATE a group to change a CREATE-only field (priority / restart_policy are NOT
@@ -982,7 +1031,7 @@ curl -s https://<dns>/slots                            # per-slot n_ctx (132768 
 # streams save|pigz over ssh, verifies each loaded ID == the Hub digest prefix):
 bash tools/copy_images_from_tr4.sh
 
-# Build + push an image (primary box: --build-arg BUILD_JOBS=4 — the user's cap;
+# Build + push an image (primary box: --build-arg BUILD_JOBS=24 — the user's cap;
 # tr4: 32. nproc lies (says 1) on BOTH boxes). Base first, then derivatives:
 docker build -f docker/Dockerfile.multistage        docker/  --build-arg BUILD_JOBS=24 -t boris271142/lmss:cuda128-vN .
 docker build -f docker/Dockerfile.lmss_generic       .       --build-arg BUILD_JOBS=24 -t boris271142/lmss_generic:cuda128-vN .
@@ -1016,9 +1065,10 @@ stopped at 01:15Z; all 7 fleet groups are now stopped at $0.
 > aftermath — why the group ran ~19 min past ready without self-stopping**
 > (`HEARTBEAT_TIMEOUT=300`): read `/tmp/llama-api/watchdog.log` **BEFORE** stopping at
 > the next paid start, then decide if the SSH guard's 1200 s cap explains it (it should:
-> 19 min < 20 min) or the watchdog failed to arm. Zero-cost work is exhausted: tooling is
-> tracked in `tools/`, docs are current, the fleet is on the v2.5 digests, and every
-> deployer profile is re-appliable with `--no-start`.
+> 19 min < 20 min) or the watchdog failed to arm. Zero-cost work was exhausted as of that
+> writing (tooling tracked in `tools/`, docs current, fleet on the v2.5 digests, every deployer
+> profile re-appliable with `--no-start`) — **superseded 2026-10-12 by the chat-template-url
+> feature block below**, whose remaining step is a user-gated image build + re-pin.
 >
 > **ADMIN SURFACE (2026-10-12, zero-cost, uncommitted at write time):**
 > `utils/manage_groups.py` → **`utils/sl_admin.py`** (`git mv`; every reference in
@@ -1034,6 +1084,19 @@ stopped at 01:15Z; all 7 fleet groups are now stopped at $0.
 > `--register-only` after a web-UI create). Verified offline: arbitrator harness still
 > 26/26 on the renamed module, `list` unchanged, the paid gate aborts before any API
 > call, and name validation + fleet.json merge/clobber-guard were exercised in a temp dir.
+
+> **CUSTOM TEMPLATE FROM A URL (2026-10-12, zero-cost, UNCOMMITTED at write time):**
+> `CHAT_TEMPLATE_URL` is the **third template source** — `docker/chat_template_url.sh`
+> downloads a template at startup, validates it, serves it via `--chat-template-file`; it
+> **wins over `CHAT_TEMPLATE` and `CLAUDE_TEMPLATE`**, the Claude patch is **not** applied to it,
+> and a rejected download **kills the container** (STOPPED group, not billed — §8). Wired: all
+> four entry scripts, all four Dockerfiles (`ENV CHAT_TEMPLATE_URL=none` baked + build ids
+> generic **v13** / q6 **v15** / ampere **v11**), `version.sh` fingerprint, all five deployers
+> (`--chat-template-url`, config-time rc2 guard), docs (`docker/`, `deploy/`, `docs/`, root
+> `README.md`, `tools/hub_describe.py`). Offline suite `tools/test_chat_template_offline.py`
+> **46/46 green**. **Gated next step (user): build + push v13/v15/v11 (then PATCH
+> `full_description`, §11) and re-pin the deployers — until then the flag does nothing on a live
+> group, whose images predate the helper.**
 
 > **BACKEND NOTE (correction, 2026-10-11):** this Claude session is served by
 > the **local vllm on tr4** (`qwen3.8-27b` fp8, `:8000`, TP2 + MTP, running

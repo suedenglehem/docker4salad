@@ -197,6 +197,12 @@ COPY run_api.py ${LLAMA_CPP_DIR}/run_api.py
 # stray quote that silently fell back to shell form -> exit 2). Invoked as
 # `bash /opt/llama.cpp/entry.sh`, so no exec bit is needed.
 COPY entry_base.sh ${LLAMA_CPP_DIR}/entry.sh
+# Third chat-template source (see CHAT_TEMPLATE_URL below): fetch a template
+# from an http(s) URL, validate it, print the local path for
+# --chat-template-file. Validates what it downloaded and exits 1 on anything
+# that is not a template, so the container dies loudly instead of serving a
+# silently-wrong template.
+COPY chat_template_url.sh ${LLAMA_CPP_DIR}/chat_template_url.sh
 
 # Permissive Jinja chat template, shipped but NOT used by default (see the
 # CHAT_TEMPLATE env below): opt in by pointing CHAT_TEMPLATE at it. It accepts
@@ -332,6 +338,18 @@ ENV MODEL_REPO=JonathanColetti/Qwen3.8-27B-Uncensored-GGUF \
 # embedded template is strict:
 #   CHAT_TEMPLATE=/opt/llama.cpp/qwen3.8.q6.jinja   (shipped by the COPY above)
 ENV CHAT_TEMPLATE=none
+
+# Chat template fetched from a URL at container start — the way to use a custom
+# template WITHOUT baking it into an image. "none"/empty (the default) = off.
+# Set it to any http(s) URL and the entry script runs
+# ${LLAMA_CPP_DIR}/chat_template_url.sh: download -> validate (1 B..2 MiB,
+# strict UTF-8, must contain Jinja markup, must not be an HTML page) ->
+# --chat-template-file ${API_STATE_DIR}/chat_template_url.jinja. A cached copy
+# is re-validated before reuse; a download that fails validation kills the
+# container (a silently-wrong template is worse than a dead one). It WINS over
+# CHAT_TEMPLATE (and over CLAUDE_TEMPLATE on the images that have it).
+#   CHAT_TEMPLATE_URL=https://example.com/my_template.jinja
+ENV CHAT_TEMPLATE_URL=none
 
 # High-performance transfer for large model downloads (hf 1.x name; the old
 # HF_HUB_ENABLE_HF_TRANSFER variable is deprecated in huggingface_hub >= 1.x).

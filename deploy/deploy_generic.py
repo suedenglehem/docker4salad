@@ -158,6 +158,11 @@ SPEC_TYPE = "draft-mtp"
 # to the argv (duplicate flags last-wins -> overrides the baked base flags).
 # "none" = off (never empty: the SaladCloud API rejects empty env values).
 EXTRA_ARGS = "none"
+# Custom chat template fetched from a URL at container start ("none" = off).
+# The image's third template source: it WINS over CHAT_TEMPLATE (a static path
+# baked in the image) and over CLAUDE_TEMPLATE (dump+patch the served gguf's
+# own template), and the Claude patch is NOT applied to a downloaded template.
+CHAT_TEMPLATE_URL = "none"
 
 
 def strip_none_value_args(s):
@@ -268,6 +273,17 @@ def parse_args() -> argparse.Namespace:
                         help="env CLAUDE_TEMPLATE=none — serve the gguf's embedded chat "
                              "template as-is, no Claude Code patch (default CLAUDE_TEMPLATE=1 "
                              "applies the one-line mid-conversation-system patch at startup)")
+    parser.add_argument("--chat-template-url", default=CHAT_TEMPLATE_URL,
+                        help="env CHAT_TEMPLATE_URL — download a CUSTOM chat template from an "
+                             "http(s) URL at container start and serve it via --chat-template-file "
+                             "(the way to use your own template without baking it into an image). "
+                             "'none' (default) = off. It WINS over --no-claude-template / "
+                             "CLAUDE_TEMPLATE and over the image's static CHAT_TEMPLATE path, and "
+                             "the Claude patch is NOT applied to a downloaded template. The image "
+                             "validates what it downloads (size / UTF-8 / Jinja markup) and kills "
+                             "the container on anything else — check the URL is reachable first. "
+                             "Needs a chat-template-url-capable image (version.sh prints the "
+                             "generation)")
     parser.add_argument("--idle-shutdown", choices=IDLE_SHUTDOWN_CHOICES, default=IDLE_SHUTDOWN,
                         help="env IDLE_SHUTDOWN — in-container watchdog mode: none (off), "
                              "idle (self-stop after --idle-timeout s with no chat traffic), "
@@ -376,6 +392,7 @@ def build_env(name: str, ctx_size: str, model_repo: str, model_file: str,
               idle_grace: str = "1800",
               ssh_guard: str = "1",
               stop_key: str = "none",
+              chat_template_url: str = "none",
               org: str = "", project: str = "", group: str = "") -> dict[str, str]:
     """Full env for the group (create sets it, PATCH replaces it wholesale).
 
@@ -395,6 +412,13 @@ def build_env(name: str, ctx_size: str, model_repo: str, model_file: str,
     EXTRA_ARGS: one whitespace-separated string of extra llama-server args,
     word-split at startup and appended LAST to the argv (duplicate flags
     last-wins -> overrides the baked base flags); 'none' = off.
+
+    CHAT_TEMPLATE_URL: an http(s) URL the container downloads a custom chat
+    template from at startup (validated, cached at
+    ${API_STATE_DIR}/chat_template_url.jinja, served via --chat-template-file);
+    'none' = off. It WINS over CLAUDE_TEMPLATE and over the image's static
+    CHAT_TEMPLATE path, and the Claude patch is NOT applied to a downloaded
+    template. Harmless on images that predate it (the env is unread).
     """
     env = {
         "GPU_ID": "0",
@@ -415,6 +439,10 @@ def build_env(name: str, ctx_size: str, model_repo: str, model_file: str,
         # and apply the one-line mid-conversation-system patch (--no-claude-
         # template sends 'none' -> embedded template as-is).
         "CLAUDE_TEMPLATE": claude_template,
+        # Custom chat template fetched from a URL at startup: 'none' = off.
+        # Wins over CLAUDE_TEMPLATE (the Claude patch is NOT applied to a
+        # downloaded template). Harmless on images that predate it (unread env).
+        "CHAT_TEMPLATE_URL": chat_template_url,
         # Extra llama-server args: one whitespace-separated string, appended
         # LAST to the argv (last-wins override of the baked base flags);
         # 'none' = off (never empty: the API rejects empty env values).
@@ -526,6 +554,14 @@ def main() -> int:
     project = args.project
     group = args.group
 
+    # Fail at config time (free) rather than at a paid start: the image rejects
+    # a non-http(s) CHAT_TEMPLATE_URL at startup and kills the container.
+    if args.chat_template_url != "none" \
+            and not args.chat_template_url.startswith(("http://", "https://")):
+        print(f"CHAT_TEMPLATE_URL must be 'none' or an http(s) URL, got "
+              f"{args.chat_template_url!r}", file=sys.stderr)
+        return 2
+
     print(f"[1/5] resolving GPU class(es) {args.gpu!r} in org {org!r}")
     gpu_classes = list_gpu_classes(org)
     gpus = tuple(resolve_gpu_class(c, gpu_classes) for c in args.gpu)
@@ -560,7 +596,9 @@ def main() -> int:
                     heartbeat_timeout=args.heartbeat_timeout,
                     idle_grace=args.idle_grace,
                     ssh_guard=args.ssh_guard,
-                    stop_key=stop_key, org=org, project=project, group=group)
+                    stop_key=stop_key,
+                    chat_template_url=args.chat_template_url,
+                    org=org, project=project, group=group)
 
     existing = get_group(org, project, group)
     if existing is not None:

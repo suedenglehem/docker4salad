@@ -78,12 +78,15 @@ RUN set -eux; \
 # first word, e.g. "lmss q6-mtp..." -> "lmss"). Override with
 # --build-arg LMSS_BUILD_ID="..." for a per-push id.
 ARG LMSS_BUILD_ID
-RUN printf '%s\n' "${LMSS_BUILD_ID:-lmss q6-mtp-vision-v12 (baked draft+vision, claude-template, idle_watchdog v2.3 [/.ssh presence guard, 20-min max-hold cap] + bw_reporter + iputils-ping + llama-stats + apt kit [less nano iproute2 dnsutils jq], trapped-child supervisor, exec-form entry.sh CMD) 2026-10-11}" > /etc/llama-image-build
+RUN printf '%s\n' "${LMSS_BUILD_ID:-lmss q6-mtp-vision-v15 (baked draft+vision, claude-template, chat-template-url, idle_watchdog v2.3 [/.ssh presence guard, 20-min max-hold cap] + bw_reporter + iputils-ping + llama-stats + apt kit [less nano iproute2 dnsutils jq], trapped-child supervisor, exec-form entry.sh CMD) 2026-10-12}" > /etc/llama-image-build
 
 # --- Claude Code template: dump+patch script (repo-root build context) ------
 # Zero dependencies (stdlib Python only); copied in and run at STARTUP, not at
 # build time. COPYed from docker/ (hence the repo-root context).
 COPY docker/claude_template.sh ${LLAMA_CPP_DIR}/claude_template.sh
+# Custom chat template from a URL (see CHAT_TEMPLATE_URL below): fetch +
+# validate + print the path for --chat-template-file.
+COPY docker/chat_template_url.sh ${LLAMA_CPP_DIR}/chat_template_url.sh
 # Entrypoint script (see the CMD at the end of this file) — extracted from the
 # old inline `CMD ["/bin/bash","-lc","…"]` blob so a plain 3-token exec-form CMD
 # cannot be mis-parsed by buildkit. Invoked as `bash /opt/llama.cpp/entry.sh`.
@@ -111,6 +114,14 @@ ENV USE_DRAFT_MODEL=none
 # one-line Claude Code patch applied (see CLAUDE TEMPLATE section above); the
 # patched file overrides CT.
 ENV CLAUDE_TEMPLATE=none
+# CHAT_TEMPLATE_URL: a chat template fetched from an http(s) URL at startup —
+# the way to serve a custom template without baking it into an image. "none"
+# (default) = off. Runs ${LLAMA_CPP_DIR}/chat_template_url.sh (download ->
+# validate -> ${API_STATE_DIR}/chat_template_url.jinja); it WINS over both
+# CHAT_TEMPLATE and CLAUDE_TEMPLATE, and the Claude patch is NOT applied to a
+# downloaded template (the baked production profile is CLAUDE_TEMPLATE=1, so
+# set the URL only when you mean to replace that template wholesale).
+ENV CHAT_TEMPLATE_URL=none
 # Idle/heartbeat self-shutdown (idle_watchdog.py from the v3 base, started by
 # the CMD below): "none" (default) = OFF; idle -> kill after IDLE_TIMEOUT s of
 # no chat traffic; heartbeat -> kill after HEARTBEAT_TIMEOUT s of no client

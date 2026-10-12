@@ -70,6 +70,7 @@ show_var MODEL_REPO       JonathanColetti/Qwen3.8-27B-Uncensored-GGUF
 show_var MODEL_ALIAS      qwen38-27b
 show_var CTX_SIZE         131072
 show_var CHAT_TEMPLATE    none
+show_var CHAT_TEMPLATE_URL none
 show_var CLAUDE_TEMPLATE  none
 show_var USE_DRAFT_MODEL  none
 show_var DRAFT_MODEL      none
@@ -139,6 +140,17 @@ if printf '%s' "$MARKERS" | grep -q 'idle_watchdog'; then
       echo "        DISABLES the watchdog (no self-shutdown — a keyless self-exit"
       echo "        gets rescheduled and keeps billing)"
     fi
+  fi
+  if printf '%s' "$MARKERS" | grep -q 'CHAT_TEMPLATE_URL'; then
+    echo "     -> CHAT-TEMPLATE-URL generation: + chat_template_url.sh — serve a"
+    echo "        CUSTOM chat template fetched from an http(s) URL at startup"
+    echo "        (CHAT_TEMPLATE_URL=<url>): downloaded, validated (size/UTF-8/"
+    echo "        Jinja markup), cached at \${API_STATE_DIR}/chat_template_url.jinja,"
+    echo "        passed as --chat-template-file. It WINS over CHAT_TEMPLATE and"
+    echo "        over CLAUDE_TEMPLATE, and the Claude patch is NOT applied to a"
+    echo "        downloaded template. Validation failure kills the container."
+    echo "        Log: \${API_STATE_DIR}/chat_template_url.log; live check:"
+    echo "        ls -l \${API_STATE_DIR}/chat_template_url.jinja"
   fi
   if printf '%s' "$MARKERS" | grep -q 'bw_reporter'; then
     echo "     -> BW-REPORTER generation: + bw_reporter.py (HF download bandwidth"

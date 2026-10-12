@@ -164,6 +164,11 @@ GPU_CHOICES = ("rtx5090", "rtx3090")
 # keepalive pings (run the client with SALAD_HEARTBEAT=1).
 IDLE_SHUTDOWN = "none"
 IDLE_SHUTDOWN_CHOICES = ("none", "idle", "heartbeat")
+# Custom chat template fetched from a URL at container start ("none" = off) —
+# the image's third template source. It WINS over CLAUDE_TEMPLATE (the baked
+# production profile is CLAUDE_TEMPLATE=1, so setting this replaces that
+# template wholesale) and the Claude patch is NOT applied to a downloaded file.
+CHAT_TEMPLATE_URL = "none"
 # Placement priority (create-only, not PATCHable): Salad places low/batch
 # instances best-effort and evicts them as soon as higher-priority work
 # lands — observed live 2026-10-09: a 'low' group churned through 9
@@ -225,6 +230,16 @@ def parse_args() -> argparse.Namespace:
                         help="env CLAUDE_TEMPLATE=none — serve the gguf's embedded chat "
                              "template as-is, no Claude Code patch (default CLAUDE_TEMPLATE=1 "
                              "applies the one-line mid-conversation-system patch at startup)")
+    parser.add_argument("--chat-template-url", default=CHAT_TEMPLATE_URL,
+                        help="env CHAT_TEMPLATE_URL — download a CUSTOM chat template from an "
+                             "http(s) URL at container start and serve it via --chat-template-file "
+                             "(your own template without baking it into an image). 'none' "
+                             "(default) = off. It WINS over CLAUDE_TEMPLATE — the one-line Claude "
+                             "patch is NOT applied to a downloaded template, so this replaces the "
+                             "production Claude profile. The image validates what it downloads "
+                             "(size / UTF-8 / Jinja markup) and kills the container on anything "
+                             "else. Needs a chat-template-url-capable image (version.sh prints "
+                             "the generation)")
     parser.add_argument("--idle-shutdown", choices=IDLE_SHUTDOWN_CHOICES, default=IDLE_SHUTDOWN,
                         help="env IDLE_SHUTDOWN — in-container watchdog mode: none (off), "
                              "idle (self-stop after --idle-timeout s with no chat traffic), "
@@ -328,6 +343,7 @@ def build_env(name: str, ctx_size: str, use_draft_model: str, hf_token: str | No
               heartbeat_timeout: str = "600", idle_grace: str = "1800",
               ssh_guard: str = "1",
               stop_key: str = "none",
+              chat_template_url: str = "none",
               org: str = "", project: str = "", group: str = "") -> dict[str, str]:
     """Full env for the group (create sets it, PATCH replaces it wholesale).
 
@@ -341,6 +357,13 @@ def build_env(name: str, ctx_size: str, use_draft_model: str, hf_token: str | No
     Code patch (mid-conversation system messages) via --chat-template-file;
     'none' = serve the gguf's embedded template as-is. The static
     CHAT_TEMPLATE=/opt/llama.cpp/qwen3.8.q6.jinja mechanism is retired.
+
+    CHAT_TEMPLATE_URL: an http(s) URL the container downloads a custom chat
+    template from at startup (validated, cached at
+    ${API_STATE_DIR}/chat_template_url.jinja, served via --chat-template-file);
+    'none' = off. It WINS over CLAUDE_TEMPLATE — the Claude patch is NOT
+    applied to a downloaded template — so use it only when you mean to replace
+    the production Claude profile. Harmless on images that predate it.
     """
     env = {
         "GPU_ID": "0",
@@ -362,6 +385,9 @@ def build_env(name: str, ctx_size: str, use_draft_model: str, hf_token: str | No
         # and apply the one-line mid-conversation-system patch (--no-claude-
         # template sends 'none' -> embedded template as-is).
         "CLAUDE_TEMPLATE": claude_template,
+        # Custom chat template fetched from a URL at startup: 'none' = off.
+        # Wins over CLAUDE_TEMPLATE (no Claude patch on a downloaded template).
+        "CHAT_TEMPLATE_URL": chat_template_url,
         # 'none' = the quant's embedded MTP head (Q5_K_M/Q6_K/Q4_K_M builds).
         # Any other value -> the image passes --model-draft
         # /models/...draft-Q8_0.gguf (needed for noMTP quants).
@@ -469,6 +495,14 @@ def main() -> int:
     project = args.project
     group = args.group
 
+    # Fail at config time (free) rather than at a paid start: the image rejects
+    # a non-http(s) CHAT_TEMPLATE_URL at startup and kills the container.
+    if args.chat_template_url != "none" \
+            and not args.chat_template_url.startswith(("http://", "https://")):
+        print(f"CHAT_TEMPLATE_URL must be 'none' or an http(s) URL, got "
+              f"{args.chat_template_url!r}", file=sys.stderr)
+        return 2
+
     print(f"[1/5] resolving GPU class(es) {args.gpu!r} in org {org!r}")
     gpu_classes = list_gpu_classes(org)
     gpus = tuple(resolve_gpu_class(c, gpu_classes) for c in args.gpu)
@@ -500,7 +534,9 @@ def main() -> int:
                     heartbeat_timeout=args.heartbeat_timeout,
                     idle_grace=args.idle_grace,
                     ssh_guard=args.ssh_guard,
-                    stop_key=stop_key, org=org, project=project, group=group)
+                    stop_key=stop_key,
+                    chat_template_url=args.chat_template_url,
+                    org=org, project=project, group=group)
 
     existing = get_group(org, project, group)
     if existing is not None:

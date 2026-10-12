@@ -38,7 +38,7 @@ The two keys to the whole setup:
 | `deploy/deploy_qwen38_27b.py` | `deploy/` | **Canonical 27B deployer** — creates/updates the `qwen38-27b-q6k` group (baked MTP + vision image, main model fetched at runtime) and starts it. |
 | `deploy/deploy_generic.py` | `deploy/` | Model-agnostic deployer on the **vanilla `lmss_generic` image**: any GGUF via `--model-repo` / `--model-file`, draft + vision opt-in, `--gpu` takes any card the org lists. |
 | `deploy/deploy_ampere.py` | `deploy/` | Deployer for the **llamAmpere fork image** (turbo5/turbo4 KV cache — full 132k ATX ctx on a 24 GB card; ATX-Swift production profile is the built-in default; `--gpu` limited to the org's sm_86 30-series cards). |
-| `deploy/deploy_qwen38_9b.py` / `deploy/deploy_qwen9b.py` | `deploy/` | 9B deployers (`qwen38-9b`, `qwen9b`) — plain, no draft/vision/template. |
+| `deploy/deploy_qwen38_9b.py` / `deploy/deploy_qwen9b.py` | `deploy/` | 9B deployers (`qwen38-9b`, `qwen9b`) — plain, no draft/vision; `--chat-template-url` supported. |
 | **`utils/sl_admin.py`** | `utils/` | **The fleet admin.** `list`/`refresh`/`start`/`stop`/`wait`/`stats`/`delete` over every known org+project, the **bandwidth arbitrator** (`start --min-bw-mbps`), `deploy` (menu: pick a DOCKER TYPE → runs its deployer, free by default), and `create-org`/`create-project` (portal attempt + `fleet.json` registration — the public API cannot create orgs/projects). |
 
 Everything runs against org **`ma-casa-in-paris`**, project **`qwen38-27b`**.
@@ -459,6 +459,15 @@ curl -s https://<gateway>/v1/models -H "Salad-Api-Key: $(tr -d '[:space:]' < cla
   the proxy only translates messages. The deployed image uses the permissive
   `qwen3.8.q6.jinja` so Claude Code's Anthropic-format requests (system messages
   anywhere) are accepted.
+- **Three template sources, all chosen by image env at startup** (the proxy never
+  sees any of them): the GGUF's **embedded** template (default), **`CLAUDE_TEMPLATE=1`**
+  (dump the GGUF's template + apply the one-line mid-conversation-system patch), and
+  **`CHAT_TEMPLATE_URL=<http(s) url>`** — download a **custom** template from a URL
+  (added 2026-10-12, `chat_template_url.sh`). The URL **wins over both** others and
+  the Claude patch is NOT applied to it; the download is validated (size / strict
+  UTF-8 / must contain Jinja markup / not an HTML page) and a rejected download
+  **exits the container** instead of serving a broken template. Deployer flag
+  `--chat-template-url`; suite `python3 -I tools/test_chat_template_offline.py`.
 - **`--chat-template` vs `--chat-template-file`.** The inline `--chat-template` flag
   takes the template *text*; `--chat-template-file` takes a path. Passing the
   `CHAT_TEMPLATE` path to the inline flag (a bug shipped in the first baked
@@ -485,6 +494,8 @@ on_salad/
 │   ├── Dockerfile.lmss_generic     # model-agnostic image (FROM v3, nothing baked)
 │   ├── Dockerfile.lmss_generic_ampere # llamAmpere fork build: turbo KV, compiled in-image (cuda 13)
 │   ├── qwen3.8.q6.jinja            # permissive chat template (shipped in image)
+│   ├── claude_template.sh          # dump the GGUF template + apply the Claude patch (CLAUDE_TEMPLATE=1)
+│   ├── chat_template_url.sh        # download + validate a CUSTOM template from a URL (CHAT_TEMPLATE_URL)
 │   ├── api_app.py                  # status API on :9999 (/startup /live /ready)
 │   ├── run_api.py                  # status-API entrypoint (COPYed in — a build file)
 │   ├── version.sh                  # in-container build/download inspector

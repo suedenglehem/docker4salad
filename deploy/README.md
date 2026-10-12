@@ -37,6 +37,19 @@ python3 -I deploy/deploy_generic.py --project llm --group my-group \
     --model-repo Some/Org --model-file Model-Q5_K_M.gguf --ctx-size 32768 \
     --gpu rtx3090 --draft-model none --no-start
 
+# A CUSTOM chat template, downloaded from a URL at startup (wins over
+# CLAUDE_TEMPLATE; the Claude patch is NOT applied to it). Use a RAW url
+# (raw.githubusercontent.com/…), NOT a GitHub blob page — a blob page is HTML
+# (and GitHub answers plain curl on it with 503); the image rejects it.
+# The canonical test URL = this repo's own (already Claude-patched) template:
+python3 -I deploy/deploy_generic.py --project llm --group my-group \
+    --model-repo Some/Org --model-file Model-Q5_K_M.gguf \
+    --chat-template-url https://raw.githubusercontent.com/suedenglehem/docker4salad/main/docker/qwen3.8.q6.jinja \
+    --no-start
+# Verified live 2026-10-12 (host, curl path): 8941 bytes, sha256 e8912f4cc41c,
+# byte-identical to docker/qwen3.8.q6.jinja, no Claude NOTE (it is the patched
+# template), cache reuse OK; the blob URL variant was rejected (rc 22, no file).
+
 # Watchdog arming (the only kill that stops billing): heartbeat mode + grace window
 #   + the /.ssh presence guard (touch /.ssh in the container = watchdog holds off)
 ... --idle-shutdown heartbeat --heartbeat-timeout 300 --idle-grace 1800 --ssh-guard 1 \
@@ -56,6 +69,13 @@ python3 -I tools/patch_9b.py            # see tools/patch_qwen38_9b_rescue.py fo
   PATCHes 400 until the paid start. No cancel endpoint.
 - **Image refs are digest-pinned** (worker caches are repo-name keyed, tags never
   re-pull). Fleet-wide re-pin: `python3 -I tools/patch_images_v12.py --dry-run`.
+- **`--chat-template-url` needs a chat-template-url-capable image.** The deployers
+  pin older digests, so the flag alone does nothing on a live group — re-pin to a
+  build that ships `chat_template_url.sh` (generic **v13** / q6 **v15** / ampere
+  **v11**; the base image's id is a per-push `--build-arg` string, so check the
+  container). Check any container: `bash /opt/llama.cpp/version.sh` prints the
+  generation. A bad URL is rejected at config time by the deployer (rc 2, free);
+  a URL that downloads junk kills the container at startup (STOPPED group, no bill).
 - **Paid start is the user's call.** `python3 utils/sl_admin.py start
   ma-casa-in-paris --min-bw-mbps 100` (bandwidth arbitrator: slow node →
   `/reallocate`, max 3 shots, never stops the group).

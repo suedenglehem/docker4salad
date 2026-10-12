@@ -165,6 +165,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--n-gpu-layers", default="99", help="env N_GPU_LAYERS")
     parser.add_argument("--gpu-id", default="0",
                         help="env GPU_ID (SaladCloud exposes one card per container -> index 0)")
+    parser.add_argument("--chat-template-url", default="none",
+                        help="env CHAT_TEMPLATE_URL — download a CUSTOM chat template from an "
+                             "http(s) URL at container start and serve it via --chat-template-file "
+                             "(your own template without baking it into an image). 'none' "
+                             "(default) = off, served template = the gguf's embedded one. The image "
+                             "validates what it downloads (size / UTF-8 / Jinja markup) and kills "
+                             "the container on anything else. Needs a chat-template-url-capable "
+                             "image (version.sh prints the generation)")
     parser.add_argument("--idle-shutdown", choices=IDLE_SHUTDOWN_CHOICES, default=IDLE_SHUTDOWN,
                         help="env IDLE_SHUTDOWN — in-container watchdog mode: none (off), "
                              "idle (self-stop after --idle-timeout s with no chat traffic), "
@@ -255,6 +263,13 @@ def redact(env: dict[str, str]) -> dict[str, str]:
 
 def main() -> int:
     args = parse_args()
+    # Fail at config time (free) rather than at a paid start: the image rejects
+    # a non-http(s) CHAT_TEMPLATE_URL at startup and kills the container.
+    if args.chat_template_url != "none" \
+            and not args.chat_template_url.startswith(("http://", "https://")):
+        print(f"CHAT_TEMPLATE_URL must be 'none' or an http(s) URL, got "
+              f"{args.chat_template_url!r}", file=sys.stderr)
+        return 2
     org = args.org
     project = args.project
     group = args.group
@@ -316,6 +331,11 @@ def main() -> int:
         "CTX_SIZE": args.ctx_size,
         "N_GPU_LAYERS": args.n_gpu_layers,
         "NAME": group,
+        # Custom chat template fetched from a URL: 'none' = off (the gguf's
+        # embedded template is served). Only sent when the user asked for one —
+        # the image validates the download and kills the container on anything
+        # that is not a template.
+        "CHAT_TEMPLATE_URL": args.chat_template_url,
         # Idle/heartbeat self-shutdown (in-container idle_watchdog.py):
         # 'none' = off; 'idle'/'heartbeat' arm the watchdog (see --idle-shutdown).
         # Harmless on images that predate the watchdog (the env is unread).

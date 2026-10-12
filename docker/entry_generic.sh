@@ -72,6 +72,18 @@ fi
 if [ -n "${CLAUDE_TEMPLATE}" ] && [ "${CLAUDE_TEMPLATE}" != "none" ]; then
   CT="$("${LLAMA_CPP_DIR}/claude_template.sh" "${MODEL_DIR}/${MODEL_FILE}" "${API_STATE_DIR}/claude_chat_template.jinja" 2>>"${API_STATE_DIR}/claude_template.log")"
 fi
+# A template fetched from a URL is the most explicit source, so it WINS over the
+# static CHAT_TEMPLATE path AND over the generated Claude template (the Claude
+# patch is NOT applied to a downloaded template). The helper validates what it
+# downloaded and dies on anything that is not a template — a silently-wrong
+# template is worse than a dead container.
+if [ -n "${CHAT_TEMPLATE_URL}" ] && [ "${CHAT_TEMPLATE_URL}" != "none" ]; then
+  if [ -n "${CLAUDE_TEMPLATE}" ] && [ "${CLAUDE_TEMPLATE}" != "none" ]; then
+    echo "llama-image: NOTE CLAUDE_TEMPLATE is set, but CHAT_TEMPLATE_URL wins — the Claude" \
+         "patch is NOT applied to the downloaded template" >&2
+  fi
+  CT="$("${LLAMA_CPP_DIR}/chat_template_url.sh" "${CHAT_TEMPLATE_URL}" "${API_STATE_DIR}/chat_template_url.jinja" 2>>"${API_STATE_DIR}/chat_template_url.log")"
+fi
 
 SPEC=
 case "${SPEC_TYPE}" in

@@ -202,6 +202,9 @@ COPY docker/api_app.py ${LLAMA_CPP_DIR}/api_app.py
 COPY docker/run_api.py ${LLAMA_CPP_DIR}/run_api.py
 COPY docker/qwen3.8.q6.jinja ${LLAMA_CPP_DIR}/qwen3.8.q6.jinja
 COPY docker/claude_template.sh ${LLAMA_CPP_DIR}/claude_template.sh
+# Custom chat template from a URL (see CHAT_TEMPLATE_URL below): fetch +
+# validate + print the path for --chat-template-file.
+COPY docker/chat_template_url.sh ${LLAMA_CPP_DIR}/chat_template_url.sh
 # Entrypoint script (see the CMD at the end of this file) — extracted from the
 # old inline `CMD ["/bin/bash","-lc","…"]` blob so a plain 3-token exec-form CMD
 # cannot be mis-parsed by buildkit. Invoked as `bash /opt/llama.cpp/entry.sh`.
@@ -226,7 +229,7 @@ RUN chmod +x /usr/local/bin/llm.sh /usr/local/bin/question.sh /usr/local/bin/ver
 # default lives in the RUN (shell ${ARG:-default}), NOT in the ARG line - a
 # Dockerfile ARG default cannot carry unquoted spaces.
 ARG LMSS_BUILD_ID
-RUN printf '%s\n' "${LMSS_BUILD_ID:-lmss_generic_ampere-v8 (llamAmpere v0.4 fork, cuda 13.0.2, turbo5/turbo4 KV, idle_watchdog v2.3 [/.ssh presence guard, 20-min max-hold cap] + bw_reporter + iputils-ping + llama-stats + apt kit [less nano iproute2 dnsutils jq], trapped-child supervisor, exec-form entry.sh CMD) 2026-10-11}" > /etc/llama-image-build
+RUN printf '%s\n' "${LMSS_BUILD_ID:-lmss_generic_ampere-v11 (llamAmpere v0.4 fork, cuda 13.0.2, turbo5/turbo4 KV, chat-template-url, idle_watchdog v2.3 [/.ssh presence guard, 20-min max-hold cap] + bw_reporter + iputils-ping + llama-stats + apt kit [less nano iproute2 dnsutils jq], trapped-child supervisor, exec-form entry.sh CMD) 2026-10-12}" > /etc/llama-image-build
 
 # Interactive-shell ergonomics for the Salad ssh relay (verified 2026-10-11 on a
 # live relay session: it execs a bare /bin/bash on a pty with TERM=xterm, which
@@ -275,6 +278,12 @@ ENV SPEC_TYPE=draft-mtp
 # template is dumped and the one-line Claude Code patch applied.
 ENV CHAT_TEMPLATE=none
 ENV CLAUDE_TEMPLATE=none
+# Chat template fetched from an http(s) URL at startup — a custom template
+# without baking it into an image. "none" (default) = off. Runs
+# ${LLAMA_CPP_DIR}/chat_template_url.sh (download -> validate ->
+# ${API_STATE_DIR}/chat_template_url.jinja); WINS over CHAT_TEMPLATE and
+# CLAUDE_TEMPLATE, and the Claude patch is NOT applied to a downloaded template.
+ENV CHAT_TEMPLATE_URL=none
 # One whitespace-separated string of extra llama-server args, appended LAST to
 # the argv (llama.cpp duplicate flags = last wins). "none" (default) = off.
 ENV EXTRA_ARGS=none

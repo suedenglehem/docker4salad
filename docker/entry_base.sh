@@ -34,6 +34,13 @@ CT=
 if [ -n "${CHAT_TEMPLATE}" ] && [ "${CHAT_TEMPLATE}" != "none" ]; then
   CT="${CHAT_TEMPLATE}"
 fi
+# A template fetched from a URL is the most explicit source, so it WINS over the
+# static CHAT_TEMPLATE path. The helper validates what it downloaded and dies on
+# anything that is not a template (a silently-wrong template is worse than a
+# dead container).
+if [ -n "${CHAT_TEMPLATE_URL}" ] && [ "${CHAT_TEMPLATE_URL}" != "none" ]; then
+  CT="$("${LLAMA_CPP_DIR}/chat_template_url.sh" "${CHAT_TEMPLATE_URL}" "${API_STATE_DIR}/chat_template_url.jinja" 2>>"${API_STATE_DIR}/chat_template_url.log")"
+fi
 
 DRAFT_PATH=
 if [ -n "${DRAFT_MODEL_URL}" ] && [ "${DRAFT_MODEL_URL}" != "none" ]; then
