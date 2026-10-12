@@ -149,11 +149,12 @@ MODEL_ALIAS = "atx-swift-27b-opt"
 # 'none'/missing/undecodable DISABLES the watchdog. On top of cuda130-v3's
 # exec-form entry.sh CMD fix (the v2 inline JSON CMD was malformed ->
 # buildkit shell-form fallback -> dash exit 2 crash-loop)); the
-# tag form, for humans: boris271142/lmss_generic_ampere:cuda130-v10
+# tag form, for humans: boris271142/lmss_generic_ampere:cuda130-v11
+#   cuda130-v10: sha256:28417137144d2192093eada751b359dc13b482a0190d7eb37e87b7232feb259b
 #   cuda130-v9: sha256:d4f4b030fe2d88c1fdaaf5a31505ac0f4d357f1db38f8e7b369804d3502e6593
 #   cuda130-v8: sha256:f713e04f77b9e7d607f24223b5f6238e4644ce1ca4ceed7223fa0f57e61bef94
 IMAGE = "boris271142/lmss_generic_ampere" \
-        "@sha256:28417137144d2192093eada751b359dc13b482a0190d7eb37e87b7232feb259b"
+        "@sha256:4ad7dd6b7ab2961f19644dc17d5cce9bd1ae64c0544ac6fa3ebd301de49e0645"
 
 MODEL_REPO = "bjivanovich/ATX-Swift-1.5-Qwen3.8-27B-Uncensored-MTP-GGUF"
 # Q5_K_M — MTP head embedded in the gguf (the 'MTP' in the repo name), so no

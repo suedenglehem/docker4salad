@@ -322,6 +322,20 @@ line on push):
 | q6 | `boris271142/lmss_jonathancoletti_qwen38_q6_mtp_vision:cuda128-v14` | `a779732c02b2ad8148d21c6ff6f33f5a6d252e9de2e78ab729878342e389ab88` | base + Qwen3.8 27B Q6 + MTP + vision + Claude template |
 | ampere | `boris271142/lmss_generic_ampere:cuda130-v10` | `28417137144d2192093eada751b359dc13b482a0190d7eb37e87b7232feb259b` | llamAmpere turbo-KV fork, sm_86 cards |
 
+**The chat-template-url set (built + pushed on tr4, 2026-10-12, `BUILD_JOBS=24`) — the
+live pins.** Same watchdog v2.3 / bw_reporter v2 content, plus `chat_template_url.sh`
+and the `CHAT_TEMPLATE_URL` control (base build id carries the feature note):
+
+| family | repo:tag | Hub digest `sha256:` | deployer pins |
+|---|---|---|---|
+| base | `boris271142/lmss:cuda128-v13` | `d6e1b1d940608e25e0f11a84bebafc3a20c8df5b59d6c42673d98ef93bf337cd` | `deploy_qwen38_9b.py`, `deploy_qwen9b.py` |
+| generic | `boris271142/lmss_generic:cuda128-v13` | `14cb99414aa6d233d66922ea8d7bf88b353f63828f3dc348c783dfe5ef75b0b4` | `deploy_generic.py` |
+| q6 | `boris271142/lmss_jonathancoletti_qwen38_q6_mtp_vision:cuda128-v15` | `75c8cf667590ee9096dc4e6bd11afe24acd84f988225d76ef89a202939d36e47` | `deploy_qwen38_27b.py` |
+| ampere | `boris271142/lmss_generic_ampere:cuda130-v11` | `4ad7dd6b7ab2961f19644dc17d5cce9bd1ae64c0544ac6fa3ebd301de49e0645` | `deploy_ampere.py` |
+
+The derivatives keep `FROM boris271142/lmss:cuda128-v12@sha256:0586ba35…` (each ships
+its own `entry_*.sh` + `chat_template_url.sh`, so the feature needs no FROM re-pin).
+
 **bw_reporter v2 (the v2.5 content change):** logs `epoch rx-bytes
 model-bytes` every 10 s — `rx-bytes` is the kernel NIC RX counter
 (`/sys/class/net/<if>/statistics/rx_bytes`, summed over non-lo — the exact
@@ -929,6 +943,10 @@ on_salad/
 │  ├─ patch_9b.py / patch_qwen38_9b_rescue.py   9B group PATCH helpers.
 │  ├─ poll_images_v12.py         read-only landing poller for the v2.5 re-pin (§9i).
 │  ├─ build_push_v24/v25.sh      build→push→digest-capture→Hub-overview chains (v2.4 / v2.5).
+│  ├─ build_chat_url_images.sh   chat-template-url cycle: build the 4 images on tr4 (24 jobs, no push).
+│  ├─ push_chat_url_images.sh    …then push the 4 on tr4 + PATCH each overview + print the Hub digests.
+│  ├─ sl_repin.py                move the 5 deployers' IMAGE pins to new digests in one pass (tag-form
+│  │                            comment + history line kept in step; `--dry-run` prints the diff).
 │  ├─ hub_describe.py            Docker Hub `full_description` PATCH — REQUIRED after every push (§11).
 │  ├─ copy_images_from_tr4.sh    images tr4 → this box (`docker save | pigz` over ssh, verifies loaded IDs).
 │  └─ watch_ready.py             read-only readiness watcher; prints transitions, incl. NEW INSTANCE when a /reallocate lands (§6).
@@ -1009,6 +1027,13 @@ bash docker/chat_template_url.sh \
 python3 -I tools/test_chat_template_offline.py     # the offline suite (46 checks)
 
 # Image-only fleet re-pin (env untouched):  python3 -I tools/patch_images_v9.py  (--dry-run ok)
+# DEPLOYER re-pin after a push (one pass over all five; digests from the Hub — the
+# local `docker images` id is a config hash, NOT the manifest digest):
+python3 -I tools/sl_repin.py --dry-run \
+  boris271142/lmss:cuda128-v13=sha256:<digest> \
+  boris271142/lmss_generic:cuda128-v13=sha256:<digest> \
+  boris271142/lmss_jonathancoletti_qwen38_q6_mtp_vision:cuda128-v15=sha256:<digest> \
+  boris271142/lmss_generic_ampere:cuda130-v11=sha256:<digest>
 
 # RECREATE a group to change a CREATE-only field (priority / restart_policy are NOT
 # PATCHable): fresh name (dodges the delete tombstone — §9), MODEL_ALIAS unchanged,
@@ -1085,7 +1110,7 @@ stopped at 01:15Z; all 7 fleet groups are now stopped at $0.
 > 26/26 on the renamed module, `list` unchanged, the paid gate aborts before any API
 > call, and name validation + fleet.json merge/clobber-guard were exercised in a temp dir.
 
-> **CUSTOM TEMPLATE FROM A URL (2026-10-12, zero-cost, UNCOMMITTED at write time):**
+> **CUSTOM TEMPLATE FROM A URL (2026-10-12, COMMITTED `ef0c49d` + pushed):**
 > `CHAT_TEMPLATE_URL` is the **third template source** — `docker/chat_template_url.sh`
 > downloads a template at startup, validates it, serves it via `--chat-template-file`; it
 > **wins over `CHAT_TEMPLATE` and `CLAUDE_TEMPLATE`**, the Claude patch is **not** applied to it,
@@ -1094,9 +1119,22 @@ stopped at 01:15Z; all 7 fleet groups are now stopped at $0.
 > generic **v13** / q6 **v15** / ampere **v11**), `version.sh` fingerprint, all five deployers
 > (`--chat-template-url`, config-time rc2 guard), docs (`docker/`, `deploy/`, `docs/`, root
 > `README.md`, `tools/hub_describe.py`). Offline suite `tools/test_chat_template_offline.py`
-> **46/46 green**. **Gated next step (user): build + push v13/v15/v11 (then PATCH
-> `full_description`, §11) and re-pin the deployers — until then the flag does nothing on a live
-> group, whose images predate the helper.**
+> **46/46 green**. Canonical test URL = this repo's own template
+> `https://raw.githubusercontent.com/suedenglehem/docker4salad/main/docker/qwen3.8.q6.jinja`
+> (live-verified on the host: 8941 bytes, sha256 `e8912f4cc41c`, byte-identical, no NOTE).
+>
+> **IMAGE CYCLE — DONE 2026-10-12 (user-authorized push from tr4):** all four images built on
+> tr4 (`b760one`, 32 CPUs, `--build-arg BUILD_JOBS=24`, 42 min wall, log `/tmp/build_chat_url.log`,
+> script `tools/build_chat_url_images.sh`), pushed from tr4 (its own Hub login), each repo's
+> `full_description` PATCHed, and **all five deployers re-pinned** to the Hub digests with
+> `tools/sl_repin.py` (§4 table; `test_deploy_offline.py` green after the re-pin). Verified
+> **in-container** on the built q6 image: the canonical raw URL → `OK 8941 bytes
+> sha256:e8912f4cc41c` (byte-identical to `docker/qwen3.8.q6.jinja`), and the GitHub *blob* URL →
+> `REJECT … starts like an HTML document` with the caller killed under `set -e` and **no output
+> file** — the hard-fail semantics proven inside the shipped image, not just on the host.
+> **So `--chat-template-url` is live-capable now, at the next paid start of a group carrying these
+> pins.** The live fleet groups are NOT moved by a deployer re-pin — moving them needs the free
+> image-only PATCH (`tools/patch_images_v12.py` pattern, env untouched; offered, not run).
 
 > **BACKEND NOTE (correction, 2026-10-11):** this Claude session is served by
 > the **local vllm on tr4** (`qwen3.8-27b` fp8, `:8000`, TP2 + MTP, running
