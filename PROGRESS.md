@@ -154,7 +154,8 @@ and wraps it so it's usable from **Claude Code** and plain curl as an
 - **Deployers** (`deploy/*.py`): create/patch Salad container groups, digest-pin
   the image, inject the full env, manage the stop key.
 - **Clients:** `claude/cl_salad`, `claude/sl_chat.sh`, `claude/sl_proxy.py`.
-- **Manager:** `utils/sl_admin.py` — list/start/stop/wait/stats + the
+- **Manager:** `utils/sl_admin.py` — list/refresh/start/stop/wait/stats/**describe**
+  (whole-config dump of one group) + create-org/create-project/deploy + the
   arbitrator. `utils/billing.py` — cost tracking.
 
 **Images** are on Docker Hub under **`boris271142/`**. There are 4 current
@@ -731,6 +732,22 @@ consistent GET:** a GET right after a PATCH can return the PRE-PATCH spec;
 re-read before trusting; `pending_change=True` = "staged, not yet visible,"
 flips to False when the new spec reads back.
 
+**9e-correction (2026-10-12, `tools/patch_images_v13.py` run on the live fleet).** Two things the
+wording above got wrong, both measured: **(1)** the GET response has **no
+`pending_update_in_progress` field at all** — its keys are `pending_change`, `current_state`,
+`version`, `update_time`, `scaling-actions`, … — so `GET.get("pending_update_in_progress")` is
+*always* None and any guard built on it silently does nothing. The parked state is observable
+**only on the write path**: a repeat PATCH returns **400** with ProblemDetails
+`type:"pending_update_in_progress"`. Use a same-digest repeat PATCH as a free, no-op probe.
+**(2)** the consistency window is **minutes, not seconds** — re-GETs at 1 s, 2 s, 4 s, 8 s after a
+200 all returned the OLD image with `pending_change=True`; the new digest read back with
+`pending_change=False` only after ~3 min. So: **poll the readback, never assert on one GET**, and
+treat "400-parked with `pending_change=True`" as the *expected* end state of a previously-started
+group, not as a failure. **(3)** a parked update **becomes visible in the GET on its own** —
+`atx-swift-27b-q5` read [STAGED] (old image, `pending_change=True`) and ~20 min later read the NEW
+digest with `pending_change=False`, with no start in between. "Parked" = further PATCHes refused +
+the queued spec is what RUNS at the next start; it does NOT mean the spec stays hidden.
+
 **9f. SSH into a running container is a shell-less OCI exec.** `ssh root@<ip> -p
 <port>`; the command is `exec`'d directly, **not through a shell** — no pipes,
 `;`, quotes, or `$()`. `ssh h 'hostname; ps'` fails with `exec: "hostname;":
@@ -940,6 +957,12 @@ on_salad/
 │  ├─ fleet_status_now.py        read-only fleet status+guard snapshot (§14); 404 → `GONE`.
 │  ├─ fleet_snapshot.py          broader read-only snapshot.
 │  ├─ patch_images_v9/v10/v11/v12.py   image-only fleet re-pin per cycle (v9=guard, v10=v2.3, v11=v2.4, v12=v2.5).
+│  ├─ patch_images_v13.py        …and the chat-template-url cycle: ENUMERATES the fleet (sl_admin._fleet,
+│  │                            family read from each group's live repo) and POLLS the readback — [OK] digest
+│  │                            reads back / [STAGED] 400-parked = queued for the next start (both = success).
+│  ├─ sl_set_env.py              MERGE-SAFE env editor for one group (reads live env, applies KEY=VALUE /
+│  │                            --unset on top, sends the FULL dict — §9e wholesale replace; [LOCKED] on a
+│  │                            parked group; `--dry-run`; secrets never printed).
 │  ├─ patch_9b.py / patch_qwen38_9b_rescue.py   9B group PATCH helpers.
 │  ├─ poll_images_v12.py         read-only landing poller for the v2.5 re-pin (§9i).
 │  ├─ build_push_v24/v25.sh      build→push→digest-capture→Hub-overview chains (v2.4 / v2.5).
@@ -955,7 +978,7 @@ on_salad/
                                   post.txt (the ATX operating point — deployer-defaults provenance), logs.
 ```
 Key file line counts (2026-10-10; `sl_admin.py` re-counted 2026-10-12 after the
-create/deploy additions): `sl_admin.py` 1500, `salad_client.py` 875,
+create/deploy + `describe` additions): `sl_admin.py` 1688, `salad_client.py` 875,
 `sl_proxy.py` 705, `deploy_ampere.py` 725, `deploy_generic.py` 697,
 `deploy_qwen38_27b.py` 633, `deploy_qwen38_9b.py` 452, `deploy_qwen9b.py` 415,
 `idle_watchdog.py` 427, `bw_reporter.py` 124.
@@ -1000,6 +1023,11 @@ python3 -I tools/fleet_status_now.py
 python3 utils/sl_admin.py list  ma-casa-in-paris
 python3 utils/sl_admin.py wait  ma-casa-in-paris     # polls per-instance `ready` (§9d)
 python3 utils/sl_admin.py stats ma-casa-in-paris
+# ONE group's WHOLE config, read-only (image repo/tag/digest + local-id line, container
+# hash/resources/GPU names/CMD, probes, FULL env with secret VALUES redacted, live instance
+# ids + ssh lines, derived client commands; `--raw` = the whole GET as JSON):
+python3 utils/sl_admin.py describe ma-casa-in-paris --project llm --group qwen38-27b-q5
+python3 utils/sl_admin.py describe ma-casa-in-paris            # no --group → numbered pick
 
 # PAID start (burns credits — coordinate with the user). Add the arbitrator:
 python3 utils/sl_admin.py start ma-casa-in-paris --min-bw-mbps 30   # bandwidth-aware start (§6)
@@ -1021,6 +1049,12 @@ python3 deploy/deploy_generic.py --project llm --group my-group \
     --model-repo Some/Org --model-file Model-Q5_K_M.gguf \
     --chat-template-url https://raw.githubusercontent.com/suedenglehem/docker4salad/main/docker/qwen3.8.q6.jinja \
     --no-start
+# …or set it on an EXISTING group without re-running a deployer (merge-safe: reads the live
+# env, adds the key, sends the FULL dict — a hand-written PATCH of one key would delete the rest):
+python3 -I tools/sl_set_env.py ma-casa-in-paris/llm/qwen38-27b-q5 \
+    CHAT_TEMPLATE_URL=https://raw.githubusercontent.com/suedenglehem/docker4salad/main/docker/qwen3.8.q6.jinja \
+    --dry-run
+# (a group parked by an earlier PATCH answers [LOCKED] 400 — its env edits must wait for the paid start)
 # The helper itself, straight on the host (curl path — no image needed):
 bash docker/chat_template_url.sh \
   https://raw.githubusercontent.com/suedenglehem/docker4salad/main/docker/qwen3.8.q6.jinja /tmp/t.jinja
@@ -1134,7 +1168,28 @@ stopped at 01:15Z; all 7 fleet groups are now stopped at $0.
 > file** — the hard-fail semantics proven inside the shipped image, not just on the host.
 > **So `--chat-template-url` is live-capable now, at the next paid start of a group carrying these
 > pins.** The live fleet groups are NOT moved by a deployer re-pin — moving them needs the free
-> image-only PATCH (`tools/patch_images_v12.py` pattern, env untouched; offered, not run).
+> image-only PATCH, which was then **RUN ON THE WHOLE FLEET (user-authorized, 2026-10-12,
+> `tools/patch_images_v13.py`)**: 5 live groups enumerated via `sl_admin._fleet()` (the ampere
+> groups are gone — both ATX prod groups deleted), family kept per group (q6→q6, generic→generic,
+> base→base), **env byte-identical on all 5** (19/19/18/22/19 keys). Result: **5/5 read back the new
+> digest with `pending_change=False`** — `qwen38-27b/{q5,q6k,qwen38-9b}` → q6 v15 / q6 v15 / base v13,
+> `llm/qwen38-27b-q5` → q6 v15, `llm/atx-swift-27b-q5` → generic v13 (v12). No start triggered,
+> nothing billed. `atx-swift-27b-q5` (the only group with a paid start in its history) read as
+> **[STAGED]** during the run — old image in the GET, `pending_change=True`, repeat PATCH → 400 — and
+> ~20 min later the SAME GET showed the new digest with `pending_change=False`. **A parked update
+> becomes visible in the GET without any start**: "parked" means *further PATCHes are refused* and
+> *the queued spec is what runs at the next start*, not that the spec stays hidden.
+>
+> **API FACTS THIS RUN ESTABLISHED (see §9e — both are corrections):**
+> ① the GET response has **no `pending_update_in_progress` field at all** (keys: `pending_change`,
+> `current_state`, `version`, `update_time`, …) — a guard reading it is a silent no-op; the parked
+> state is visible **only on the write path** as **400 + ProblemDetails
+> `type:"pending_update_in_progress"`**, so a same-digest repeat PATCH is a free no-op *probe*.
+> ② the eventual-consistency window is **minutes, not seconds**: re-GETs at 1–8 s after a 200 still
+> showed the OLD image with `pending_change=True`; the new digest read back only after ~3 min.
+> `patch_images_v13.py` therefore POLLS the readback (`--settle=SECONDS`) and classifies both end
+> states — `[OK]` (digest reads back) and `[STAGED]` (400-parked = queued for the next start) —
+> as success, and asserts env equality on both.
 
 > **BACKEND NOTE (correction, 2026-10-11):** this Claude session is served by
 > the **local vllm on tr4** (`qwen3.8-27b` fp8, `:8000`, TP2 + MTP, running

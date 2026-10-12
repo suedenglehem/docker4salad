@@ -13,6 +13,20 @@ Usage:
                             ready, then exit (group status alone is not enough:
                             Salad marks a group `running` while instances are
                             still allocating/downloading/creating)
+            describe        DUMP ONE GROUP'S WHOLE CONFIG, read-only: identity
+                            (id/version/pending_change/timestamps), state,
+                            lifecycle (replicas, restart/autostart policy,
+                            priority, scaling), networking (dns/port/auth),
+                            IMAGE (repo, tag, manifest digest, Hub link, the
+                            `docker image inspect` line for the local image id),
+                            container (hash, image_caching, size, cpu/memory/shm/
+                            storage, GPU classes by NAME, volume, the CMD),
+                            probes, the FULL env (secret-looking values redacted),
+                            live instances (instance id, state, ready, machine_id,
+                            pull progress, ssh line) and the derived client lines.
+                            `--raw` also dumps the whole GET as JSON (env values
+                            redacted). Pick from the numbered table, or name it:
+                              describe ORG --project P --group G [--raw]
             stats           print llama-server stats (like utils/llama_stats.py:
                             tps / queue / totals, --interval loop, Ctrl-C stops)
                             — but ONLY when the group is fully ready: status
@@ -156,7 +170,7 @@ SALAD_NAME_RE = re.compile(r"^[a-z][a-z0-9-]{0,61}[a-z0-9]$")
 # The portal backend the WEB UI uses (utils/billing.py logs into this).
 PORTAL_BASE = "https://portal-api.salad.com/api/portal"
 
-ACTIONS = ("list", "refresh", "start", "stop", "wait", "stats", "delete",
+ACTIONS = ("list", "refresh", "start", "stop", "wait", "stats", "describe", "delete",
            "create-org", "create-project", "deploy")
 
 # --- deploy: the docker types we support (one entry per deployer) ------------
@@ -691,6 +705,147 @@ def _stats(scope: str, name: str, key: str, interval: float) -> int:
     # The scraper parses sys.argv itself (url positional + --interval N).
     sys.argv = ["llama_stats.py", url, "--interval", f"{interval:g}"]
     runpy.run_path(_LLM_STATS, run_name="__main__")
+    return 0
+
+
+# --- describe: one group's whole config in a single read-only dump -----------
+# Secret-looking env VALUES are never printed (names are, so you can see what is
+# set). HF_TOKEN / SALAD_STOP_KEY are the ones that matter; the pattern is
+# deliberately broad so a future secret lands redacted by default.
+_SECRET_RE = re.compile(r"TOKEN|SECRET|PASSWORD|PASSPHRASE|STOP_KEY|^HF_", re.I)
+
+
+def _redact_env(env: "dict | None") -> dict:
+    return {k: ("<REDACTED>" if _SECRET_RE.search(str(k)) else v) for k, v in (env or {}).items()}
+
+
+def _group_json(org: str, project: str, name: str, key: str) -> dict:
+    """Full group GET, retried: a transitional response can carry an EMPTY container."""
+    g: dict = {}
+    for _ in range(4):
+        g = sc.get_container_group(org, project, name, api_key=key).raw
+        if (g.get("container") or {}).get("image"):
+            return g
+        time.sleep(0.6)
+    return g
+
+
+def _sec(label: str, lines: list[str]) -> None:
+    """One section: label on the first line, continuations aligned under it."""
+    lines = [line for line in lines if line]
+    for i, line in enumerate(lines):
+        print(f"{label + ' ' if i == 0 else ' ' * (len(label) + 1)}{line}")
+
+
+def _gpu_names(org: str, ids: list, key: str) -> str:
+    """GPU class UUIDs -> 'rtx3090 [a5db5c50-…]' (names come from the org)."""
+    if not ids:
+        return "(none)"
+    try:
+        names = {gc.id: gc.name for gc in sc.list_gpu_classes(org, api_key=key)}
+    except sc.SaladApiError as e:
+        return f"{ids} (gpu-classes GET failed: HTTP {e.status_code})"
+    return ", ".join(f"{names.get(i, '?')} [{i}]" for i in ids)
+
+
+def _describe(org: str, project: str, name: str, key: str, raw: bool = False) -> int:
+    g = _group_json(org, project, name, key)
+    if not g:
+        print(f"error: {org}/{project}/{name} — 4 GETs returned no container")
+        return 1
+    c = g.get("container") or {}
+    env = dict(c.get("environment_variables") or {})
+    img = str(c.get("image") or "")
+    ref, _, digest = img.partition("@")
+    repo, _, tag = ref.partition(":")
+    st = g.get("current_state") or {}
+    net = g.get("networking") or {}
+    res = c.get("resources") or {}
+
+    print(f"=== {org}/{project}/{name} ===")
+    _sec("identity", [
+        f"name={g.get('name')}  display_name={g.get('display_name')}  id={g.get('id')}",
+        f"version={g.get('version')}  pending_change={g.get('pending_change')}  "
+        f"create_time={g.get('create_time')}  update_time={g.get('update_time')}",
+    ])
+    _sec("state", [
+        f"status={st.get('status')}  description={st.get('description')}",
+        f"start_time={st.get('start_time')}  finish_time={st.get('finish_time')}  "
+        f"instance_status_counts={st.get('instance_status_counts')}",
+    ])
+    _sec("lifecycle", [
+        f"replicas={g.get('replicas')}  restart_policy={g.get('restart_policy')}  "
+        f"autostart_policy={g.get('autostart_policy')}  priority={g.get('priority')}",
+        f"scheduled-scaling-enabled={g.get('scheduled-scaling-enabled')}  "
+        f"scaling-actions={g.get('scaling-actions')}  country_codes={g.get('country_codes')}",
+    ])
+    _sec("networking", [
+        f"dns={net.get('dns')}  port={net.get('port')}  protocol={net.get('protocol')}  "
+        f"auth={net.get('auth')}  load_balancer={net.get('load_balancer')}",
+        f"single_connection_limit={net.get('single_connection_limit')}  "
+        f"client_request_timeout={net.get('client_request_timeout')}  "
+        f"server_response_timeout={net.get('server_response_timeout')}",
+    ])
+    _sec("image", [
+        f"ref={img}",
+        f"repo={repo}  tag={tag or '(none — digest-pinned)'}  manifest_digest={digest}",
+        "(no digest = TAG REF: the worker image cache is repo-keyed and a tag never "
+        "re-pulls — pin a digest to force a fresh pull)" if not digest else "",
+        f"hub=https://hub.docker.com/r/{repo}  tag={tag or '-'}  "
+        f"local image id: docker image inspect --format '{{{{.Id}}}}' '{ref}'",
+    ])
+    lines = [
+        f"hash={c.get('hash')}  image_caching={c.get('image_caching')}  size={c.get('size')}",
+        f"cpu={res.get('cpu')}  memory={res.get('memory')}MiB  shm_size={res.get('shm_size')}MiB  "
+        f"storage={int(res.get('storage_amount') or 0) // (1024 ** 3)}GiB",
+        f"gpu_classes={_gpu_names(org, list(res.get('gpu_classes') or []), key)}",
+    ]
+    if c.get("volume"):
+        lines.append(f"volume={json.dumps(c['volume'])}")
+    cmd = str(c.get("command") or "")
+    lines.append(f"command={cmd if cmd else '(image default CMD — none set on the group)'}")
+    _sec("container", lines)
+    for probe in ("readiness_probe", "liveness_probe", "startup_probe"):
+        p = g.get(probe)
+        if not p:
+            continue
+        h = p.get("http") or {}
+        _sec(probe, [
+            f"http path={h.get('path')} port={h.get('port')} scheme={h.get('scheme')}  "
+            f"initial_delay={p.get('initial_delay_seconds')}s period={p.get('period_seconds')}s "
+            f"timeout={p.get('timeout_seconds')}s success={p.get('success_threshold')} "
+            f"failure={p.get('failure_threshold')}",
+        ])
+    _sec(f"env ({len(env)} keys)",
+         [f"{k}={v}" for k, v in sorted(_redact_env(env).items())] or ["(EMPTY — no env on the group)"])
+
+    try:
+        insts = list(sc.list_container_group_instances(org, project, name, api_key=key))
+        note = ""
+    except sc.SaladApiError as e:
+        insts, note = [], f" (GET instances -> HTTP {e.status_code})"
+    rows = []
+    for i in insts:
+        r = i.raw
+        rows.append(f"id={i.id}  state={i.state}  ready={i.ready}  machine_id={i.machine_id}  "
+                    f"pull={i.pulling_progress}")
+        rows.append(f"ssh={i.ssh_line or '-'}  image={r.get('image') or '-'}  "
+                    f"create_time={r.get('create_time')}  update_time={r.get('update_time')}")
+    _sec(f"instances ({len(insts)}){note}", rows or ["(none — the group has no live instances)"])
+
+    _sec("derived", [
+        f"url={_url(sc.ContainerGroupInfo.from_json(g)) or '-'}",
+        f"claude: sl_claude_deploy --org {org} --project {project} --group {name}",
+        f"env edit (merge-safe): python3 -I tools/sl_set_env.py {org}/{project}/{name} KEY=VALUE",
+    ])
+
+    if raw:
+        dump = json.loads(json.dumps(g))
+        cc = dump.get("container")
+        if isinstance(cc, dict) and "environment_variables" in cc:
+            cc["environment_variables"] = _redact_env(cc["environment_variables"])
+        print("--- raw GET (env VALUES redacted) ---")
+        print(json.dumps(dump, indent=2, sort_keys=True))
     return 0
 
 
@@ -1279,7 +1434,7 @@ def main(argv: list[str]) -> int:
     project_flag: str | None = None
     group_flag: str | None = None
     projects_flag: list[str] = []
-    start = register_only = False
+    start = register_only = raw_dump = False
     use_portal = True
     positional: list[str] = []
     extra: list[str] = []
@@ -1338,6 +1493,10 @@ def main(argv: list[str]) -> int:
             start = True
             i += 1
             continue
+        if arg == "--raw":
+            raw_dump = True
+            i += 1
+            continue
         if arg == "--register-only":
             register_only = True
             i += 1
@@ -1367,8 +1526,11 @@ def main(argv: list[str]) -> int:
     if type_key is not None and action != "deploy":
         print("error: --type applies to `deploy` only", file=sys.stderr)
         return 2
-    if group_flag is not None and action != "deploy":
-        print("error: --group applies to `deploy` only", file=sys.stderr)
+    if group_flag is not None and action not in ("deploy", "describe"):
+        print("error: --group applies to `deploy` and `describe`", file=sys.stderr)
+        return 2
+    if raw_dump and action != "describe":
+        print("error: --raw applies to `describe` only (the full GET as JSON)", file=sys.stderr)
         return 2
     if (register_only or not use_portal) and action not in ("create-org", "create-project"):
         print("error: --register-only / --no-portal apply to `create-org` and "
@@ -1465,6 +1627,32 @@ def main(argv: list[str]) -> int:
             return 0
         if action == "refresh":
             return _refresh(orgs, key, interval)
+        if action == "describe":
+            if group_flag is not None:  # named on the command line: describe ORG --project P --group G
+                d_org = org or next(iter(fleet))
+                d_project = project_flag
+                if d_project is None:
+                    projs = list(fleet.get(d_org, ()))
+                    if len(projs) == 1:
+                        d_project = projs[0]
+                    else:
+                        pick = _pick_numbered(projs, f"project in {d_org}")
+                        if pick is None:
+                            print("aborted — nothing done.")
+                            return 1
+                        d_project = projs[pick]
+                return _describe(d_org, d_project, group_flag, key, raw_dump)
+            rows = _rows(orgs, key)
+            selectable = _print_action_table(rows, key, action)
+            if not selectable:
+                print("no groups to select from — nothing to do.")
+                return 1
+            sel = _prompt(selectable, action)
+            if sel is None:
+                print("aborted — nothing done.")
+                return 1
+            d_org, d_project, g = sel
+            return _describe(d_org, d_project, g.name, key, raw_dump)
         # start / stop / wait / delete: numbered table -> prompt
         rows = _rows(orgs, key)
         selectable = _print_action_table(rows, key, action)
