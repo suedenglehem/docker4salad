@@ -1,23 +1,46 @@
-deploy llm dockers on salad (qwen, swift etc). It's using all knobs available in docker groups of salad, just basic which enough for running llm in docker, e.g. we're only using readiness probe, not using at all "command", "ext log", "scheduled scaling..." Salad is limited to 1 gpu per container, so, you're maxed by 5090. You have everything prepared for claude / cline (cline is (IMHO) just faster for routine tasks, claude seems to be more capable). I use this for deploying my llama-cpp on salad on demand, switching cards and quantities of cards. Cline runs on default gguf's templates, template for claude is rectified in docker (1 line edit), so, you will need to tell script if you're using llm for claude or not. I started coding it with cline, switched to claude, so, initial export of promt for working with salad's api is left in .clinerules. 
+deploy dockers with llama-server serving models downloaded from huggins face/ on salad (qwen, swift etc). It's using all knobs available in docker groups of salad, just basic which enough for running llm in docker, e.g. we're only using readiness probe, not using at all "command", "ext log", "scheduled scaling..." Salad is limited to 1 gpu per container, so, you're maxed by 5090. You have everything prepared for claude / cline (cline is (IMHO) just faster for routine tasks, claude seems to be more capable). I use this for deploying my llama-cpp on salad on demand, switching cards and quantities of cards. Cline runs on default gguf's templates, template for claude is rectified in docker (1 line edit), so, you will need to tell script if you're using llm for claude or not. I started coding it with cline, switched to claude, so, initial export of promt for working with salad's api is left in .clinerules. 
 
 Salad uses it's own api key to secure acces to cloudflare gw, so, you have to run harness via proxy which will add salad's key to llama's requests (if you're a security maniac, you can set llama's api key also, it's coded/tested, but i don't use it, since i work 100% with local llms). Everything was coded with qwen3.8 27b q6k served by vllm on 2 3090.
 
-Docker image is a git cloned llama-server compiled with cuda sdk 12.8 (runs on 3090 & 5090) serving Qwen3.8 (quant + ctx-len per card — target matrix in `docker/README.md`: ≥90K → Q5_K_M on 24 GB / Q6_K on 32 GB; ≥128K → Q6_K on 32 GB, or Q4_K_M on 24 GB). latest dockerfile is  Dockerfile.lmss_generic
+Docker images can be : https://github.com/suedenglehem/docker4salad/blob/main/docker/README.md 
+Beware, there's auto-stop in these dockers after idling too long (useful not to pay much if you loose connection mid-flight)
 
 ## Layout
 
 - `salad_client.py` — stdlib-only Salad OpenAPI client (groups, projects, GPU classes, PATCH via `update_container_group`). API key from `deploy/salad_api.txt` (gitignored, never printed).
+
 - `deploy/` — create-or-update deployers for the live groups (all take `--org`, `--project`, `--group`, `--no-start`), with the keys they read next to the scripts: `salad_api.txt` (Salad API, via `salad_client.py`) and `hft.txt` (HF token) — gitignored, chmod 600, never printed.
+
   - `deploy_qwen38_27b.py` — canonical, for the production 27B Claude Code backend `qwen38-27b-q6k` (baked q6-mtp-vision image, main model fetched via `hf`). Built-in defaults = the live production profile (Q5_K_M @ CTX 90000 on rtx3090) — a bare run re-applies exactly that (idempotent against the live group).
+  
   - `deploy_generic.py` — model-agnostic, **vanilla** `lmss_generic` image (digest-pinned): any GGUF via `--model-repo` / `--model-file`, draft + vision opt-in, `--gpu` takes any card the org lists.
+  
   - `deploy_ampere.py` — the llamAmpere **fork** build (`lmss_generic_ampere`, turbo5/turbo4 KV): the ATX-Swift production profile is the built-in default (full 132768 ctx on an RTX 3090), `--gpu` limited to the org's sm_86 30-series cards.
+  
   - `deploy_qwen38_9b.py` / `deploy_qwen9b.py` — plain 9B (no draft/vision/template).
+  
   - All five take `--idle-shutdown none|idle|heartbeat` (+ `--idle-timeout` / `--heartbeat-timeout`, default 600 / 300 s; **`--stop-key <file>`** = the account-wide per-user Salad API key — group-scoped keys don't exist — stored b64-obfuscated in the group env): the in-container `idle_watchdog.py` arms on the group `/ready` endpoint, holds `IDLE_ARM_GRACE`, then **POSTs the group `/stop`** and SIGTERMs — the only kill that truly stops billing (a bare self-exit gets RESCHEDULED, not stopped — paid test 2026-10-09; key `none`/missing **disables the watchdog**, the deployers warn). Clients ping via `SALAD_HEARTBEAT=1` (1-token call every 30 s; `cl_salad_deploy` auto-detects it from the group env). `--ssh-guard 1` (default): while `/.ssh` exists in the container the watchdog holds off its stop and the bandwidth arbitrator spends no reallocate shot — `touch /.ssh` after logging in over SSH, `rm /.ssh` on the way out.
+  
 - `utils/` — operational helpers (see `utils/README.md`):
   - `utils/llama_stats.py` — host entry point for llama-server stats (generation/prompt tps, queue, token totals, spec-decode) scraped from `/metrics`. Run it from the host against a Salad gateway URL (Salad key auto-loaded from `deploy/salad_api.txt`) or any local server: `python3 utils/llama_stats.py https://<group>.salad.cloud [--raw] [--once | --interval N]` (defaults to a 5s loop). Implementation lives in `docker/llama_stats.py` (must be inside the build context); the in-container wrapper `stats.sh` is installed in the image by `Dockerfile.multistage`, aliased there as **`llama-stats`** (local-only stats, works over Salad's shell-less SSH exec: `ssh -p PORT root@IP llama-stats --once`).
+  
   - `utils/billing.py` — per-org Salad portal credit balances (USD + live EUR column). The public API has no billing operation, so it logs into the portal backend with credentials from `utils/portal_vault.gpg` (GPG AES256, gitignored; passphrase via `$PORTAL_VAULT_PASS` or prompt). First run creates the vault: prompts for email/password/org slugs and verifies the login before encrypting.
   - `utils/manage_groups.py` — group manager for every known org/project: `list` (default, status table with age/uptime, instance counts, gateway URLs, SSH lines for running groups), `refresh` (live re-render, Ctrl-C), `start` (bills), `stop`, `wait` (poll one group until an instance reports ready), `stats` (llama-server stats — only when the group is fully ready: running, all replicas present, all instances `ready`; otherwise prints the state and exits 1), `delete` (typed-name confirm; leaves a name tombstone). Actions pick a group from a numbered table by # or name.
+  
   - `start --min-bw-mbps N` — **bandwidth arbitrator** (default cap 30): after the start, the manager reads the in-container `bw_reporter` log over SSH (`/tmp/llama-api/bw.log`, `epoch bytes` of `MODEL_DIR` every 10 s) and takes the median HF-download rate. Below the cap it POSTs the instance `/reallocate` endpoint — Salad places the group on a **new node** and excludes the rejected one from the account pool for 48 h, so every shot is a genuinely new host. Max **3 reallocations**; if no faster host turns up in 3 shots the **4th host is kept** and the download continues. The group is **never stopped** for bandwidth (a row of slow nodes would make a stop/start loop). Needs the bw_reporter images (base/generic `cuda128-v8`, q6 `cuda128-v10`, ampere `cuda130-v6`); Ctrl-C leaves the group running as-is.
+  
 - `docker/` — image builds (`Dockerfile.multistage` + baked `Dockerfile.lmss_q6_mtp_vision` + model-agnostic `Dockerfile.lmss_generic`), local compose (27B + 9B services), plus `check_status.sh` / `version.sh` / `stats.sh` (in-container stats via `/metrics`) / `bw_reporter.py` (HF-download bandwidth sampler feeding the arbitrator). Images also ship `ping` (needs `CAP_NET_RAW`), `scp` (via `openssh-client`) and `llama-stats`. See `docker/README.md`.
+
 - `tests/` — local run/test helpers for the compose services: `run_27b.sh` / `run_9b*.sh` (they cd into `docker/` themselves), `curl1.sh` / `curl2.sh` (API check / question→answer, read the key through a local `api.txt` symlink), `run-nvidia-smi.sh` (one-shot GPU info).
+
 - `claude/` — the Claude Code ↔ Salad gateway stack: `cl_salad` / `cl_salad_deploy` + `salad_proxy.py` (Anthropic↔OpenAI bridge), gateway test helpers (`curl_salad.sh`, `chat_salad.sh`), and the gateway `salad_api.txt`. See `claude/README.md`.
+
+## Most useful 
+
+After you've created organisation your_organisation (and projects, projects can't be created via api), you would 
+1) create a group in your_organizaion via cl_salad_deploy or one of deploy scripts
+2) fire manage_groups.py start your_organisation --min-bw-mbps 100
+   (it will show urls of groups)
+3) fire claude or chat via cl_salad url_of_group_on_salad 
+
+
