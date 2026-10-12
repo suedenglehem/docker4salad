@@ -1259,7 +1259,8 @@ stopped at 01:15Z; all 7 fleet groups are now stopped at $0.
 ## 17. Recent git history (context for what each commit did)
 
 ```
-57de156 cl_salad: verify OUR proxy owns the local port (nonce echoed on /healthz) — a second session exits 3 instead of hijacking the first session's proxy; + deploy/README.md command lines
+84f1de3 README: the "Most useful" 3-step flow (create group → manage_groups.py start --min-bw-mbps → cl_salad <dns>) + docker4salad docker/README.md link + auto-stop warning (user's own wording)
+2a5ed08 cl_salad: verify OUR proxy owns the local port (nonce echoed on /healthz) — a second session exits 3 instead of hijacking the first session's proxy; + deploy/README.md command lines
 8443c93 tools/: promote durable tooling out of gitignored tmp/ — §14 paths now resolve on a fresh clone; one-shot attempt artifacts deleted; test_deploy_offline + fleet_status_now de-staled
 bd6d612 docs: PROGRESS.md — mycelium fold for cold-start on another box (attempt-3 outcome, §9i in-flight truncated-digest API gotcha, nproc trap, arbitrate_attach/reboot-lesson, §16 ref)
 49e8585 docs: PROGRESS.md — v2.5 set current (xet fix shipped to the fleet), 870bc05 in history
