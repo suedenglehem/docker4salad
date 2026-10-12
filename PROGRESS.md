@@ -15,13 +15,35 @@
 >
 > **Two hosts share this repo path** but it is NOT shared storage: the primary box
 > mounts `/dd2` on `/dev/sdi1`, tr4 mounts it on `/dev/sdb1` — separate copies.
-> tr4 does **not** hold the built Docker images (only 2 unrelated ones); the
-> images live on Docker Hub + the primary box.
+> **Image custody (corrected 2026-10-12):** tr4 built the v2.3/v2.4/v2.5 sets and
+> DOES hold them locally; the primary box built up to the v2.2 set. Work moved
+> back to the primary box on 2026-10-12 — the v2.5 set was **copied from tr4**
+> (`ssh tr4 'docker save … | pigz' | pigz -d | docker load`, §4) rather than
+> rebuilt: ~11 s per image on the LAN, and the loaded IDs match the Hub digests
+> exactly. All four images + the Hub + both boxes now carry the v2.5 set.
 
 ---
 
-## 0. TL;DR — state as of 2026-10-11
+## 0. TL;DR — state as of 2026-10-12
 
+- **Work is back on the PRIMARY box** (`i714700k`, `/dd2` on `/dev/sdi1`, 28 CPUs;
+  builds here use `--build-arg BUILD_JOBS=4` per the user). The v2.5 image set was
+  **copied from tr4** rather than rebuilt (`tools/copy_images_from_tr4.sh`:
+  `ssh tr4 'docker save … | pigz' | pigz -d | docker load`) — loaded IDs match the
+  Hub digests exactly, ~11 s/image. The nproc trap (`nproc`=1) is present on this
+  box too. **DONE 2026-10-13 — §15 item 3 (prod ATX ctx) VERIFIED.** The prod group
+  was recreated as `llm/atx-swift-27b-q5-med` at **priority=medium** (the old
+  `atx-swift-27b-q5-opt` was `priority=low`; priority is CREATE-only, §9k), started
+  by the user through the **bandwidth arbitrator** (`--min-bw-mbps 100`, its first
+  live run — it reallocated once, §15 item 3), and verified two ways: llama-server
+  **argv has `--ctx-size 132768`**, and **`/slots` serves `n_ctx` = 132864**
+  (23067/24576 MiB VRAM). Two gotchas fell out of it: the served ctx is on
+  **`/slots`, not `/metrics`** (§9l), and the group access URL is
+  **`networking.dns`**, not a top-level `endpoint` (§9j — that bug ate the first
+  paid start). **Both ATX prod groups were then deleted (2026-10-13, user) — nothing
+  in `llm` is running and no ATX prod group exists**; the verified config is the
+  `deploy_ampere.py` defaults, so recreating is free. The arbitrator's first live run
+  reallocated once and worked (§15 item 3).
 - **Latest image set = v2.5 (bw-reporter v2 / xet fix), fleet re-PATCHed
   7/7.** The bandwidth reporter now reads the kernel NIC RX counter (the
   exact counters `bmon` reads) and logs `epoch rx-bytes model-bytes` —
@@ -31,7 +53,7 @@
   digests base `0586ba35…`, generic `2fc912ae…`, q6 `a779732c…`, ampere
   `28417137…`; FROM re-pins + all 5 deployer re-pins done. Fleet PATCH 7/7
   `200 OK` (env byte-identical, no starts); propagation verified read-only
-  via `tmp/poll_images_v12.py`.
+  via `tools/poll_images_v12.py`.
 - **Latest feature = the guard's 20-minute hard cap (watchdog v2.3),
   live-smoked 2026-10-11 — FULLY PASSED, user-confirmed ("watchdog cap-kill
   worked").** The SSH-presence guard (v2.2, commit `e115dc6`) has a hard cap:
@@ -246,10 +268,10 @@ arbitrator. Both shot branches (pull-stuck + slow-download) are gated by it.
 pre-guard images), and **`--heartbeat-timeout` default raised to 300** (was 600;
 the client pinger fires ~every 30 s so 300 s = a comfortable margin).
 
-**Tests.** Arbitrator offline harness **23/23** (`tmp/test_arbitrator_offline.py`,
-scenarios 14–17 cover the guard; `tmp/fakebin/ssh` dispatches the bw probe vs the
+**Tests.** Arbitrator offline harness **26/26** (`tools/test_arbitrator_offline.py`,
+scenarios 14–17 cover the guard; `tools/fakebin/ssh` dispatches the bw probe vs the
 guard probe by the last argv token). Watchdog offline suite **7/7**
-(`tmp/test_watchdog_offline.py`, rewritten for v2.3: held-off while `/.ssh`
+(`tools/test_watchdog_offline.py`, rewritten for v2.3: held-off while `/.ssh`
 present, `rm`→kill, absent→kill, `SSH_GUARD=0`→kill, uncapped (`SSH_GUARD_MAX_HOLD=0`)
 + guard forever → never kills, default cap 1200 + guard forever → cap-kill,
 activity-bump resets the clock, cap=160 → early cap-kill). Both run with
@@ -259,7 +281,8 @@ activity-bump resets the clock, cap=160 → early cap-kill). Both run with
 (`--no-start`; `qwen38-9b` via direct `update_container_group`) with
 `HEARTBEAT_TIMEOUT=300` + `SSH_GUARD=1`, images untouched at that step, and the
 result settled (`pending_change=False` on all 7, confirmed by live GET).
-Snapshot diff lives in `tmp/fleet_env_{before,after}.json`. The two
+Snapshot diff was taken in `tmp/fleet_env_{before,after}.json` (scratch, since
+cleaned up — the verdict is the text below, that is the record). The two
 heartbeat-armed groups kept their armed mode + real stop keys; the five
 `IDLE_SHUTDOWN=none` groups got `IDLE_GRACE=1800` (neutral, the baked default).
 
@@ -327,10 +350,18 @@ the generic/q6/ampere Dockerfiles `COPY docker/version.sh` → the build context
 MUST be the **repo root**, and on tr4 the working invocation is
 `cd <ctxdir> && docker build -f <Dockerfile> .` (a relative `-f` + separate
 context arg trips this host's buildx arg-parsing); only `Dockerfile.multistage`
-takes the `docker/` subdir as context. **Host gotcha:** on tr4 `nproc`
-misreports **1** (`/proc/cpuinfo` shows 32 real CPUs) — always pass
-`--build-arg BUILD_JOBS=32` explicitly; never trust an auto-detected job count.
-(docker 29.7.2 / buildx v0.36.1 as of the v2.5 cycle.) After **every push**, set the repo
+takes the `docker/` subdir as context. **Host gotcha (BOTH boxes):** `nproc`
+misreports **1** on tr4 (`/proc/cpuinfo` shows 32 real CPUs) **and on the primary
+box** (verified 2026-10-12: `nproc`=1, `/proc/cpuinfo` 28 × i7-14700K, affinity
+mask 0-27, no readable cgroup v2 `cpu.max`) — always pass
+`--build-arg BUILD_JOBS=N` explicitly; never trust an auto-detected job count.
+The user's instruction for builds on the primary box is **4 CPUs**
+(`--build-arg BUILD_JOBS=4`). (docker 29.7.2 / buildx v0.36.1 as of the v2.5 cycle.)
+**Copying beats rebuilding** when the images already exist on the other box:
+`ssh andrei@tr4 "docker save <ref> | pigz -p 8" | pigz -dc | docker load` — one
+image per pipe (a break costs one image, not the set), no temp tarballs, ~11 s
+per image on the LAN (`tools/copy_images_from_tr4.sh` verifies each loaded ID
+against the expected Hub digest prefix). After **every push**, set the repo
 `full_description` overview (standing rule, §11 — verified this round: all 4
 repos already carry it, no PATCH needed).
 
@@ -469,7 +500,7 @@ on stdout, after the ls error markers are checked on the combined
 streams** — the relay's stderr-into-stdout merge (§9f) made the original
 substring check match its own error text and hold forever. Requires an image with `bw_reporter` (base v8+/generic v8+/q6 v10+/
 ampere v6+; current guard set all have it). Offline harness:
-`tmp/test_arbitrator_offline.py` + `tmp/fakebin/ssh`, run with `python3 -I`.
+`tools/test_arbitrator_offline.py` + `tools/fakebin/ssh`, run with `python3 -I`.
 **Naming:** it is the **arbitrator** (the user rejected "arbiter").
 
 ---
@@ -493,10 +524,47 @@ rtx3090/3090ti/3080/3080ti — the fork ships sm_86+89 cubins only, **no rtx5090
 default quant** (10/12 GB) — only 24 GB cards do. **New ATX 27B groups deploy via
 `deploy_ampere.py`, not the vanilla generic.**
 
-**Prod group** `atx-swift-27b-q5-opt` (ma-casa-in-paris/llm, alias
-`atx-swift-27b-opt`): user-tested OK 2026-10-07, then stopped. **Pending verify
-at next start:** scrape `/metrics` for `llama_model_n_ctx` (expect **132864** =
-132768 rounded up to a 128-block). The spec CTX is 132768 (confirmed in §2).
+**Prod group — DELETED 2026-10-13** `atx-swift-27b-q5-opt` (ma-casa-in-paris/llm,
+alias `atx-swift-27b-opt`): user-tested OK 2026-10-07, then stopped. Its
+medium-priority successor `atx-swift-27b-q5-med` was deleted the same day, so
+**no ATX production group exists now** — `llm` keeps the 90K A/B baseline
+`atx-swift-27b-q5`. Restore = a bare `deploy_ampere.py --no-start` run with a fresh
+group name (free; the paid start is the user's call). **CTX VERIFIED
+2026-10-13** on the recreated `atx-swift-27b-q5-med`: argv carries
+`--ctx-size 132768` and **`/slots` reports slot 0 `n_ctx` = 132864** (132768 rounded
+up to a 128-block) at 23067/24576 MiB VRAM. §15 item 3 closed; §9l for the method.
+**`atx-swift-27b-q5-med` was then deleted (user's instruction, 2026-10-13, billing
+off), so the surviving prod group is `atx-swift-27b-q5-opt` — stopped, and still
+`priority=low`.** To restore the verified medium-priority group: a bare
+`deploy_ampere.py --no-start` run (free; use a fresh name — `…-med` is tombstoned),
+then the paid start.
+
+**2026-10-12 paid attempt #1 (no verdict, ~18 min burned).** Started 23:14:06Z,
+instance `25976502` reached `ready=True` at 23:25:38Z (pull 100 %), and the scrape
+never ran: `tmp/verify_atx_ctx.py` read `g["endpoint"]` → `None` → exit 4. **The
+access URL is `networking.dns`** (`damson-pepper-erau5a722gxf2qm2.salad.cloud`);
+this API version has no top-level `endpoint`. The group then stopped at 23:31:54Z
+before any scrape. Stop cause UNKNOWN from the API (`cs.description` empty,
+container torn down, no `watchdog.log` survives): the watchdog is ruled out
+(`IDLE_GRACE=1800` ⇒ earliest arm-kill ~23:55) and the readiness probe is ruled
+out (ready passed inside its ~40-min window). Leading candidate: **preemption —
+the live group was `priority="low"`** while `deploy_ampere.py` defaults to
+`medium` (`:225`; `:219` documents that low/batch are evicted when higher-priority
+work lands). `priority` is CREATE-only, so it cannot be PATCHed.
+**Bonus from this run:** the v2.5 3-column bw reporter got its first live wire
+verification — `bw.log` rows `epoch rx-bytes model-bytes`, ~520 Mbps with
+16.58 GB of model bytes (§15 item 2's "never live-verified" is closed).
+
+**Recreation (2026-10-12, free — create does not bill):** `llm/atx-swift-27b-q5-med`,
+`MODEL_ALIAS` unchanged (`atx-swift-27b-opt`), new DNS
+`fig-mushroom-udsq8tht4a4zy4qw.salad.cloud`. Built by a bare
+`deploy_ampere.py --project llm --group atx-swift-27b-q5-med --idle-shutdown
+heartbeat --stop-key deploy/salad_api.txt --no-start`; env diffed live against the
+prod group — **22 keys, only `NAME` and `SALAD_GROUP` differ** (resources, image,
+readiness probe and networking all identical; `--reasoning-format none` stripped by
+`strip_none_value_args` as intended). Intended deltas: **`priority=medium`** and
+`restart_policy=never` (armed watchdog; the old group carried `always` because it
+was created unarmed and later PATCHed). Fresh name dodges the delete tombstone.
 
 **Image history** (all tags except current are deleted from Hub; deployer
 comments are reference-only): v3 `7b5882f9` (the exec-form `entry.sh` CMD fix —
@@ -662,11 +730,42 @@ while a re-pin is still propagating the API may hand back **only a truncated
 bare `sha256:<12>`** (e.g. `sha256:a7797` — no repo prefix, no full hash). A
 landing poller that compares whole strings — or bare-digest equality — never
 matches and waits forever on a value that will never equal the target: the v2.5
-landing poller (`tmp/poll_images_v12.py`) sat at **0/7 for 12 minutes** on this
+landing poller (`tools/poll_images_v12.py`) sat at **0/7 for 12 minutes** on this
 bug, not on real propagation. Rule: strip everything before `sha256:`, compare
 the full 64-hex digest, and treat a 12-char bare digest as "still in-flight",
 not as a mismatch. (Distinct from §9e's stale/transitional GETs — this GET is
 live, just in a transient format.)
+
+**9l. Served context is `/slots`, NOT `/metrics`.** This llama.cpp build's
+`GET :8080/metrics` exposes counters (`prompt_tokens_total`,
+`tokens_predicted_total`, `n_decode_total`, `n_tokens_max`, spec-decode counters)
+plus the `n_busy_slots_per_decode` gauge — **there is no `n_ctx` gauge at all**, and
+`GET /props` is trimmed to UI keys (no `params`, no `slots`, no `n_ctx`). The served
+context is on **`GET :8080/slots`** → per-slot `n_ctx` (verified 2026-10-13:
+`132864` for `CTX_SIZE=132768`). The canonical `utils/llama_stats.py` prints only
+what `/metrics` has, so it can never show ctx. Over the relay:
+`curl -s http://127.0.0.1:8080/slots` (curl IS in the ampere image; `wget` is not,
+and `ps` is not — no procps, so find the pid with
+`nvidia-smi --query-compute-apps=pid --format=csv,noheader`, then
+`cat /proc/<pid>/cmdline` and `tr '\0' ' '` **on our side**, §9f).
+
+**9j. The group ACCESS URL is `networking.dns`. There is NO top-level `endpoint`.**
+`GET /container-groups/{org}/{proj}/{group}` returns
+`networking: {dns: "<name>.salad.cloud", port: 8888, auth: true, …}` and **no**
+`endpoint` key (reads `None`). Scrape the gateway at `https://<dns>` (443,
+Cloudflare-fronted — `8888` is the port INSIDE the container, not reachable).
+This cost a whole paid start on 2026-10-12: the verifier polled to `ready=True`,
+read `g["endpoint"]`, got `None`, and exited without scraping. Prefer an SSH
+fallback for spec facts (`curl -s http://127.0.0.1:8080/metrics` — the relay is
+shell-less, one plain command, exits 1 even on success: judge by payload, §9f).
+
+**9k. `priority` is CREATE-only, and `low` is preemptible.** `priority` and
+`restart_policy` cannot be PATCHed — to change them, delete and recreate (fresh
+name, §9c). A `low` group is placed best-effort and **evicted whenever
+higher-priority work lands**; the live prod ATX group was `priority=low` while
+`deploy_ampere.py` defaults to `medium` (`:225`), because it was created before
+the flag existed. A ~18-min paid run ending in an unexplained stop is the
+signature. Recreated 2026-10-12 as `llm/atx-swift-27b-q5-med` @ `medium`.
 
 ---
 
@@ -763,17 +862,24 @@ on_salad/
 ├─ .clinerules/salad-api.md      Salad API notes for the Cline agent.
 ├─ tests/                        one-off curl/run scripts (curl1.sh, curl2.sh, run_*.sh).
 ├─ llama.cpp/                    vendored llama.cpp checkout (submodule-ish, 31 dirs).
-└─ tmp/                          (gitignored) scratch + OFFLINE TESTS:
-   ├─ test_arbitrator_offline.py  23/23 arbitrator scenarios (+ tmp/fakebin/ssh shim).
-   ├─ test_watchdog_offline.py    4/4 watchdog guard scenarios.
-   ├─ test_deploy_offline.py      deployer dry-run checks.
-   ├─ fleet_status_now.py         read-only fleet status+guard snapshot (§14).
-   ├─ fleet_snapshot.py           broader read-only snapshot.
-   ├─ patch_images_v9/v10/v11/v12.py   image-only fleet re-pin per cycle (v9=guard, v10=v2.3, v11=v2.4, v12=v2.5).
-   ├─ poll_images_v12.py          read-only landing poller for the v2.5 re-pin (§9i).
-   ├─ arbitrate_attach.py         attach the arbitrator to an ALREADY-started group (atx-hb-test2 hardcoded; optional cap-mbps argv, default 30; no second start POST) — the clean re-attach path.
-   ├─ patch_9b.py / patch_qwen38_9b_rescue.py   9B group PATCH helpers.
-   └─ smoke_test_{start,stop}_cg.py   group start/stop smoke helpers.
+├─ tools/                        **TRACKED tooling** (promoted from tmp/ 2026-10-13, so the
+│  │                              paths §14 cites resolve on a fresh clone — tmp/ is gitignored):
+│  ├─ test_arbitrator_offline.py  26/26 arbitrator scenarios (+ fakebin/ssh PATH shim).
+│  ├─ test_watchdog_offline.py    7/7 watchdog scenarios (v2.3 guard + cap).
+│  ├─ test_deploy_offline.py      deployer offline checks (GPU resolution, request validation).
+│  ├─ fakebin/ssh                canned-ssh shim the arbitrator harness runs as `ssh`.
+│  ├─ fleet_status_now.py        read-only fleet status+guard snapshot (§14); 404 → `GONE`.
+│  ├─ fleet_snapshot.py          broader read-only snapshot.
+│  ├─ patch_images_v9/v10/v11/v12.py   image-only fleet re-pin per cycle (v9=guard, v10=v2.3, v11=v2.4, v12=v2.5).
+│  ├─ patch_9b.py / patch_qwen38_9b_rescue.py   9B group PATCH helpers.
+│  ├─ poll_images_v12.py         read-only landing poller for the v2.5 re-pin (§9i).
+│  ├─ build_push_v24/v25.sh      build→push→digest-capture→Hub-overview chains (v2.4 / v2.5).
+│  ├─ hub_describe.py            Docker Hub `full_description` PATCH — REQUIRED after every push (§11).
+│  ├─ copy_images_from_tr4.sh    images tr4 → this box (`docker save | pigz` over ssh, verifies loaded IDs).
+│  └─ watch_ready.py             read-only readiness watcher; prints transitions, incl. NEW INSTANCE when a /reallocate lands (§6).
+└─ tmp/                          (gitignored) scratch: arbitrate_attach.py, arb_watch.py, guard_probe.py,
+                                  check_images_v11.py, smoke_test_{start,stop}_cg.py, _grpimg.json,
+                                  post.txt (the ATX operating point — deployer-defaults provenance), logs.
 ```
 Key file line counts (2026-10-10): `manage_groups.py` 942, `salad_client.py` 875,
 `salad_proxy.py` 698, `deploy_ampere.py` 725, `deploy_generic.py` 697,
@@ -811,7 +917,7 @@ Do **not** print or commit any of these. Reference by path only.
 cd /dd2/andrei/docker/on_salad
 
 # READ-ONLY fleet status + guard posture (no writes, no cost):
-python3 -I tmp/fleet_status_now.py
+python3 -I tools/fleet_status_now.py
 
 # List / wait / stats groups (key from deploy/salad_api.txt, never printed).
 # The 2nd positional is the ORG (ma-casa-in-paris or akl-on-salad) — `llm` is a
@@ -831,11 +937,33 @@ python3 deploy/deploy_ampere.py     --project llm --group atx-swift-27b-q5-opt -
     --idle-shutdown heartbeat --stop-key deploy/salad_api.txt --idle-grace 3600
 python3 deploy/deploy_qwen38_27b.py --project qwen38-27b --group qwen38-27b-q5 --no-start
 # NOTE: qwen38-9b's deployer is CREATE-ONLY — PATCH it via salad_client.update_container_group
-#       (see tmp/patch_9b.py / tmp/patch_qwen38_9b_rescue.py).
+#       (see tools/patch_9b.py / tools/patch_qwen38_9b_rescue.py).
 
-# Image-only fleet re-pin (env untouched):  python3 -I tmp/patch_images_v9.py  (--dry-run ok)
+# Image-only fleet re-pin (env untouched):  python3 -I tools/patch_images_v9.py  (--dry-run ok)
 
-# Build + push an image (primary box, 24-way). Base first, then derivatives:
+# RECREATE a group to change a CREATE-only field (priority / restart_policy are NOT
+# PATCHable): fresh name (dodges the delete tombstone — §9), MODEL_ALIAS unchanged,
+# --no-start (CREATE is free; only START bills). Diff the env against the old group
+# before starting anything:
+python3 -I deploy/deploy_ampere.py --project llm --group atx-swift-27b-q5-med \
+    --idle-shutdown heartbeat --stop-key deploy/salad_api.txt --no-start
+# Then the PAID start is the USER's call (manage_groups.py start … --min-bw-mbps 100).
+# VERIFY THE SERVED CONTEXT (the /metrics n_ctx gauge does NOT exist in this build — §9l):
+#   argv is the proof, and the image has no procps, so over the shell-less relay (§9f),
+#   ONE plain command per call (the relay exits 1 even on success — judge by payload):
+ssh root@<ip> -p <port> 'nvidia-smi --query-compute-apps=pid --format=csv,noheader'
+ssh root@<ip> -p <port> 'cat /proc/<pid>/cmdline'      # tr '\\0' ' ' on OUR side
+curl -s https://<dns>/slots                            # per-slot n_ctx (132768 -> 132864)
+
+# The group ACCESS URL is `networking.dns` (https://<dns>, port 443 — Cloudflare).
+# There is NO top-level `endpoint` field on this API version (it reads None).
+
+# Copy the v2.5 set from tr4 into this box's docker store (cheaper than a rebuild;
+# streams save|pigz over ssh, verifies each loaded ID == the Hub digest prefix):
+bash tools/copy_images_from_tr4.sh
+
+# Build + push an image (primary box: --build-arg BUILD_JOBS=4 — the user's cap;
+# tr4: 32. nproc lies (says 1) on BOTH boxes). Base first, then derivatives:
 docker build -f docker/Dockerfile.multistage        docker/  --build-arg BUILD_JOBS=24 -t boris271142/lmss:cuda128-vN .
 docker build -f docker/Dockerfile.lmss_generic       .       --build-arg BUILD_JOBS=24 -t boris271142/lmss_generic:cuda128-vN .
 # (derivatives' context MUST be repo root — they COPY docker/version.sh)
@@ -846,9 +974,9 @@ ssh root@<ip> -p <port> 'tail -40 /tmp/llama-api/watchdog.log'   # ONE plain cmd
 # the GUARD:  touch /.ssh  (when you log in)   /   rm /.ssh  (when you leave)
 
 # Offline tests (python3 -I to avoid site shadowing):
-python3 -I tmp/test_watchdog_offline.py
-python3 -I tmp/test_arbitrator_offline.py
-python3 -I tmp/test_deploy_offline.py
+python3 -I tools/test_watchdog_offline.py
+python3 -I tools/test_arbitrator_offline.py
+python3 -I tools/test_deploy_offline.py
 ```
 
 **Verify a live image in-container** (over the SSH relay): run `version.sh` (the
@@ -907,8 +1035,8 @@ stopped at 01:15Z; all 7 fleet groups are now stopped at $0.
      evidence to the second + user confirmation stand in for it. If a future
      re-smoke is ever wanted, arm the capture watcher from t=0: background
      launches can be delayed here, so verify the watcher's "armed" timestamp
-     before trusting it.) Offline suites — watchdog 7/7, arbitrator 23/23 —
-     green.
+     before trusting it.) Offline suites — watchdog 7/7, arbitrator 26/26,
+     deploy green (re-run 2026-10-13 from `tools/`, all green).
 2. **Paid arbitrator live test:** `python3 utils/manage_groups.py start
    ma-casa-in-paris --min-bw-mbps 10000` (atx-hb-test2, user-run) — watch it
    `POST /reallocate` on a slow download (≤3 shots). §6. **Status 2026-10-11
@@ -983,11 +1111,52 @@ stopped at 01:15Z; all 7 fleet groups are now stopped at $0.
    un-pasted.
 3. **Verify prod ATX context:** at the next start of `atx-swift-27b-q5-opt`,
    scrape `/metrics` and confirm `llama_model_n_ctx = 132864` (spec CTX is 132768).
-   §7.
+   §7. **Attempt #1 2026-10-12: ready reached, no scrape** (my `endpoint`-field
+   bug; URL is `networking.dns`), group stopped 23:31:54Z, cause unknown with
+   `priority=low` preemption as the leading candidate. Script fixed (dns + SSH
+   `:8080/metrics` fallback + start-retry for a fresh `pending` group); attempt #2
+   runs on the recreated **`atx-swift-27b-q5-med`** (priority=medium).
+   **Attempt #2 2026-10-13: placed fast (pull 100 % at 142 s — ampere v10 already
+   cached on machine `702ff4d9`), then the USER stopped it for slow network**
+   (verifier killed; no verdict, no argv capture). Next start is the arbitrator's
+   occasion, per the user: `manage_groups.py start ma-casa-in-paris
+   --min-bw-mbps 100`. Verification is then two facts, in this order: (1) the
+   llama-server **argv** over SSH — `nvidia-smi --query-compute-apps=pid
+   --format=csv,noheader`, then `cat /proc/<pid>/cmdline | tr '\0' ' '` (the ampere
+   image has NO procps, so `ps` is absent, and the relay is shell-less: post-process
+   on OUR side); (2) the `llama_model_n_ctx` gauge as the served-value confirmation.
+   With `--fit off` baked in the CMD, llama.cpp does not shrink ctx to fit — a KV
+   that does not fit fails at allocation — so "server up + `--ctx-size 132768` in
+   argv" is essentially conclusive on its own.
+
+   **DONE 2026-10-13 — VERIFIED (attempt #3, arbitrator start, user-launched
+   `manage_groups.py start ma-casa-in-paris --min-bw-mbps 100`):** the arbitrator
+   ran live for the first time and **reallocated once** (instance `4c86e5f3` @
+   `87804ed4` → `700ecc4a` @ `7429adb8`, 00:37:17Z); ready 00:49:03Z. Two proofs:
+   (1) **argv** (the user's `ps` method, via `nvidia-smi` pid → `/proc/399/cmdline`):
+   `--ctx-size 132768`, `--chat-template-file /tmp/llama-api/claude_chat_template.jinja`,
+   `--cache-type-k turbo5 --cache-type-v turbo4 --kv-unified --fit off --cache-ram 4096`,
+   `--spec-type draft-mtp` + `--spec-draft-vocab-map …/atx_65536.txt`, `--n-gpu-layers 99`,
+   `--threads 8`, and the EXTRA_ARGS tail applied last-wins (`--spec-draft-n-max 3`
+   over the baked 5, `--temp 0.2 --top-k 40 --repeat-penalty 1.08 --repeat-last-n 256`).
+   (2) **served ctx: `/slots` → slot 0 `n_ctx` = 132864** — exactly 132768 rounded up
+   to a 128-block. VRAM 23067/24576 MiB (1.5 GiB headroom — the 132K turbo KV fits a
+   3090, as designed). **Method correction: this llama.cpp build's `/metrics` has NO
+   `n_ctx` gauge** (counters + `n_busy_slots_per_decode` only) and its `/props` is
+   trimmed (no `params`/`slots` keys) — the served context is **`/slots`**, §9l.
+   **Aftermath:** the group ran ~19 min past ready WITHOUT self-stopping despite
+   `HEARTBEAT_TIMEOUT=300` — consistent with the **SSH guard** holding the watchdog
+   (`SSH_GUARD=1`, `SSH_GUARD_MAX_HOLD=1200` = 20 min cap) during the user's relay
+   session; NOT proven (the container was torn down before the log was read — read
+   `watchdog.log` BEFORE stopping next time). Then stopped + DELETED on the user's
+   instruction (billing off; `atx-swift-27b-q5-med` is 404, name tombstoned ≥10 min).
+   The verified config is not lost: it IS the `deploy_ampere.py` defaults, so a bare
+   `--no-start` run recreates it free (the paid start stays the user's call).
+   `atx-swift-27b-q5-opt` survives, stopped, at **priority=low**.
 4. **DONE (2026-10-11):** the v2.3 set (base v10 / generic v10 / q6 v12 /
    ampere v8) is re-pinned across the fleet — all 7 groups image-only PATCHed
    (env asserted byte-identical before/after, no starts;
-   `tmp/patch_images_v10.py`). The first paid start of each group runs v2.3.
+   `tools/patch_images_v10.py`). The first paid start of each group runs v2.3.
 5. **DONE (2026-10-11) — v2.4 shell-ergonomics cycle (build + push + re-pins
    + fleet re-PATCH, all verified).** Root cause: the Salad ssh relay execs a
    bare `/bin/bash` on a pty with `TERM=xterm` (breaks nvtop/htop: "Error
@@ -996,17 +1165,17 @@ stopped at 01:15Z; all 7 fleet groups are now stopped at $0.
    stage: `export TERM=xterm-256color` + aliases `nv/ht/gpu/wlog/alog/ready/
    als/ll/la/l/h` appended to /root/.bashrc in `Dockerfile.multistage` and
    `Dockerfile.lmss_generic_ampere`; generic/q6 inherit via their FROM
-   re-pin. `tmp/build_push_v24.sh` (32 jobs, sequential: base cuda128-v11 →
+   re-pin. `tools/build_push_v24.sh` (32 jobs, sequential: base cuda128-v11 →
    generic cuda128-v11 → q6 cuda128-v13 → ampere cuda130-v9) built + pushed
    in **~14 min** (WARM layer cache from the v2.3 cycle — only the .bashrc
    RUN block and later layers rebuilt; corrects §4's "no cache" assumption
    for this build form). Hub digests (digest-verified from push output):
    base `2bfbd69c…`, generic `888fc401…`, q6 `f6e3b9d0…`, ampere
-   `d4f4b030…` (full digests in `tmp/build_push_v24.sh` output + the
+   `d4f4b030…` (full digests in `tools/build_push_v24.sh` output + the
    deployers). Both derivative FROMs re-pinned mid-flight (match count 1
    each); the **5 deployer IMAGE constants** re-pinned to the new Hub digests
    (old digests kept in the history comments). Fleet re-PATCH **7/7 `200 OK`**
-   via `tmp/patch_images_v11.py` (env asserted byte-identical before/after,
+   via `tools/patch_images_v11.py` (env asserted byte-identical before/after,
    **no starts**). **Propagation is ASYNC**: the immediate re-GET shows the
    OLD digest and a re-PATCH 400s `pending_update_in_progress` even while the
    group GET's `pending_update_in_progress` field is falsy — so verify with
@@ -1085,6 +1254,9 @@ stopped at 01:15Z; all 7 fleet groups are now stopped at $0.
 ## 17. Recent git history (context for what each commit did)
 
 ```
+20abaa3 tools/: promote durable tooling out of gitignored tmp/ — §14 paths now resolve on a fresh clone; one-shot attempt artifacts deleted; test_deploy_offline + fleet_status_now de-staled
+bd6d612 docs: PROGRESS.md — mycelium fold for cold-start on another box (attempt-3 outcome, §9i in-flight truncated-digest API gotcha, nproc trap, arbitrate_attach/reboot-lesson, §16 ref)
+49e8585 docs: PROGRESS.md — v2.5 set current (xet fix shipped to the fleet), 870bc05 in history
 870bc05 images: v2.5 set pushed (base/generic v12, q6 v14, ampere v10) — bw_reporter v2 kernel-RX (xet fix) + re-pins
 06ed2ba docs: PROGRESS.md — xet root cause + RX-counter fix (55aac06), drop-test ended ($0), open item 6 resolved, history backfilled
 55aac06 bw: measure from the kernel RX counter, not MODEL_DIR growth (xet fix)

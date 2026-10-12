@@ -1,0 +1,66 @@
+#!/usr/bin/env python3
+"""Fake `ssh` for the offline arbitrator harness (PATH shim, tools/fakebin).
+
+manage_groups probes the container with exactly ONE plain command per call:
+  `ssh <opts> -p PORT root@IP tail -n 80 /tmp/llama-api/bw.log`   (bandwidth)
+  `ssh <opts> -p PORT root@IP ls   /.ssh`                         (ssh guard)
+This shim answers from a canned scenario instead of any network, DISPATCHING
+on the last argv token (the probed path) so the two probes can carry
+independent sequences — the arbitrator makes both per shot (the ssh-presence
+gate reads bw.log for the newest epoch, then probes the /.ssh guard file).
+
+Scenario file (env FAKE_SSH_SCENARIO) is JSON:
+  {"bw": [resp, ...], "guard": [resp, ...]}   — per-path sequences; the last
+  entry repeats when exhausted. A bare LIST (legacy scenarios) means bw-only;
+  guard probes then answer the relay's `ls: cannot access '/.ssh': No such
+  file...` for an absent guard file (the arbitrator treats it as old-image =>
+  spends the shot, which is exactly what the pre-guard scenarios expect).
+Response: {"exit": int, "stdout": str, "stderr": str}. Call order per path is
+tracked via counter files (env FAKE_SSH_COUNTER + "." + path-key).
+"""
+import json
+import os
+import sys
+
+scenario = os.environ["FAKE_SSH_SCENARIO"]
+with open(scenario, encoding="utf-8") as f:
+    seq = json.load(f)
+if isinstance(seq, dict):
+    per_path = seq
+else:
+    per_path = {"bw": seq}
+
+# Dispatch: the probed path is the last argv token (one plain command per call).
+key = "bw"
+for tok in sys.argv[1:]:
+    if tok.startswith("/"):
+        key = "guard" if tok.endswith("/.ssh") else "bw"
+
+responses = per_path.get(key)
+if responses is None:
+    # No canned answer for this probe: emulate the relay running `ls` on an
+    # absent guard file (exit 1 — the relay exits 1 on success too; the
+    # payload decides). The arbitrator classifies "cannot access" as absent.
+    # NOTE: the error goes to STDOUT — the real relay merges the remote
+    # process's stderr into the client's stdout (live-probed 2026-10-11),
+    # and the error text contains the guard path itself (the regression that
+    # the exact-line presence check in _bw_ssh_guard guards against).
+    sys.stdout.write("ls: cannot access '/.ssh': No such file or directory\n")
+    sys.exit(1)
+
+n = 0
+counter = os.environ.get("FAKE_SSH_COUNTER")
+if counter:
+    cf = f"{counter}.{key}"
+    if os.path.exists(cf):
+        with open(cf, encoding="utf-8") as f:
+            n = int(f.read() or "0")
+    r = responses[min(n, len(responses) - 1)]
+    with open(cf, "w", encoding="utf-8") as f:
+        f.write(str(n + 1))
+else:
+    r = responses[min(0, len(responses) - 1)]
+
+sys.stdout.write(r.get("stdout", ""))
+sys.stderr.write(r.get("stderr", ""))
+sys.exit(r.get("exit", 0))
