@@ -9,3 +9,4 @@ __pycache__/
 .resume
 portal_vault.gpg
 llama.cpp/
+PROGRESS.md

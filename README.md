@@ -38,12 +38,19 @@ python3 utils/sl_admin.py wait  yours          # polls until an instance reports
 # 6. smoke test the gateway (no proxy — known-answer questions)
 ./claude/sl_curl.sh -url https://<group>.salad.cloud -m qwen38-27b
 
-# 7. Claude Code on the GPU — sl_claude_deploy resolves the gateway DNS from the group,
-#    starts it if stopped, waits for the model, then hands off to cl_salad, which runs
-#    the Anthropic↔OpenAI proxy on 127.0.0.1:8093 and launches claude against it
-claude/sl_claude_deploy --org yours --project your_project --group your_group
+# 7. run claude code via proxy (proxy adds salad's api key to headers)
 claude/cl_salad https://<group>.salad.cloud    # group already live: proxy + claude only
-./claude/sl_chat.sh https://<group>.salad.cloud # plain chat instead of Claude Code
+
+# 8. stop group (you will be asked which group to stop)
+python3 utils/sl_admin.py stop yours
+
+# 9 check money left
+python3 utils/billing.py
+
+# 10. On next runs, you simply start group and fire claude 
+python3 utils/sl_admin.py start yours --min-bw-mbps 100
+python3 utils/sl_admin.py wait  yours
+claude/cl_salad https://<group>.salad.cloud    # group already live: proxy + claude only
 ```
 
 Free by construction: 1–4 cost nothing, 5 is the only paid step, and the group auto-stops itself when the client connection dies (`--idle-shutdown heartbeat` + the `/.ssh` presence guard — `touch /.ssh` after SSH-ing into the container, `rm /.ssh` on the way out). `python3 utils/sl_admin.py describe yours --project your_project --group your_group` dumps the whole config of a group (image + digests, resources, GPU classes, CMD, probes, full env with secret values redacted, instances + SSH lines).
