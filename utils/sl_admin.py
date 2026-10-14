@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Manage the Salad fleet — list, live-refresh, start, stop, wait, stats, delete,
-create-org, create-project, deploy.
+ssh, create-org, create-project, deploy.
 
 Usage:
-  python3 utils/sl_admin.py [ACTION] [ORG] [--interval N]
+  python3 utils/sl_admin.py [ACTION] [ORG[/PROJECT]] [GROUP] [--interval N]
 
   ACTION    list (default)  one-shot status table
             refresh         re-render the table every N seconds (Ctrl-C to stop)
@@ -37,12 +37,21 @@ Usage:
                             ready"). Otherwise it prints the state and exits 1
                             without scraping
             delete          pick a group and delete it — IRREVERSIBLE
+            ssh             open an interactive SSH session into a live
+                            instance of a RUNNING group (ssh -p PORT root@IP);
+                            the group is named as the 3rd positional
+                            (ORG[/PROJECT] GROUP) or picked from the table
             create-org      register (and try to create) a new ORGANIZATION
             create-project  register (and try to create) a new PROJECT in an org
             deploy          pick a DOCKER TYPE (the profiles our images support)
                             and run its deployer against an org/project/group —
                             ZERO COST by default (--no-start; --start bills)
-  ORG       ma-casa-in-paris | akl-on-salad (default: every known org)
+  ORG       ma-casa-in-paris | akl-on-salad (default: every known org); may be
+            ORG/PROJECT to pin the project (e.g. ma-casa-in-paris/llm)
+  GROUP     3rd positional: the group name. For start/stop/wait/stats/delete/
+            describe/ssh it selects that group DIRECTLY (no table prompt);
+            without it those actions show the numbered table. Flags may come
+            before or after the positionals (… atx-swift-27b-q5 --min-bw-mbps 100)
   --interval N
             poll period in seconds for refresh / wait / stats (default 5)
   --min-bw-mbps N
@@ -129,6 +138,9 @@ Usage:
   python3 utils/sl_admin.py start --min-bw-mbps 30   # start + arbitrator
   python3 utils/sl_admin.py wait                # after start: poll until ready
   python3 utils/sl_admin.py stats               # stats, only if fully ready
+  python3 utils/sl_admin.py start ma-casa-in-paris/llm atx-swift-27b-q5   # start that group
+  python3 utils/sl_admin.py ssh ma-casa-in-paris/llm atx-swift-27b-q5     # ssh into it
+  python3 utils/sl_admin.py start ma-casa-in-paris/llm atx-swift-27b-q5 --min-bw-mbps 100
   python3 utils/sl_admin.py deploy              # prompt: docker type -> org/project/group
   python3 utils/sl_admin.py deploy --type ampere --project llm --group my-atx
   python3 utils/sl_admin.py deploy --type generic --group my-gguf -- \
@@ -216,7 +228,10 @@ SALAD_NAME_RE = re.compile(r"^[a-z][a-z0-9-]{0,61}[a-z0-9]$")
 PORTAL_BASE = "https://portal-api.salad.com/api/portal"
 
 ACTIONS = ("list", "refresh", "start", "stop", "wait", "stats", "describe", "delete",
-           "create-org", "create-project", "deploy")
+           "ssh", "create-org", "create-project", "deploy")
+# Actions that target ONE group — the 3rd positional (GROUP) selects it
+# directly instead of the numbered table.
+GROUP_ACTIONS = ("start", "stop", "wait", "stats", "describe", "delete", "ssh")
 
 # --- deploy: the docker types we support (one entry per deployer) ------------
 # Each is (script, one-line profile, default group, accepts_--no-start). The
@@ -647,6 +662,89 @@ def _run_action(action: str, sel: tuple[str, str, sc.ContainerGroupInfo], key: s
     except ValueError as e:
         print(f"error: {e}")
         return 2
+
+
+def _resolve_group(
+    org: str,
+    project: str | None,
+    group_name: str,
+    key: str,
+    fleet: dict[str, tuple[str, ...]],
+) -> tuple[str, str, sc.ContainerGroupInfo] | None:
+    """Resolve a named group to (org, project, info).
+
+    If project is given, GET it directly. If not, search every project of the
+    org for the group (error if it exists in more than one — the user must then
+    name the project). Returns None (having printed the error) on failure.
+    """
+    if project is not None:
+        try:
+            g = sc.get_container_group(org, project, group_name, api_key=key)
+        except sc.SaladApiError as e:
+            if e.status_code == 404:
+                print(f"error: no group named {group_name!r} in {org}/{project}", file=sys.stderr)
+            else:
+                print(f"error: {e}", file=sys.stderr)
+            return None
+        return org, project, g
+    matches: list[tuple[str, sc.ContainerGroupInfo]] = []
+    for pj in fleet.get(org, ()):
+        try:
+            groups = sc.list_container_groups(org, pj, api_key=key)
+        except sc.SaladApiError:
+            continue
+        for g in groups:
+            if g.name == group_name:
+                matches.append((pj, g))
+    if len(matches) == 1:
+        return org, matches[0][0], matches[0][1]
+    if len(matches) > 1:
+        where = ", ".join(f"{org}/{pj}" for pj, _ in matches)
+        print(f"error: {group_name!r} exists in {where} — name the project: "
+              f"sl_admin.py <action> {org}/<project> {group_name}", file=sys.stderr)
+        return None
+    print(f"error: no group named {group_name!r} in {org}", file=sys.stderr)
+    return None
+
+
+def _ssh_into(org: str, project: str, g: sc.ContainerGroupInfo, key: str) -> int:
+    """Open an interactive SSH session into a live instance of a RUNNING group.
+
+    The ephemeral instance IP is not in known_hosts, so host-key checking is
+    disabled and known_hosts is /dev/null. Auth uses the default ssh key/agent
+    (the same one the bandwidth arbitrator uses) — no BatchMode, so an
+    interactive prompt still works.
+    """
+    if g.current_status != "running":
+        print(f"error: {g.name} is {g.current_status or 'not running'} — nothing to ssh into "
+              "(start it first).", file=sys.stderr)
+        return 1
+    try:
+        instances = list(sc.list_container_group_instances(org, project, g.name, api_key=key))
+    except sc.SaladApiError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 1
+    live = [i for i in instances if i.state == "running" and i.ssh_ip and i.ssh_port is not None]
+    if not live:
+        states = ", ".join(f"{i.id[:8]}={i.state or '?'}" for i in instances) or "(no instances)"
+        print(f"error: no live instance with an SSH endpoint for {g.name} ({states}). "
+              "Is the group fully ready? (`wait` for it first.)", file=sys.stderr)
+        return 1
+    if len(live) > 1:
+        print(f"note: {len(live)} live instances — using {live[0].id[:8]}")
+    inst = live[0]
+    fp = f"  [{inst.ssh_host_key_fingerprint}]" if inst.ssh_host_key_fingerprint else ""
+    print(f"connecting: ssh -p {inst.ssh_port} root@{inst.ssh_ip}{fp}")
+    cmd = ["ssh", "-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=/dev/null",
+           "-o", "ConnectTimeout=15", "-p", str(inst.ssh_port), f"root@{inst.ssh_ip}"]
+    try:
+        return subprocess.run(cmd).returncode
+    except FileNotFoundError:
+        print("error: ssh not found on this host.", file=sys.stderr)
+        return 1
+    except KeyboardInterrupt:
+        print("\nssh session ended.")
+        return 0
 
 
 def _refresh(orgs: list[str], key: str, interval: float) -> int:
@@ -2030,24 +2128,43 @@ def main(argv: list[str]) -> int:
 
     fleet = _fleet()
     org = None
+    project_positional: str | None = None
+    group_positional: str | None = None
     if action not in ("create-org", "create-project", "deploy"):
-        for p in rest:
-            if p in fleet:
-                if org is not None:
-                    print(f"error: only one org (got {org!r} and {p!r})", file=sys.stderr)
+        # rest[0] = ORG or ORG/PROJECT ; rest[1] = GROUP (optional).
+        if len(rest) > 2:
+            print(f"error: too many positional args: {rest[2:]!r}\n"
+                  "usage: sl_admin.py [ACTION] [ORG[/PROJECT]] [GROUP]", file=sys.stderr)
+            return 2
+        if rest:
+            token = rest[0]
+            if "/" in token:
+                o, _, pj = token.partition("/")
+                if o not in fleet:
+                    print(f"error: not a known org: {o!r}\nknown orgs: " + ", ".join(fleet),
+                          file=sys.stderr)
                     return 2
-                org = p
+                org = o
+                project_positional = pj
             else:
-                print(
-                    f"error: not an action, and not a known org: {p!r}\n"
-                    f"actions: {', '.join(ACTIONS)}\n"
-                    "known orgs: " + ", ".join(fleet) + "\n"
-                    f"(register a new org/project with `create-project <org> <project> "
-                    f"--register-only` — it writes "
-                    f"{os.path.relpath(FLEET_FILE, os.getcwd())})",
-                    file=sys.stderr,
-                )
-                return 2
+                if token not in fleet:
+                    print(
+                        f"error: not an action, and not a known org: {token!r}\n"
+                        f"actions: {', '.join(ACTIONS)}\n"
+                        "known orgs: " + ", ".join(fleet) + "\n"
+                        f"(register a new org/project with `create-project <org> <project> "
+                        f"--register-only` — it writes "
+                        f"{os.path.relpath(FLEET_FILE, os.getcwd())})",
+                        file=sys.stderr,
+                    )
+                    return 2
+                org = token
+        if len(rest) > 1:
+            group_positional = rest[1]
+        if group_positional is not None and action not in GROUP_ACTIONS:
+            print(f"error: a GROUP positional applies to {', '.join(GROUP_ACTIONS)} "
+                  f"(not {action!r}) — it selects the group directly", file=sys.stderr)
+            return 2
 
     key: str | None = None
     try:
@@ -2108,20 +2225,18 @@ def main(argv: list[str]) -> int:
         if action == "refresh":
             return _refresh(orgs, key, interval)
         if action == "describe":
-            if group_flag is not None:  # named on the command line: describe ORG --project P --group G
+            d_group = group_flag or group_positional
+            if d_group is not None:  # named on the command line (flag or 3rd positional)
                 d_org = org or next(iter(fleet))
-                d_project = project_flag
+                d_project = project_flag or project_positional
                 if d_project is None:
-                    projs = list(fleet.get(d_org, ()))
-                    if len(projs) == 1:
-                        d_project = projs[0]
-                    else:
-                        pick = _pick_numbered(projs, f"project in {d_org}")
-                        if pick is None:
-                            print("aborted — nothing done.")
-                            return 1
-                        d_project = projs[pick]
-                return _describe(d_org, d_project, group_flag, key, raw_dump)
+                    # project not pinned: search the org's projects for the group
+                    # (consistent with the other group-targeting actions).
+                    resolved = _resolve_group(d_org, None, d_group, key, fleet)
+                    if resolved is None:
+                        return 1
+                    d_org, d_project, _ = resolved
+                return _describe(d_org, d_project, d_group, key, raw_dump)
             rows = _rows(orgs, key)
             selectable = _print_action_table(rows, key, action)
             if not selectable:
@@ -2133,18 +2248,30 @@ def main(argv: list[str]) -> int:
                 return 1
             d_org, d_project, g = sel
             return _describe(d_org, d_project, g.name, key, raw_dump)
-        # start / stop / wait / delete: numbered table -> prompt
-        rows = _rows(orgs, key)
-        selectable = _print_action_table(rows, key, action)
-        if not selectable:
-            print("no groups to select from — nothing to do.")
-            return 1
-        sel = _prompt(selectable, action)
-        if sel is None:
-            print("aborted — nothing done.")
-            return 1
+        # start / stop / wait / stats / delete / ssh: pick the group — the 3rd
+        # positional selects it directly, otherwise the numbered table -> prompt
+        if group_positional is not None:
+            if org is None:
+                print(f"error: {group_positional!r} needs an org: "
+                      f"sl_admin.py {action} ORG[/PROJECT] GROUP", file=sys.stderr)
+                return 2
+            sel = _resolve_group(org, project_positional, group_positional, key, fleet)
+            if sel is None:
+                return 1
+        else:
+            rows = _rows(orgs, key)
+            selectable = _print_action_table(rows, key, action)
+            if not selectable:
+                print("no groups to select from — nothing to do.")
+                return 1
+            sel = _prompt(selectable, action)
+            if sel is None:
+                print("aborted — nothing done.")
+                return 1
         s_org, s_project, g = sel
         print(f"\nselected: {s_org}/{s_project} — {g.name} ({g.current_status or '?'})  {_url(g) or '-'}")
+        if action == "ssh":
+            return _ssh_into(s_org, s_project, g, key)
         if action == "wait":
             return _wait(f"{s_org}/{s_project}", g.name, key, interval)
         if action == "stats":

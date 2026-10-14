@@ -99,7 +99,7 @@ Free by construction: 1–4 cost nothing, 5 is the only paid step, and the group
 reference, formatted. The docstring in `utils/sl_admin.py` is the source of truth.
 
 ```
-python3 utils/sl_admin.py [ACTION] [ORG] [--interval N]
+python3 utils/sl_admin.py [ACTION] [ORG[/PROJECT]] [GROUP] [--interval N]
 ```
 
 ### Actions
@@ -111,13 +111,19 @@ python3 utils/sl_admin.py [ACTION] [ORG] [--interval N]
 | `start` | pick a group (# or name) and start it — **INCURS COST**, running instances bill per second. `--gpu CARD` reconfigures the card(s) first, `--prio` recreates the group at that priority (CREATE-only) |
 | `stop` | pick a group and stop it |
 | `wait` | poll a group until at least one instance reports `ready`, then exit — group status alone is not enough: Salad marks a group `running` while instances are still allocating/downloading/creating |
-| `stats` | llama-server stats (tps / queue / totals, `--interval` loop, Ctrl-C stops) — **only when the group is fully ready**: status `running`, all `replicas` instances present, every one `ready=true` (stricter than `wait`'s "at least one ready"). Otherwise prints the state and exits 1 without scraping |
 | `describe` | **dump one group's whole config, read-only**: identity (id/version/pending_change/timestamps), state, lifecycle (replicas, restart/autostart, priority, scaling), networking (dns/port/auth), **image** (repo, tag, manifest digest, Hub link, the `docker image inspect` line), container (hash, image_caching, cpu/memory/shm/storage, **GPU classes by NAME**, volume, CMD), probes, the **full env** (secret-looking values redacted), live instances (id, state, ready, machine_id, pull progress, ssh line) + the derived client lines. `--raw` also dumps the whole GET as JSON. `describe ORG --project P --group G [--raw]`, or pick from the numbered table |
+| `stats` | llama-server stats (tps / queue / totals, `--interval` loop, Ctrl-C stops) — **only when the group is fully ready**: status `running`, all `replicas` instances present, every one `ready=true` (stricter than `wait`'s "at least one ready"). Otherwise prints the state and exits 1 without scraping |
 | `delete` | pick a group and delete it — **IRREVERSIBLE**, leaves a name tombstone |
-| `deploy` | pick a **DOCKER TYPE** (the profiles our images support) and run its deployer against an org/project/group — **zero cost by default** (`--no-start`; `--start` bills) |
+| `ssh` | open an **interactive SSH session** into a live instance of a RUNNING group (`ssh -p PORT root@IP`). The group is named as the 3rd positional (`ORG[/PROJECT] GROUP`) or picked from the table. Not-running group, or a group with no live instance yet, is an error — `wait` for it first |
 | `create-org` / `create-project` | register (and try to create) a new ORGANIZATION / PROJECT — see *Org & project creation* below |
+| `deploy` | pick a **DOCKER TYPE** (the profiles our images support) and run its deployer against an org/project/group — **zero cost by default** (`--no-start`; `--start` bills) |
 
-`ORG` = `ma-casa-in-paris` | `akl-on-salad` (default: every known org).
+**Positional args** (in order, after the action):
+
+| arg | |
+|---|---|
+| `ORG` | `ma-casa-in-paris` \| `akl-on-salad` (default: every known org); may be `ORG/PROJECT` to pin the project (e.g. `ma-casa-in-paris/llm`) |
+| `GROUP` | the group name. For `start`/`stop`/`wait`/`stats`/`delete`/`describe`/`ssh` it selects that group **directly** (no table prompt); without it those actions show the numbered table. Flags may come before or after the positionals — `… atx-swift-27b-q5 --min-bw-mbps 100` |
 
 ### Flags
 
@@ -165,6 +171,9 @@ python3 utils/sl_admin.py start akl-on-salad                # start a group in t
 python3 utils/sl_admin.py start --min-bw-mbps 30            # start + arbitrator
 python3 utils/sl_admin.py wait                              # after start: poll until ready
 python3 utils/sl_admin.py stats                             # stats, only if fully ready
+python3 utils/sl_admin.py start ma-casa-in-paris/llm atx-swift-27b-q5   # start that group
+python3 utils/sl_admin.py ssh ma-casa-in-paris/llm atx-swift-27b-q5     # ssh into it
+python3 utils/sl_admin.py start ma-casa-in-paris/llm atx-swift-27b-q5 --min-bw-mbps 100
 python3 utils/sl_admin.py deploy                            # prompt: type -> org/project/group
 python3 utils/sl_admin.py deploy --type ampere --project llm --group my-atx
 python3 utils/sl_admin.py deploy --type generic --group my-gguf -- \

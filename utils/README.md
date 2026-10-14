@@ -6,7 +6,7 @@ stdlib-only Python, run from the repo root: `python3 utils/<script>`.
 
 | script | what it does |
 |---|---|
-| `sl_admin.py` | the fleet admin: `list` / `refresh` / `start` / `stop` / `wait` / `stats` / `delete` / `create-org` / `create-project` / `deploy`, plus the card & priority flags `--gpu` / `--prio` / `--query` / `--y` |
+| `sl_admin.py` | the fleet admin: `list` / `refresh` / `start` / `stop` / `wait` / `stats` / `delete` / `ssh` / `create-org` / `create-project` / `deploy`, plus the card & priority flags `--gpu` / `--prio` / `--query` / `--y` and the `ORG[/PROJECT] GROUP` positionals |
 | `llama_stats.py` | llama-server stats (tps / queue / totals) from the host |
 | `billing.py` | per-org portal credit balances (USD + live EUR) |
 
@@ -19,8 +19,13 @@ Salad API has no list-orgs/list-projects operation, so the tool walks a map:
 `create-project` write, so a new org/project is data, not a code edit.
 
 ```
-python3 utils/sl_admin.py [ACTION] [ORG] [--interval N]
+python3 utils/sl_admin.py [ACTION] [ORG[/PROJECT]] [GROUP] [--interval N]
 ```
+
+The 2nd positional may be `ORG/PROJECT` (e.g. `ma-casa-in-paris/llm`); the 3rd
+positional is the **GROUP** name, which for `start`/`stop`/`wait`/`stats`/
+`delete`/`describe`/`ssh` selects that group **directly** (no table prompt).
+Flags may come before or after the positionals.
 
 - `list` (default) — one-shot table: status, age, uptime, instance counts,
   gateway URL; running groups also get their `ssh -p PORT root@IP` line.
@@ -29,6 +34,12 @@ python3 utils/sl_admin.py [ACTION] [ORG] [--interval N]
   (delete requires typing the group name). **`start` bills per second;
   `delete` is irreversible** and tombstones the name (recreating it 400s
   `name_conflict` for 10+ min — use a fresh name).
+- `ssh` — open an **interactive SSH session** into a live instance of a
+  RUNNING group (`ssh -p PORT root@IP`, host-key checking off, known_hosts
+  `/dev/null` since the instance IP is ephemeral; auth via your default
+  ssh key/agent). The group is named as the 3rd positional or picked from the
+  table. A not-running group, or one with no live instance yet, is an error —
+  `wait` for it first.
 - `wait` — after `start`: poll until at least one instance reports `ready`.
   The group flipping to `running` is NOT readiness — instances are still
   allocating/downloading/creating and the model pull takes minutes.
