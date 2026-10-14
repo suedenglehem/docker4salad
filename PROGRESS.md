@@ -1163,9 +1163,40 @@ Items 1–2 need a **paid** Salad start (burns credits) — the user decides whe
 2026-10-11: the approved guard smoke (item 1) is **FINISHED** — `atx-hb-test2`
 stopped at 01:15Z; all 7 fleet groups are now stopped at $0.
 
-> **CARD & PRIORITY FLAGS — CODE-COMPLETE 2026-10-14 (zero-cost, UNCOMMITTED:
+> **GROUP POSITIONAL + `ssh` ACTION — COMMITTED `26184d5` + pushed (2026-10-14,
+> zero-cost):** `utils/sl_admin.py` gained a **3rd positional (GROUP)** that selects a
+> group **directly** (no table prompt) for the group-targeting actions
+> (`start`/`stop`/`wait`/`stats`/`describe`/`delete`/`ssh`), and the 2nd positional now
+> accepts `ORG/PROJECT`. A new **`ssh`** action opens an interactive session into a live
+> instance of a RUNNING group. New `_resolve_group()` (direct GET when the project is
+> named; org-wide search otherwise, erroring on ambiguous / not-found) and `_ssh_into()`
+> (refuses a not-running group, finds the instance with a live `ssh_ip`/`ssh_port`, runs
+> `ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -p PORT root@IP` —
+> ephemeral IP so host-key checking is off; propagates ssh's exit code). `describe` now
+> resolves a named group via the same search when the project is unpinned. The parse loop
+> is order-independent, so `start ma-casa-in-paris/llm atx-swift-27b-q5 --min-bw-mbps 100`
+> works (flag consumed, group still resolves). Files: `utils/sl_admin.py`,
+> `tools/test_group_ssh_offline.py` (NEW), `README.md`, `utils/README.md`. **Verified FREE
+> only** (no paid start, no real ssh, no delete, no PATCH): **`python3 -I
+> tools/test_group_ssh_offline.py` = 23/23 green** (resolve direct-GET vs search, positional
+> selection, usage errors, flag ordering, ssh argv + not-running + no-live + exit-code,
+> describe search/pinned) and **`python3 -I tools/test_gpu_prio_offline.py` still green**;
+> `--help` renders the new usage/GROUP/ssh lines, exit 0.
+>
+> **NEXT UNFINISHED TASK (state 2026-10-14, `main` == `origin/main` @ `26184d5`):**
+> zero-cost admin-surface work is exhausted — the group positional + `ssh` are in. What
+> remains is ALL USER-GATED (paid): **① the first live `ssh` action** — start a group
+> (paid), `wait` for it, then `sl_admin ssh ma-casa-in-paris/llm <group>` to confirm the
+> interactive session lands (the argv is offline-verified; the live relay handshake is the
+> untested bit, §9f). **② `start … --prio med` on `llm/qwen38-27b-q5`** (still `priority=low`,
+> §9k) — the first live test of the card/priority recreate path (below). **③ the user's own
+> `CHAT_TEMPLATE_URL` test** on `llm/qwen38-27b-q5` (unlocked, q6 v15) — set the key then a
+> paid start. `llm/atx-swift-27b-q5` is **PATCH-locked** by its parked update (env edits 400
+> until its next paid start).
+>
+> **CARD & PRIORITY FLAGS — COMMITTED `e228f71` + pushed (2026-10-14, zero-cost;
 > `salad_client.py`, `utils/sl_admin.py`, `tools/test_gpu_prio_offline.py`, `README.md`,
-> `utils/README.md`, `PROGRESS.md`; HEAD `9b58599` == `origin/main`):**
+> `utils/README.md`):**
 > `sl_admin.py` gained **`--gpu CARD[,CARD…]`** (`rtx3080ti,rtx3080,rtx3090,rtx3090ti,
 > rtx4080,rtx4090,rtx5090`), **`--prio low|med|high|batch`**, **`--query`** and
 > **`--y`/`--force`/`-y`**. `deploy` passes both through as the deployer's own
@@ -1550,6 +1581,17 @@ stopped at 01:15Z; all 7 fleet groups are now stopped at $0.
 ## 17. Recent git history (context for what each commit did)
 
 ```
+26184d5 feat(sl_admin): GROUP positional + ssh action — 3rd positional selects a group directly; `ssh` opens a live session (test_group_ssh_offline 23/23)
+73fad6e readme
+7dee551 readme
+e228f71 feat(sl_admin,salad_client): --gpu CARD / --prio PRIO / --query / --force (test_gpu_prio_offline 72/72)
+9b58599 readme
+6c98430 docs(readme): TD;LR run sequence — fresh Salad account to Claude Code on a GPU
+c2c07f3 feat(tools,sl_admin): fleet image re-pin + whole-config `describe`
+d1f5bff feat(images): chat-template-url set built+pushed on tr4; deployers re-pinned (v13/v13/v15/v11)
+ef0c49d feat(chat-template): CHAT_TEMPLATE_URL — download a custom chat template from a URL
+7da370f feat(sl_admin): create-org / create-project / deploy menu; tool surface renamed to sl_*
+a9664a3 docs: PROGRESS.md savework checkpoint — §15 NEXT-task block, §12 tree de-staled, §17 + 428ed5a/fa0e06c/801520e
 428ed5a docs: PROGRESS.md §15 — arbitrator ssh-strike grace hardening CLOSED as not needed (user: "i confirm, it works")
 fa0e06c readme (user): README line + claude/cube, claude/cube.cpp DELETED from the tree
 801520e readme (user): claude/cube (17 KB CUDA experiment binary) + cube.cpp ADDED — the binary stays in git history even after fa0e06c; only a history rewrite removes it

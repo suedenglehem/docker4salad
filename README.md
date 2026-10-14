@@ -9,7 +9,7 @@ Beware, there's auto-stop in these dockers after idling too long (useful not to 
 
 The run sequence: freshly created Salad account → Claude Code running on a Salad GPU. Steps 1–2 are the web UI (orgs and projects **cannot** be created through the public API), everything after is this repo. `yours` = your own org / project / group names; `https://<group>.salad.cloud` is the group's `networking.dns` (https, 443 — Cloudflare fronts it, the in-container port is not forwardable), printed by `start` / `list` / `describe`.
 
-**1. portal.salad.com** — sign up, create the **organization** and a **project**, copy the account **API key** (it is account-wide; group-scoped keys don't exist).
+**1. portal.salad.com** — sign up, create the **organization** and a **project**, copy the account **API key** (it is account-wide; group-scoped keys don't exist). add your ssh key (it's in your users "SSH Keys"), ssh key is required only if you use sl_admin.py with "--min-bw-mbps XYZ", we check bandwidth inside container via ssh, it's the only way doing it before group becomes "ready", and it becomes ready only after download of model's gguf is compteted and llama is up. 
 
 ```bash
 # 2. keys on disk — gitignored, chmod 600, never printed
