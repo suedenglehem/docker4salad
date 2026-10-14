@@ -834,6 +834,33 @@ higher-priority work lands**; the live prod ATX group was `priority=low` while
 the flag existed. A ~18-min paid run ending in an unexplained stop is the
 signature. Recreated 2026-10-12 as `llm/atx-swift-27b-q5-med` @ `medium`.
 
+**9m. GPU availability is a POST, and its counts are per PRIORITY TIER, not per
+card.** (measured 2026-10-14, `sl_admin --query` / `salad_client.get_gpu_availability`)
+`POST /organizations/{org}/availability/sce-gpu-availability` (spec operationId
+`get_gpu_availability`), body `GpuAvailabilityPrototype`: `gpu_classes` (UUID array,
+minItems 1) required; optional `cpu`, `memory` (**the key is `memory`, in MB — not
+`memory_mb`**), `storage_amount` (bytes), `country_codes` (`^[a-z]{2}$`). Answer:
+`{"available_gpu_batch","available_gpu_high","available_gpu_low","available_gpu_medium",
+"on_call_gpu"}` — ONE count per tier for the WHOLE class set in the request, so the
+endpoint cannot answer "how many 3090s". Floors demonstrably change the answer
+(`rtx3090,rtx4090,rtx5090`: no floors → high=341 medium=64 low=11 batch=0 on_call=0;
+with cpu=8 memory=16384 storage=53687091200 → high=269 medium=42 low=0). **Hourly
+prices are NOT in that answer** — they ride in `GpuClass.raw["prices"]` from
+`GET /organizations/{org}/gpu-classes` as `[{"price":"0.170","priority":"high"},…]`
+(3090 H0.170 M0.143 L0.117 B0.090 · 4090 H0.330 M0.273 L0.217 B0.160 ·
+5090 H0.500 M0.417 L0.333 B0.250). Card UUIDs are the same in both orgs.
+
+**9n. A priority recreate must rewrite the env values that ARE the group name.**
+`docker/idle_watchdog.py:202-204` builds its self-stop URL from
+`SALAD_ORG/SALAD_PROJECT/SALAD_GROUP`. A delete+create (§9k) under a new name that
+copies the env verbatim leaves `SALAD_GROUP` pointing at the DELETED group: the
+self-stop 404s, the container self-exit is RESCHEDULED (not stopped) and **billing
+continues** — the exact failure the watchdog exists to prevent. `sl_admin._spec_from_raw`
+rewrites every env value equal to the old name (`NAME`, `SALAD_GROUP`) and
+deliberately leaves `MODEL_ALIAS` alone (client-facing, stays stable across
+recreations). Also drop `networking.dns` from the CREATE body — it is
+server-assigned (§9j).
+
 ---
 
 ## 10. Multi-org & projects
@@ -929,10 +956,11 @@ on_salad/
 │                                 801520e, deleted fa0e06c — the 17 KB binary is in git
 │                                 HISTORY at 801520e even though the tree is clean.)
 ├─ utils/
-│  ├─ sl_admin.py          (1500) the fleet admin: list/start/stop/wait/stats/delete,
+│  ├─ sl_admin.py          (2189) the fleet admin: list/start/stop/wait/stats/delete,
 │  │                              bandwidth arbitrator (§6, --min-bw-mbps),
 │  │                              create-org / create-project (fleet.json register),
-│  │                              deploy (prompted DOCKER TYPE → its deployer).
+│  │                              deploy (prompted DOCKER TYPE → its deployer),
+│  │                              card/priority flags --gpu/--prio/--query/--y (§9m/§9n).
 │  │                              Renamed from manage_groups.py 2026-10-12. Writes
 │  │                              `fleet.json` (the org→project map; created on the
 │  │                              first create-org/create-project, absent until then).
@@ -953,6 +981,9 @@ on_salad/
 │  ├─ test_arbitrator_offline.py  26/26 arbitrator scenarios (+ fakebin/ssh PATH shim).
 │  ├─ test_watchdog_offline.py    7/7 watchdog scenarios (v2.3 guard + cap).
 │  ├─ test_deploy_offline.py      deployer offline checks (GPU resolution, request validation).
+│  ├─ test_gpu_prio_offline.py    72/72 --gpu/--prio/--query/--force checks (card parsing,
+│  │                              prices, availability body, the priority recreate, parked
+│  │                              PATCHes, main()'s guards) — fakes the API, no calls.
 │  ├─ fakebin/ssh                canned-ssh shim the arbitrator harness runs as `ssh`.
 │  ├─ fleet_status_now.py        read-only fleet status+guard snapshot (§14); 404 → `GONE`.
 │  ├─ fleet_snapshot.py          broader read-only snapshot.
@@ -978,7 +1009,8 @@ on_salad/
                                   post.txt (the ATX operating point — deployer-defaults provenance), logs.
 ```
 Key file line counts (2026-10-10; `sl_admin.py` re-counted 2026-10-12 after the
-create/deploy + `describe` additions): `sl_admin.py` 1688, `salad_client.py` 875,
+create/deploy + `describe` additions, and 2026-10-14 after the card/priority flags):
+`sl_admin.py` 2189, `salad_client.py` 985,
 `sl_proxy.py` 705, `deploy_ampere.py` 725, `deploy_generic.py` 697,
 `deploy_qwen38_27b.py` 633, `deploy_qwen38_9b.py` 452, `deploy_qwen9b.py` 415,
 `idle_watchdog.py` 427, `bw_reporter.py` 124.
@@ -1033,6 +1065,18 @@ python3 utils/sl_admin.py describe ma-casa-in-paris            # no --group → 
 python3 utils/sl_admin.py start ma-casa-in-paris --min-bw-mbps 30   # bandwidth-aware start (§6)
 # non-interactive variant (pipe the prompt answers: name, confirm):
 printf 'atx-hb-test2\ny\n' | python3 utils/sl_admin.py start ma-casa-in-paris --min-bw-mbps 30
+
+# CARDS & PRIORITY (added 2026-10-14; cards = rtx3080ti,rtx3080,rtx3090,rtx3090ti,
+# rtx4080,rtx4090,rtx5090 — comma lists, spaces and repeated flags all accepted):
+python3 utils/sl_admin.py --query --gpu rtx3090,rtx4090        # FREE: USD/hour per tier + availability (§9m)
+python3 utils/sl_admin.py --query --gpu rtx3090 --project llm --group qwen38-27b-q5
+                                                              # …with that group's resource floors
+python3 utils/sl_admin.py start ma-casa-in-paris --gpu rtx3090          # prices → diff → confirm → PATCH card → start
+python3 utils/sl_admin.py start ma-casa-in-paris --gpu rtx4090 --force  # skip the confirm (BILLS per second)
+python3 utils/sl_admin.py start ma-casa-in-paris --prio high            # CREATE-only → delete+create <name>-high (§9k/§9n)
+python3 utils/sl_admin.py deploy --type ampere --org ma-casa-in-paris --project llm --group atx \
+    --gpu rtx3090 --prio med                                          # → the deployer's own --gpu / --priority
+python3 -I tools/test_gpu_prio_offline.py                    # the offline suite (72 checks, no API)
 
 # Deploy / zero-cost re-pin (deployers PATCH the full env; applies at next PAID start):
 python3 deploy/deploy_ampere.py     --project llm --group atx-swift-27b-q5-opt --no-start \
@@ -1119,6 +1163,34 @@ Items 1–2 need a **paid** Salad start (burns credits) — the user decides whe
 2026-10-11: the approved guard smoke (item 1) is **FINISHED** — `atx-hb-test2`
 stopped at 01:15Z; all 7 fleet groups are now stopped at $0.
 
+> **CARD & PRIORITY FLAGS — CODE-COMPLETE 2026-10-14 (zero-cost, UNCOMMITTED:
+> `salad_client.py`, `utils/sl_admin.py`, `tools/test_gpu_prio_offline.py`, `README.md`,
+> `utils/README.md`, `PROGRESS.md`; HEAD `9b58599` == `origin/main`):**
+> `sl_admin.py` gained **`--gpu CARD[,CARD…]`** (`rtx3080ti,rtx3080,rtx3090,rtx3090ti,
+> rtx4080,rtx4090,rtx5090`), **`--prio low|med|high|batch`**, **`--query`** and
+> **`--y`/`--force`/`-y`**. `deploy` passes both through as the deployer's own
+> `--gpu`/`--priority` (free, `--no-start` kept). `start --gpu` prints the hourly
+> prices, shows the card diff, confirms, PATCHes `gpu_classes` (a card change IS
+> PATCH-able), and reports a parked PATCH honestly (a previously-started group lands
+> the new card at the start this command is about to do). `start --prio` honours
+> CREATE-only priority (§9k) as DELETE + CREATE under `<name>-<prio>` with the whole
+> live config copied and the name-mirroring env rewritten (§9n), confirmed by typing
+> the group name; `--force` skips every confirmation (and says so — it skips the gate
+> on billing, not the billing). `--query --gpu …` is free: per-card USD/hour per tier
+> + the availability counts (§9m), with `--project/--group` querying that group's
+> resource floors. `salad_client.py` gained `GpuAvailabilityRequest` /
+> `GpuAvailabilityInfo` / `get_gpu_availability`.
+> **Verified FREE only** (no paid start, no delete, no PATCH sent): the guards, the
+> client validation, `--query` live on both orgs (prices + tier counts, floors honored:
+> 341/64/11 → 269/42/0), `start --gpu` diff + match, `start --prio` prompt + no-op,
+> the recreate body. Suite **`python3 -I tools/test_gpu_prio_offline.py` = 72/72 green**
+> (it found and fixed a real bug: `_fresh_name`'s suffix counter started at `-3`
+> while its docstring promised `-2`). The destructive paths (the card PATCH landing,
+> the delete+create) are exercised against a faked API only — they stay untested live
+> by design, since a start is user-gated. **`llm/qwen38-27b-q5` is `priority=low`
+> (preemptible, §9k)** — `start … --prio med` on it is the first live test of the
+> recreate path.
+>
 > **NEXT UNFINISHED TASK (state 2026-10-12 late, `main` == `origin/main` @ `c2c07f3`, uncommitted:
 > `PROGRESS.md` + root `README.md`):**
 > items 1–6 below are all DONE / CLOSED / RESOLVED, and the **chat-template-url cycle is COMPLETE**:

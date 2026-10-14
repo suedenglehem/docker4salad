@@ -6,7 +6,7 @@ stdlib-only Python, run from the repo root: `python3 utils/<script>`.
 
 | script | what it does |
 |---|---|
-| `sl_admin.py` | the fleet admin: `list` / `refresh` / `start` / `stop` / `wait` / `stats` / `delete` / `create-org` / `create-project` / `deploy` |
+| `sl_admin.py` | the fleet admin: `list` / `refresh` / `start` / `stop` / `wait` / `stats` / `delete` / `create-org` / `create-project` / `deploy`, plus the card & priority flags `--gpu` / `--prio` / `--query` / `--y` |
 | `llama_stats.py` | llama-server stats (tps / queue / totals) from the host |
 | `billing.py` | per-org portal credit balances (USD + live EUR) |
 
@@ -62,6 +62,47 @@ python3 utils/sl_admin.py [ACTION] [ORG] [--interval N]
   Registration always works; after creating in the web UI, re-run with
   `--register-only`. Names are validated against Salad's own rule
   (`^[a-z][a-z0-9-]{0,61}[a-z0-9]$`, 2–63 chars).
+
+### Card & priority flags — `--gpu` / `--prio` / `--query` / `--y`
+
+```
+python3 utils/sl_admin.py --query --gpu rtx3090,rtx4090            # prices + availability (FREE)
+python3 utils/sl_admin.py start  ORG --gpu rtx3090                 # reconfigure the card, then start
+python3 utils/sl_admin.py deploy --type ampere ... --gpu rtx3090 --prio med
+```
+
+- `--gpu CARD[,CARD…]` — the card(s) to deploy on / start on. Cards:
+  `rtx3080ti, rtx3080, rtx3090, rtx3090ti, rtx4080, rtx4090, rtx5090` (comma
+  list, repeated flags, spaces all accepted; matched against the org's own GPU
+  classes by the deployers' rule, so `RTX 3090 (24 GB)` == `rtx3090` and
+  `RTX 5090 Laptop (24 GB)` is a **different** class). On `deploy` it becomes
+  the deployer's own `--gpu`. On `start` it prints the card prices, shows the
+  diff, asks for confirmation, then PATCHes `gpu_classes` — a card change IS
+  PATCH-able. A group that has been started before **parks** the update
+  (`pending_update_in_progress`): the new card lands at the next start, i.e.
+  the start this command is about to do, and the tool says so.
+- `--prio low|med|high|batch` — priority. **CREATE-only** (measured 2026-10-14:
+  `PATCH container.priority` → 400 `pending_update_in_progress`; a top-level
+  `priority` PATCH answers 200 and is **ignored** — the GET keeps the old
+  value). On `deploy` it is passed to the deployer as `--priority`. On `start`
+  it means **DELETE + CREATE under a fresh name** (`<name>-<prio>`): the tool
+  copies the whole live config (image ref as-is, env wholesale, resources,
+  probes, networking minus the server-assigned `dns`), rewrites the env values
+  that ARE the group name (`SALAD_GROUP` is the idle watchdog's stop path —
+  left pointing at the deleted name the self-stop 404s and billing continues;
+  `MODEL_ALIAS` is deliberately kept stable for clients), confirms by typing
+  the group name, then creates at the new priority and waits for it to settle.
+- `--query` (needs `--gpu`) — free read-only: per-card **hourly prices** by
+  priority tier (`H`igh / `M`edium / `L`ow / `B`atch, USD/hour) plus the
+  account's availability counts. The endpoint answers for the whole card set in
+  one shot, so the counts are **per priority tier, not per card**. Add
+  `--project/--group` to query with that group's resource floors
+  ("can a container of this shape be placed right now").
+- `--y` / `--force` / `-y` — skip the confirmations of `start` and `deploy
+  --start` (the card reconfigure, the priority recreate, and the paid-start `y`).
+  **It skips the gate on billing, not the billing**: these runs bill per second.
+
+Offline suite: `python3 -I tools/test_gpu_prio_offline.py` (no API calls).
 
 The Salad API key is loaded from `deploy/salad_api.txt` via
 `salad_client.py` (repo root).

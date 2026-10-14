@@ -8,6 +8,8 @@ Usage:
   ACTION    list (default)  one-shot status table
             refresh         re-render the table every N seconds (Ctrl-C to stop)
             start           pick a group (by # or name) and start it — INCURS COST
+                            (`--gpu CARD` reconfigures the card(s) first, `--prio`
+                            recreates the group at that priority — CREATE-only)
             stop            pick a group and stop it
             wait            poll a group until at least one instance reports
                             ready, then exit (group status alone is not enough:
@@ -62,6 +64,42 @@ Usage:
             (persistent ssh failure, alloc timeout, reallocate API failure,
             missing bw.log = old image). Ctrl-C leaves the group running.
 
+  card / priority flags
+  --gpu CARD
+            CARD = COMMA-SEPARATED CARDS from:
+            rtx3080ti, rtx3080, rtx3090, rtx3090ti, rtx4080, rtx4090, rtx5090
+            (repeated --gpu flags and spaces are fine: --gpu rtx3090,rtx4090).
+            deploy: passed to the deployer as --gpu <cards> (its own per-type
+            choices still apply — q6 = rtx5090/rtx3090, ampere = sm_86 30-series).
+            start: the group's gpu_classes are PATCHed to CARD before the start.
+            If the group's configured card(s) differ from CARD it asks for
+            confirmation; --y/--force answers it (reconfigure + start, no ask).
+            A card change IS PATCH-able (UpdateContainerResources.gpu_classes);
+            a group that has been started before PARKS the update — the new
+            card(s) land at the next start, i.e. the start this command does.
+            Prints each card's hourly price.
+  --prio PRIO
+            PRIO = low | med | medium | high | batch (`med` == `medium`).
+            deploy: passed to the deployer as --priority (priority is a CREATE
+            field, so a new group gets it directly).
+            start: priority is CREATE-ONLY (measured 2026-10-14: PATCH
+            container.priority -> 400 pending_update_in_progress; a top-level
+            priority PATCH answers 200 and the GET proves it was IGNORED), so
+            this DELETES the group and CREATES it with a fresh name
+            '<name>-<prio>' at that priority, copying image/env/resources/
+            probes/networking. Asks for the typed group name; --y/--force skips
+            the ask. The old name is then tombstoned 10+ minutes.
+  --query   with --gpu CARD: print each card's HOURLY PRICE (all four tiers)
+            and the org's GPU availability. The counts come from POST
+            .../availability/sce-gpu-availability and are BY PRIORITY TIER for
+            the whole card set (high/medium/low/batch + on_call), not per card.
+            With --project P --group G it queries with that group's cpu/memory/
+            storage floors ("can a container of this shape be placed now").
+            Read-only, free.
+  --y / --force
+            skip confirmations on `start` (card diff, paid start) and on `deploy`
+            (the paid --start 'y'). Every bypass prints a PAID notice.
+
   deploy flags
   --type T
             the DOCKER TYPE key (see the `deploy` action's table). Prompted
@@ -97,6 +135,13 @@ Usage:
       --model-repo Some/Org --model-file Model-Q5_K_M.gguf --ctx-size 32768
   python3 utils/sl_admin.py create-org my-new-org --project default
   python3 utils/sl_admin.py create-project my-new-org llm
+  python3 utils/sl_admin.py --query --gpu rtx3090,rtx4090          # prices + availability
+  python3 utils/sl_admin.py --query --gpu rtx3090 --project llm --group atx-swift-27b-q5
+  python3 utils/sl_admin.py start akl-on-salad --gpu rtx3090      # card diff -> ask -> start
+  python3 utils/sl_admin.py start akl-on-salad --gpu rtx4090 --force   # no ask (PAID)
+  python3 utils/sl_admin.py start akl-on-salad --prio high        # recreate at high priority
+  python3 utils/sl_admin.py deploy --type ampere --project llm --group atx-med \
+      --gpu rtx3090 --prio med
 
 ORGANIZATION / PROJECT CREATION — the honest state (live-probed 2026-10-13,
 tools/probe_org_create.py): the PUBLIC API (api.salad.com/api/public) has NO
@@ -201,6 +246,25 @@ DOCKER_TYPES: dict[str, tuple[str, str, str, bool]] = {
 DEPLOY_DIR = os.path.normpath(
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "deploy")
 )
+
+# --- cards and priority (--gpu / --prio / --query) ---------------------------
+# The card names --gpu accepts. They are matched against the org's GPU classes
+# exactly like the deployers match them: drop the "(NN GB)" suffix, lowercase,
+# remove spaces — so 'RTX 3090 (24 GB)' == 'rtx3090'. An org may not offer every
+# card here; --gpu then fails with the list that org does offer.
+CARD_CHOICES = ("rtx3080ti", "rtx3080", "rtx3090", "rtx3090ti", "rtx4080", "rtx4090", "rtx5090")
+# Salad's enum is ContainerGroupPriority = high|medium|low|batch. `med` is
+# accepted as the user's spelling of `medium`.
+PRIORITY_CHOICES = ("low", "med", "medium", "high", "batch")
+PRIORITY_ALIASES = {"med": "medium"}
+# Priority is CREATE-ONLY (measured 2026-10-14 on throwaway groups): PATCH
+# {"container":{"priority":…}} -> 400 pending_update_in_progress, and a
+# schema-valid top-level PATCH -> 200 that the GET proves was IGNORED. So
+# changing it on an existing group means DELETE + CREATE with a fresh name.
+# GPU availability counts come from POST .../availability/sce-gpu-availability
+# and are BY PRIORITY TIER for the whole class set (not per card); hourly
+# prices come from GpuClass.raw["prices"] = [{"price":"0.170","priority":"high"},…].
+PRICE_TIERS = ("high", "medium", "low", "batch")
 
 # The canonical /metrics scraper (single source of truth; it lives in docker/
 # because that directory is Dockerfile.multistage's build context). Delegated
@@ -746,6 +810,355 @@ def _gpu_names(org: str, ids: list, key: str) -> str:
     except sc.SaladApiError as e:
         return f"{ids} (gpu-classes GET failed: HTTP {e.status_code})"
     return ", ".join(f"{names.get(i, '?')} [{i}]" for i in ids)
+
+
+# --- cards: --gpu CARD / --prio PRIO / --query -------------------------------
+
+
+def _norm_card(name: str) -> str:
+    """'RTX 3090 (24 GB)' -> 'rtx3090' — the deployers' matching rule."""
+    return name.split("(")[0].strip().lower().replace(" ", "")
+
+
+def _parse_cards(spec) -> list[str]:
+    """--gpu value -> ordered, deduped card names. Accepts a comma-separated
+    string ('rtx3090,rtx4090'), repeated flags, and spaces. Raises ValueError
+    naming the valid cards."""
+    chunks = spec if isinstance(spec, (list, tuple)) else [spec]
+    out: list[str] = []
+    for chunk in chunks:
+        for tok in str(chunk).split(","):
+            tok = tok.strip().lower().replace(" ", "")
+            if not tok:
+                continue
+            if tok not in CARD_CHOICES:
+                raise ValueError(f"unknown card {tok!r} — valid: {', '.join(CARD_CHOICES)}")
+            if tok not in out:
+                out.append(tok)
+    if not out:
+        raise ValueError(f"--gpu needs at least one card — valid: {', '.join(CARD_CHOICES)}")
+    return out
+
+
+def _resolve_cards(org: str, cards: list[str], key: str) -> list:
+    """Card names -> the org's GpuClassInfo entries (UUID + display name + prices)."""
+    classes = list(sc.list_gpu_classes(org, api_key=key))
+    out = []
+    for card in cards:
+        hit = [c for c in classes if _norm_card(c.name) == card]
+        if not hit:
+            raise ValueError(
+                f"card {card!r} is not offered by {org} — it offers: "
+                + ", ".join(sorted(_norm_card(c.name) for c in classes))
+            )
+        out.append(hit[0])
+    return out
+
+
+def _card_price(cls, tier: str) -> "float | None":
+    """Hourly USD of one GPU class at one priority tier (GpuClass.raw['prices'])."""
+    for row in cls.raw.get("prices") or []:
+        if str(row.get("priority", "")).lower() == tier:
+            try:
+                return float(row.get("price"))
+            except (TypeError, ValueError):
+                return None
+    return None
+
+
+def _card_row(cls, prio: "str | None") -> str:
+    """One card line: name + VRAM + the hourly price of every tier (the group's
+    own tier marked with *; prio None = no mark)."""
+    bits = []
+    for tier in PRICE_TIERS:
+        p = _card_price(cls, tier)
+        price = "-" if p is None else f"{p:.3f}"
+        bits.append(f"{tier[0].upper()}{price}" + ("*" if prio and tier == prio else ""))
+    return f"{cls.name:<24} " + "  ".join(bits)
+
+
+def _print_cards(classes: list, prio: "str | None" = None) -> None:
+    legend = (f"* = the group's priority {prio}" if prio else "by priority tier")
+    print(f"  card prices, USD/hour (H=high M=medium L=low B=batch, {legend}):")
+    for cls in classes:
+        print(f"    {_card_row(cls, prio)}")
+
+
+def _group_cards(g_raw: dict) -> list:
+    return list(((g_raw.get("container") or {}).get("resources") or {}).get("gpu_classes") or [])
+
+
+def _query_cards(orgs: list[str], cards: list[str], floors: "tuple | None", key: str) -> int:
+    """--query --gpu a,b: per-card hourly prices + availability counts per tier.
+
+    The availability endpoint answers for the WHOLE class set in one shot, so
+    the counts are per priority tier, not per card — printed as such. `floors`
+    (cpu, memory_mb, storage_amount) come from a group when --project/--group
+    are given: "can a container of this shape be placed right now".
+    """
+    cpu = mem = disk = None
+    if floors:
+        cpu, mem, disk = floors
+    rc = 0
+    for org in orgs:
+        try:
+            classes = _resolve_cards(org, cards, key)
+        except (ValueError, sc.SaladApiError) as e:
+            print(f"{org}: {e}")
+            rc = 1
+            continue
+        print(f"=== {org} — cards: {', '.join(cards)} ===")
+        _print_cards(classes)
+        req = sc.GpuAvailabilityRequest(
+            gpu_classes=tuple(c.id for c in classes),
+            cpu=cpu, memory_mb=mem, storage_amount=disk,
+        )
+        note = " (floors: " + ", ".join(
+            f"{n}={v}" for n, v in (("cpu", cpu), ("memory", mem), ("storage", disk)) if v
+        ) + ")" if (cpu or mem or disk) else ""
+        print(f"  query body: {json.dumps(req.to_body(), sort_keys=True)}{note}")
+        try:
+            av = sc.get_gpu_availability(org, req, api_key=key)
+        except sc.SaladApiError as e:
+            print(f"  availability: FAILED HTTP {e.status_code} — {e}")
+            rc = 1
+            continue
+        print(f"  available GPUs (counts are BY PRIORITY TIER for this whole card set, "
+              f"not per card):")
+        print(f"    high={av.available_gpu_high}  medium={av.available_gpu_medium}  "
+              f"low={av.available_gpu_low}  batch={av.available_gpu_batch}  "
+              f"on_call={av.on_call_gpu}")
+    return rc
+
+
+def _query_floors(orgs: list[str], cards: list[str], org: "str | None",
+                  project_flag: "str | None", group_flag: "str | None",
+                  fleet: dict, key: str) -> int:
+    """--query: take the resource floors from a group when --group is given, then query."""
+    floors = None
+    if group_flag is not None:
+        q_org = org or next(iter(fleet))
+        q_project = project_flag
+        if q_project is None:
+            projs = list(fleet.get(q_org, ()))
+            if len(projs) == 1:
+                q_project = projs[0]
+            else:
+                print(f"error: --query --group needs --project too ({q_org} has "
+                      f"{len(projs)} known project(s): {', '.join(projs) or 'none'})",
+                      file=sys.stderr)
+                return 2
+        try:
+            gg = sc.get_container_group(q_org, q_project, group_flag, api_key=key)
+        except sc.SaladApiError as e:
+            print(f"error: group GET failed: {e}", file=sys.stderr)
+            return 1
+        res = (gg.raw.get("container") or {}).get("resources") or {}
+        floors = (int(res.get("cpu") or 0) or None,
+                  int(res.get("memory") or 0) or None,
+                  int(res.get("storage_amount") or 0) or None)
+        print(f"resource floors from {q_org}/{q_project}/{group_flag}: "
+              f"cpu={floors[0]}  memory={floors[1]}MiB  storage={floors[2]}")
+    return _query_cards(orgs, cards, floors, key)
+
+
+def _spec_from_raw(g_raw: dict, name: str, priority: str):
+    """Rebuild a CREATE request from a group GET — the priority recreate path.
+
+    priority is CREATE-only, so a priority change is a delete+create; this copies
+    everything else (image ref as-is, env wholesale, resources, probes,
+    networking minus the server-assigned dns).
+    """
+    c = g_raw.get("container") or {}
+    res = c.get("resources") or {}
+    net = {k: v for k, v in (g_raw.get("networking") or {}).items()
+           if k in ("auth", "port", "protocol", "load_balancer", "single_connection_limit",
+                    "client_request_timeout", "server_response_timeout")
+           and v is not None}
+    old_name = str(g_raw.get("name") or "")
+    env = dict(c.get("environment_variables") or {})
+    # Any env value that IS the group name must follow the recreate. SALAD_GROUP is
+    # the idle watchdog's stop-endpoint path component (docker/idle_watchdog.py):
+    # left pointing at the deleted name, the self-stop 404s, the container self-exit
+    # is RESCHEDULED (not stopped) and billing continues — the exact failure the
+    # watchdog exists to prevent. MODEL_ALIAS is deliberately NOT touched: it is the
+    # client-facing key and stays stable across recreations.
+    for k, v in env.items():
+        if isinstance(v, str) and old_name and v == old_name:
+            env[k] = name
+    return sc.CreateContainerGroupRequest(
+        name=name,
+        autostart_policy=bool(g_raw.get("autostart_policy")),
+        container_image=str(c.get("image") or ""),
+        environment_variables=env,
+        cpu=int(res.get("cpu") or 1),
+        memory_mb=int(res.get("memory") or 2048),
+        replicas=int(g_raw.get("replicas") or 1),
+        restart_policy=str(g_raw.get("restart_policy") or "always"),
+        display_name=g_raw.get("display_name") or None,
+        command=tuple(c.get("command") or ()) or None,
+        gpu_classes=tuple(_group_cards(g_raw)) or None,
+        shm_size=int(res["shm_size"]) if res.get("shm_size") else None,
+        storage_amount=int(res["storage_amount"]) if res.get("storage_amount") is not None else None,
+        image_caching=c.get("image_caching"),
+        priority=priority,
+        networking=net or None,
+        readiness_probe=dict(g_raw["readiness_probe"]) if g_raw.get("readiness_probe") else None,
+        scheduled_scaling_enabled=g_raw.get("scheduled-scaling-enabled"),
+    )
+
+
+def _fresh_name(base: str, prio: str, org: str, project: str, key: str) -> str:
+    """A group name for the recreate: '<base>-<prio>' (+'-2', '-3', … when taken)."""
+    stem = f"{base}-{prio}"[:63].rstrip("-")
+    for i in range(0, 11):
+        cand = stem if i == 0 else f"{stem}-{i + 1}"[:63].rstrip("-")
+        if not SALAD_NAME_RE.match(cand):
+            continue
+        try:
+            sc.get_container_group(org, project, cand, api_key=key)
+        except sc.SaladApiError as e:
+            if e.status_code == 404:
+                return cand
+            raise
+    raise ValueError(f"no free name near {stem!r} — name a new group by hand")
+
+
+def _apply_priority(org: str, project: str, g, prio: str, key: str, force: bool) -> tuple[int, str | None]:
+    """--prio on `start`: priority is CREATE-ONLY, so this recreates the group.
+
+    Returns (rc, new_name): rc 0 + new_name None = nothing to do (already at that
+    priority, proceed to start); rc 0 + new_name = the group was recreated under
+    that name (start THAT one); rc != 0 = stop here.
+    """
+    current = str(g.raw.get("priority") or "")
+    if current == prio:
+        print(f"priority: already {prio} — nothing to change.")
+        return 0, None
+    print(f"priority: {current or '?'} -> {prio}.")
+    print("note: priority is CREATE-ONLY (measured 2026-10-14: PATCH container.priority -> 400")
+    print("      pending_update_in_progress; a top-level priority PATCH answers 200 and is")
+    print("      IGNORED — the GET keeps the old value). Changing it means DELETE + CREATE with a")
+    print("      FRESH NAME (the deleted name is tombstoned 10+ min). Everything else — image,")
+    print("      env, resources, probes, networking — is copied from the live group; the model")
+    print("      alias in the env is what clients use, and it is copied too.")
+    if not force:
+        try:
+            ans = input(f"type the group name ({g.name}) to delete+recreate it as "
+                        f"'<name>-{prio}': ").strip()
+        except EOFError:
+            print()
+            return 1, None
+        if ans != g.name:
+            print("aborted — nothing done.")
+            return 1, None
+    try:
+        new_name = _fresh_name(g.name, prio, org, project, key)
+    except (ValueError, sc.SaladApiError) as e:
+        print(f"error: {e}")
+        return 1, None
+    spec = _spec_from_raw(g.raw, new_name, prio)
+    if spec.autostart_policy:
+        print(f"WARNING: the copied autostart_policy is TRUE — CREATE starts the group at once,")
+        print("         which STARTS BILLING immediately (no separate start needed).")
+    print(f"recreate: {g.name} -> {new_name} (priority {prio})")
+    try:
+        sc.delete_container_group(sc.DeleteContainerGroupRequest(org, project, g.name), api_key=key)
+        created = sc.create_container_group(org, project, spec, api_key=key)
+    except sc.SaladApiError as e:
+        print(f"error: {e}")
+        if e.status_code == 400 and "name_conflict" in str(e.raw_body):
+            print(f"note: {new_name!r} conflicts with a tombstoned name — the Salad name tombstone")
+            print("      lasts 10+ minutes after a delete; pick another name and re-run.")
+        print(f"state: {g.name} was deleted; {new_name} was NOT created. Re-create it with:")
+        print(f"  python3 utils/sl_admin.py deploy --type <type> --org {org} --project {project} "
+              f"--group <fresh-name> -- --priority {prio}")
+        return 1, None
+    print(f"created: {new_name}  priority={prio}  status={created.current_status or '?'}")
+    # A fresh group is 'pending' for a while and refuses writes/starts until it
+    # settles (the deployers do the same wait on their create path).
+    for _ in range(40):
+        try:
+            new = sc.get_container_group(org, project, new_name, api_key=key)
+        except sc.SaladApiError:
+            time.sleep(1.5)
+            continue
+        if not new.raw.get("pending_change"):
+            print(f"settled: {new_name} is ready to start.")
+            return 0, new_name
+        time.sleep(1.5)
+    print("note: the new group is still 'pending' after 60s — a start may 400; re-run in a minute.")
+    return 0, new_name
+
+
+def _apply_cards(org: str, project: str, g, cards: list[str], key: str, force: bool) -> tuple[int, object]:
+    """--gpu on `start`: make the group's gpu_classes == cards, then it is startable.
+
+    Returns (rc, group): rc 0 = proceed to start (on `group`, re-read after a
+    PATCH); rc != 0 = stop here. A card change IS PATCH-able
+    (UpdateContainerResources.gpu_classes) — unlike priority. A group that has
+    been started before PARKS the update (pending_update_in_progress): the new
+    cards land at the next start, i.e. the start this command is about to do.
+    """
+    try:
+        classes = _resolve_cards(org, cards, key)
+    except (ValueError, sc.SaladApiError) as e:
+        print(f"error: {e}")
+        return 1, g
+    want = [c.id for c in classes]
+    have = _group_cards(g.raw)
+    prio = str(g.raw.get("priority") or "medium")
+    _print_cards(classes, prio)
+    if set(have) == set(want):
+        print(f"cards: already {_gpu_names(org, want, key)} — no reconfigure needed.")
+        return 0, g
+    print(f"cards: {_gpu_names(org, have, key) if have else '(none)'} "
+          f"-> {_gpu_names(org, want, key)}")
+    if not force:
+        try:
+            ans = input(f"reconfigure {g.name} to these card(s) and start it "
+                        f"[y/N]: ").strip().lower()
+        except EOFError:
+            print()
+            return 1, g
+        if ans not in ("y", "yes"):
+            print("aborted — nothing done.")
+            return 1, g
+    try:
+        sc.update_container_group(
+            org, project, g.name,
+            sc.UpdateContainerGroupRequest(gpu_classes=tuple(want)), api_key=key)
+    except sc.SaladApiError as e:
+        print(f"error: the card PATCH was refused — HTTP {e.status_code}: {e}")
+        if e.status_code == 400 and "pending_update_in_progress" in str(e.raw_body):
+            print("the group is ALREADY PARKED from an earlier update: no further PATCH lands")
+            print("until the paid start applies it. Start it now (the parked spec lands), then")
+            print("re-run this command to change the card.")
+            if force:
+                print(f"--force: starting now on the CURRENT cards ({_gpu_names(org, have, key)}).")
+                return 0, g
+            return 1, g
+        return 1, g
+    print("card PATCH accepted (200).")
+    # Read back: a never-started group applies at once; a group that has been
+    # started parks (the GET keeps the old spec for minutes, and the parked
+    # update lands at the next start). The GET lags, so poll briefly and report
+    # what the readback shows — never claim more than it proves.
+    last = g
+    for _ in range(4):
+        try:
+            last = sc.get_container_group(org, project, g.name, api_key=key)
+        except sc.SaladApiError:
+            time.sleep(1.5)
+            continue
+        if set(_group_cards(last.raw)) == set(want):
+            print(f"verified: {g.name} now lists {_gpu_names(org, want, key)}.")
+            return 0, last
+        time.sleep(1.5)
+    print("the GET still lists the old card(s) — the readback lags by minutes, and a")
+    print("group that has been started before PARKS the update: the new card(s) land at")
+    print("the next start, i.e. the start this command is about to do.")
+    return 0, last
 
 
 def _describe(org: str, project: str, name: str, key: str, raw: bool = False) -> int:
@@ -1325,7 +1738,9 @@ def _create_project(org: str, project: str, key: str,
 
 
 def _deploy(key: str, type_key: str | None, org: str | None, project: str | None,
-            group: str | None, start: bool, extra: list[str]) -> int:
+            group: str | None, start: bool, extra: list[str],
+            cards: "list[str] | None" = None, prio: str | None = None,
+            force: bool = False) -> int:
     """Deploy a group by picking a DOCKER TYPE (one of the profiles our images
     support) and routing to its deployer.
 
@@ -1384,6 +1799,18 @@ def _deploy(key: str, type_key: str | None, org: str | None, project: str | None
     cmd = [sys.executable, "-I", path, "--org", org, "--project", project, "--group", group]
     if not start and accepts_no_start:
         cmd.append("--no-start")
+    # --gpu / --prio are the deployer's own flags (its `--gpu` choices are
+    # per-type: q6 = rtx5090/rtx3090, ampere = sm_86 30-series — the deployer
+    # validates them and prints its own list on a mismatch). Flags after `--`
+    # are verbatim and win, so we do not duplicate a flag the user passed there.
+    if cards:
+        if "--gpu" in extra:
+            print("note: --gpu given both as a flag and after `--` — the deployer takes the last")
+        cmd.extend(["--gpu", *cards])
+    if prio:
+        if "--priority" in extra:
+            print("note: --prio given both as a flag and after `--` — the deployer takes the last")
+        cmd.extend(["--priority", prio])
     cmd.extend(extra)
 
     # Does THIS run bill? Deployers that accept --no-start bill only when we
@@ -1399,13 +1826,16 @@ def _deploy(key: str, type_key: str | None, org: str | None, project: str | None
         print("note:  this deployer creates the group STOPPED (autostart off) — "
               "it never starts, so nothing bills; start it later with the `start` action")
     if will_bill:
-        try:
-            if input("  type 'y' to START this group (it bills): ").strip().lower() != "y":
+        if force:
+            print("note: --force — the paid-start confirmation is SKIPPED, this run BILLS per second.")
+        else:
+            try:
+                if input("  type 'y' to START this group (it bills): ").strip().lower() != "y":
+                    print("aborted — nothing done.")
+                    return 1
+            except EOFError:
                 print("aborted — nothing done.")
                 return 1
-        except EOFError:
-            print("aborted — nothing done.")
-            return 1
 
     rc = subprocess.call(cmd)
     if rc != 0:
@@ -1434,7 +1864,9 @@ def main(argv: list[str]) -> int:
     project_flag: str | None = None
     group_flag: str | None = None
     projects_flag: list[str] = []
-    start = register_only = raw_dump = False
+    gpu_flag: list[str] = []
+    prio_flag: str | None = None
+    start = register_only = raw_dump = query = force = False
     use_portal = True
     positional: list[str] = []
     extra: list[str] = []
@@ -1489,6 +1921,37 @@ def main(argv: list[str]) -> int:
                 group_flag = val
             i += 2
             continue
+        if arg == "--gpu":
+            if i + 1 >= len(argv):
+                print("error: --gpu needs a value — a comma-separated card list, "
+                      f"e.g. --gpu {','.join(CARD_CHOICES[:3])}", file=sys.stderr)
+                return 2
+            try:
+                gpu_flag.extend(_parse_cards([argv[i + 1]]))
+            except ValueError as e:
+                print(f"error: {e}", file=sys.stderr)
+                return 2
+            i += 2
+            continue
+        if arg == "--prio":
+            if i + 1 >= len(argv):
+                print("error: --prio needs a value", file=sys.stderr)
+                return 2
+            val = argv[i + 1].strip().lower()
+            if val not in PRIORITY_CHOICES:
+                print(f"error: --prio must be one of {', '.join(PRIORITY_CHOICES)}", file=sys.stderr)
+                return 2
+            prio_flag = PRIORITY_ALIASES.get(val, val)
+            i += 2
+            continue
+        if arg == "--query":
+            query = True
+            i += 1
+            continue
+        if arg in ("--y", "--force", "-y"):
+            force = True
+            i += 1
+            continue
         if arg == "--start":
             start = True
             i += 1
@@ -1526,8 +1989,8 @@ def main(argv: list[str]) -> int:
     if type_key is not None and action != "deploy":
         print("error: --type applies to `deploy` only", file=sys.stderr)
         return 2
-    if group_flag is not None and action not in ("deploy", "describe"):
-        print("error: --group applies to `deploy` and `describe`", file=sys.stderr)
+    if group_flag is not None and action not in ("deploy", "describe") and not query:
+        print("error: --group applies to `deploy`, `describe` and `--query`", file=sys.stderr)
         return 2
     if raw_dump and action != "describe":
         print("error: --raw applies to `describe` only (the full GET as JSON)", file=sys.stderr)
@@ -1548,6 +2011,21 @@ def main(argv: list[str]) -> int:
     if min_bw_mbps is not None and action != "start":
         print("error: --min-bw-mbps applies to `start` only (the arbitrator "
               "watches the HF download after a start)", file=sys.stderr)
+        return 2
+    if gpu_flag and action not in ("deploy", "start") and not query:
+        print("error: --gpu applies to `deploy` (create/update on that card), to `start` "
+              "(reconfigure + start) and to `--query`", file=sys.stderr)
+        return 2
+    if prio_flag is not None and action not in ("deploy", "start"):
+        print("error: --prio applies to `deploy` (create-time priority) and to `start` "
+              "(priority is CREATE-only, so `start --prio` recreates the group)", file=sys.stderr)
+        return 2
+    if query and not gpu_flag:
+        print("error: --query needs --gpu CARD (a comma-separated card list)", file=sys.stderr)
+        return 2
+    if force and action not in ("start", "deploy"):
+        print("error: --y/--force applies to `start` and `deploy` (it skips their "
+              "confirmations)", file=sys.stderr)
         return 2
 
     fleet = _fleet()
@@ -1584,6 +2062,8 @@ def main(argv: list[str]) -> int:
     orgs = [org] if org is not None else list(fleet)
 
     try:
+        if query:
+            return _query_floors(orgs, gpu_flag, org, project_flag, group_flag, fleet, key)
         if action == "create-org":
             slug = rest[0] if rest else None
             if slug is None:
@@ -1620,7 +2100,7 @@ def main(argv: list[str]) -> int:
 
         if action == "deploy":
             return _deploy(key, type_key, org_flag, project_flag, group_flag,
-                           start, extra)
+                           start, extra, gpu_flag, prio_flag, force)
         if action == "list":
             _print_table(_rows(orgs, key), key)
             print(f"actions: {', '.join(ACTIONS)} — see --help")
@@ -1670,7 +2150,28 @@ def main(argv: list[str]) -> int:
         if action == "stats":
             return _stats(f"{s_org}/{s_project}", g.name, key, interval)
         # start / stop / delete need confirmation before the call
-        if not _confirm(action, sel):
+        if action == "start" and (prio_flag is not None or gpu_flag):
+            # Priority first: it can REPLACE the group (CREATE-only), and the card
+            # change then applies to the group that survives.
+            if prio_flag is not None:
+                rc, new_name = _apply_priority(s_org, s_project, g, prio_flag, key, force)
+                if rc != 0:
+                    return rc
+                if new_name:
+                    try:
+                        g = sc.get_container_group(s_org, s_project, new_name, api_key=key)
+                    except sc.SaladApiError as e:
+                        print(f"error: {e}")
+                        return 1
+                    print(f"starting the recreated group: {g.name}")
+            if gpu_flag:
+                rc, g = _apply_cards(s_org, s_project, g, gpu_flag, key, force)
+                if rc != 0:
+                    return rc
+            sel = (s_org, s_project, g)
+        if force and action == "start":
+            print(f"note: --force — confirmation SKIPPED; starting {g.name} BILLS per second.")
+        elif not _confirm(action, sel):
             print("aborted — nothing done.")
             return 1
         rc = _run_action(action, sel, key)

@@ -393,6 +393,114 @@ def list_gpu_classes(
 
 
 # ---------------------------------------------------------------------------
+# get_gpu_availability (POST /organizations/{organization_name}/availability/
+#                       sce-gpu-availability)
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class GpuAvailabilityRequest:
+    """Typed GpuAvailabilityPrototype (spec components/schemas/GpuAvailabilityPrototype).
+
+    `gpu_classes` is the ONLY required field (minItems 1, UUID strings — the ids
+    from list_gpu_classes, not the display names). The resource floors are
+    optional filters: Salad answers "how many GPUs can host a container with at
+    least this much cpu / memory (MB) / storage (bytes)". `to_body()` omits
+    unset fields.
+    """
+
+    gpu_classes: tuple[str, ...]
+    cpu: int | None = None
+    memory_mb: int | None = None
+    storage_amount: int | None = None
+    country_codes: tuple[str, ...] | None = None
+
+    def __post_init__(self) -> None:
+        if not self.gpu_classes:
+            raise ValueError("gpu_classes is required (spec minItems 1)")
+        for gid in self.gpu_classes:
+            if not _UUID_RE.match(str(gid)):
+                raise ValueError(
+                    f"gpu class {gid!r} is not a UUID — pass the ids from list_gpu_classes, "
+                    "not display names like 'rtx3090'"
+                )
+        if self.cpu is not None and self.cpu < 1:
+            raise ValueError(f"cpu must be >= 1, got {self.cpu}")
+        if self.memory_mb is not None and self.memory_mb < 1:
+            raise ValueError(f"memory_mb must be >= 1, got {self.memory_mb}")
+        if self.storage_amount is not None and self.storage_amount < 0:
+            raise ValueError(f"storage_amount must be >= 0, got {self.storage_amount}")
+        for cc in self.country_codes or ():
+            if not re.match(r"^[a-z]{2}$", str(cc)):
+                raise ValueError(f"country code {cc!r} must be a 2-letter lowercase code")
+
+    def to_body(self) -> dict:
+        body: dict = {"gpu_classes": [str(g) for g in self.gpu_classes]}
+        if self.cpu is not None:
+            body["cpu"] = self.cpu
+        if self.memory_mb is not None:
+            body["memory"] = self.memory_mb
+        if self.storage_amount is not None:
+            body["storage_amount"] = self.storage_amount
+        if self.country_codes is not None:
+            body["country_codes"] = [str(c) for c in self.country_codes]
+        return body
+
+
+@dataclass(frozen=True)
+class GpuAvailabilityInfo:
+    """GpuAvailability response: counts BY PRIORITY TIER (not per card).
+
+    The endpoint answers for the whole set of classes in one shot, so the
+    per-card split is not available — the numbers are how many GPUs the account
+    can place at each priority right now. `raw` keeps the response untouched.
+    """
+
+    available_gpu_batch: int
+    available_gpu_high: int
+    available_gpu_low: int
+    available_gpu_medium: int
+    on_call_gpu: int
+    raw: dict = field(default_factory=dict, repr=False)
+
+
+def get_gpu_availability(
+    organization_name: str,
+    request: GpuAvailabilityRequest,
+    api_key: str | None = None,
+    timeout: float = 30.0,
+) -> GpuAvailabilityInfo:
+    """Query GPU availability for an organization (operationId: get_gpu_availability).
+
+    POST /organizations/{organization_name}/availability/sce-gpu-availability
+    with a GpuAvailabilityPrototype body. Free (a read, no billing). Returns a
+    GpuAvailabilityInfo on 200; raises SaladApiError for 400/401/403/404/429
+    per the spec.
+    """
+    key = api_key if api_key is not None else load_api_key()
+    path = f"/organizations/{organization_name}/availability/sce-gpu-availability"
+    status, _reason, _headers, raw = _http("POST", path, key, body=request.to_body(), timeout=timeout)
+    if status == 200:
+        payload = json.loads(raw.decode("utf-8"))
+
+        def _n(name: str) -> int:
+            try:
+                return int(payload.get(name) or 0)
+            except (TypeError, ValueError):
+                return 0
+
+        return GpuAvailabilityInfo(
+            available_gpu_batch=_n("available_gpu_batch"),
+            available_gpu_high=_n("available_gpu_high"),
+            available_gpu_low=_n("available_gpu_low"),
+            available_gpu_medium=_n("available_gpu_medium"),
+            on_call_gpu=_n("on_call_gpu"),
+            raw=payload,
+        )
+    raise SaladApiError(status, _parse_problem(raw), raw.decode("utf-8", "replace"))
+
+
+# ---------------------------------------------------------------------------
 # create_container_group (POST .../containers)
 # ---------------------------------------------------------------------------
 
