@@ -92,3 +92,182 @@ Free by construction: 1–4 cost nothing, 5 is the only paid step, and the group
 - `tests/` — **local** run/test helpers for the compose services (nothing here touches the Salad API): `run_27b.sh` / `run_9b*.sh` (they cd into `docker/` themselves), `curl1.sh` / `curl2.sh` (API check / question→answer, read the key through a local `api.txt` symlink), `run-nvidia-smi.sh` (one-shot GPU info). See `tests/README.md`.
 
 - `claude/` — the Claude Code ↔ Salad gateway stack: `cl_salad` / `sl_claude_deploy` + `sl_proxy.py` (Anthropic↔OpenAI bridge), gateway test helpers (`sl_curl.sh`, `sl_chat.sh`), and the gateway `salad_api.txt`. See `claude/README.md`.
+
+## sladmin --help
+
+Manage the Salad fleet — list, live-refresh, start, stop, wait, stats, delete,
+create-org, create-project, deploy.
+
+Usage:
+  python3 utils/sl_admin.py [ACTION] [ORG] [--interval N]
+
+  ACTION    list (default)  one-shot status table
+            refresh         re-render the table every N seconds (Ctrl-C to stop)
+            start           pick a group (by # or name) and start it — INCURS COST
+                            (`--gpu CARD` reconfigures the card(s) first, `--prio`
+                            recreates the group at that priority — CREATE-only)
+            stop            pick a group and stop it
+            wait            poll a group until at least one instance reports
+                            ready, then exit (group status alone is not enough:
+                            Salad marks a group `running` while instances are
+                            still allocating/downloading/creating)
+            describe        DUMP ONE GROUP'S WHOLE CONFIG, read-only: identity
+                            (id/version/pending_change/timestamps), state,
+                            lifecycle (replicas, restart/autostart policy,
+                            priority, scaling), networking (dns/port/auth),
+                            IMAGE (repo, tag, manifest digest, Hub link, the
+                            `docker image inspect` line for the local image id),
+                            container (hash, image_caching, size, cpu/memory/shm/
+                            storage, GPU classes by NAME, volume, the CMD),
+                            probes, the FULL env (secret-looking values redacted),
+                            live instances (instance id, state, ready, machine_id,
+                            pull progress, ssh line) and the derived client lines.
+                            `--raw` also dumps the whole GET as JSON (env values
+                            redacted). Pick from the numbered table, or name it:
+                              describe ORG --project P --group G [--raw]
+            stats           print llama-server stats (like utils/llama_stats.py:
+                            tps / queue / totals, --interval loop, Ctrl-C stops)
+                            — but ONLY when the group is fully ready: status
+                            running, all `replicas` instances present, and each
+                            one ready=true (stricter than wait's "at least one
+                            ready"). Otherwise it prints the state and exits 1
+                            without scraping
+            delete          pick a group and delete it — IRREVERSIBLE
+            create-org      register (and try to create) a new ORGANIZATION
+            create-project  register (and try to create) a new PROJECT in an org
+            deploy          pick a DOCKER TYPE (the profiles our images support)
+                            and run its deployer against an org/project/group —
+                            ZERO COST by default (--no-start; --start bills)
+  ORG       ma-casa-in-paris | akl-on-salad (default: every known org)
+  --interval N
+            poll period in seconds for refresh / wait / stats (default 5)
+  --min-bw-mbps N
+            start only: BANDWIDTH ARBITRATOR — after the start is accepted,
+            watch the HF model download's speed (read from the container's
+            ${API_STATE_DIR}/bw.log over SSH, written by docker/bw_reporter.py)
+            and when the median rate over a 2-min window falls below N Mbps,
+            force Salad to REALLOCATE the instance to a new node via the API
+            (the rejected node is excluded from the account's allocation pool
+            for 48 h, so each shot lands on a genuinely new host). Max 3
+            shots; if no faster host appears in 3 shots the 4th host is KEPT
+            and the download continues. The group is NEVER stopped/SIGTERMed
+            for this — reallocate is the only lever (a stop/start loop across
+            a row of slow nodes is exactly what kills billing hygiene).
+            Needs the bw_reporter image generation (base/generic v8, q6 v10,
+            ampere v6) and SSH access to the instance (account-level key).
+            Exit codes: 0 accepted / download complete / kept 4th host;
+            1 group bail (group stopped/failed); 2 usage; 3 arbitrator bail
+            (persistent ssh failure, alloc timeout, reallocate API failure,
+            missing bw.log = old image). Ctrl-C leaves the group running.
+
+  card / priority flags
+  --gpu CARD
+            CARD = COMMA-SEPARATED CARDS from:
+            rtx3080ti, rtx3080, rtx3090, rtx3090ti, rtx4080, rtx4090, rtx5090
+            (repeated --gpu flags and spaces are fine: --gpu rtx3090,rtx4090).
+            deploy: passed to the deployer as --gpu <cards> (its own per-type
+            choices still apply — q6 = rtx5090/rtx3090, ampere = sm_86 30-series).
+            start: the group's gpu_classes are PATCHed to CARD before the start.
+            If the group's configured card(s) differ from CARD it asks for
+            confirmation; --y/--force answers it (reconfigure + start, no ask).
+            A card change IS PATCH-able (UpdateContainerResources.gpu_classes);
+            a group that has been started before PARKS the update — the new
+            card(s) land at the next start, i.e. the start this command does.
+            Prints each card's hourly price.
+  --prio PRIO
+            PRIO = low | med | medium | high | batch (`med` == `medium`).
+            deploy: passed to the deployer as --priority (priority is a CREATE
+            field, so a new group gets it directly).
+            start: priority is CREATE-ONLY (measured 2026-10-14: PATCH
+            container.priority -> 400 pending_update_in_progress; a top-level
+            priority PATCH answers 200 and the GET proves it was IGNORED), so
+            this DELETES the group and CREATES it with a fresh name
+            '<name>-<prio>' at that priority, copying image/env/resources/
+            probes/networking. Asks for the typed group name; --y/--force skips
+            the ask. The old name is then tombstoned 10+ minutes.
+  --query   with --gpu CARD: print each card's HOURLY PRICE (all four tiers)
+            and the org's GPU availability. The counts come from POST
+            .../availability/sce-gpu-availability and are BY PRIORITY TIER for
+            the whole card set (high/medium/low/batch + on_call), not per card.
+            With --project P --group G it queries with that group's cpu/memory/
+            storage floors ("can a container of this shape be placed now").
+            Read-only, free.
+  --y / --force
+            skip confirmations on `start` (card diff, paid start) and on `deploy`
+            (the paid --start 'y'). Every bypass prints a PAID notice.
+
+  deploy flags
+  --type T
+            the DOCKER TYPE key (see the `deploy` action's table). Prompted
+            with a numbered menu when absent.
+  --org O / --project P / --group G
+            answer the corresponding prompt on the command line; anything
+            unspecified is prompted (org/project from the fleet map, group
+            name with the type's default in brackets).
+  --start
+            PAID opt-in: run the deployer without `--no-start`, after typing
+            'y' at the confirmation. Default is config-only (CREATE/PATCH are
+            free; only START bills). The 9B deployers create the group STOPPED
+            and never start, so nothing bills on those types either way.
+  -- <flags>
+            everything after `--` is passed to the deployer verbatim
+            (--ctx-size, --gpu, --model-repo, --idle-shutdown, …).
+  create flags
+  --project P        (create-org) project to register with the org; repeatable
+  --register-only    skip the API/portal attempts, only write fleet.json
+  --no-portal        skip the portal (web-UI backend) attempt
+
+  python3 utils/sl_admin.py                     # status, all known orgs
+  python3 utils/sl_admin.py akl-on-salad        # one org
+  python3 utils/sl_admin.py refresh             # live table, Ctrl-C to stop
+  python3 utils/sl_admin.py delete              # numbered table -> prompt -> confirm
+  python3 utils/sl_admin.py start akl-on-salad  # start a group in that org
+  python3 utils/sl_admin.py start --min-bw-mbps 30   # start + arbitrator
+  python3 utils/sl_admin.py wait                # after start: poll until ready
+  python3 utils/sl_admin.py stats               # stats, only if fully ready
+  python3 utils/sl_admin.py deploy              # prompt: docker type -> org/project/group
+  python3 utils/sl_admin.py deploy --type ampere --project llm --group my-atx
+  python3 utils/sl_admin.py deploy --type generic --group my-gguf --       --model-repo Some/Org --model-file Model-Q5_K_M.gguf --ctx-size 32768
+  python3 utils/sl_admin.py create-org my-new-org --project default
+  python3 utils/sl_admin.py create-project my-new-org llm
+  python3 utils/sl_admin.py --query --gpu rtx3090,rtx4090          # prices + availability
+  python3 utils/sl_admin.py --query --gpu rtx3090 --project llm --group atx-swift-27b-q5
+  python3 utils/sl_admin.py start akl-on-salad --gpu rtx3090      # card diff -> ask -> start
+  python3 utils/sl_admin.py start akl-on-salad --gpu rtx4090 --force   # no ask (PAID)
+  python3 utils/sl_admin.py start akl-on-salad --prio high        # recreate at high priority
+  python3 utils/sl_admin.py deploy --type ampere --project llm --group atx-med       --gpu rtx3090 --prio med
+
+ORGANIZATION / PROJECT CREATION — the honest state (live-probed 2026-10-13,
+tools/probe_org_create.py): the PUBLIC API (api.salad.com/api/public) has NO
+create-org, NO create-project, NO list-orgs and NO list-projects — every one of
+those paths answers 404 (the OpenAPI spec's 24 paths are all
+`/organizations/{org}/...`, none on the collection itself). Orgs and projects
+are created in the WEB UI (portal.salad.com), whose backend
+(portal-api.salad.com/api/portal) is what utils/billing.py logs into. So
+`create-org` / `create-project` do two things: (1) ATTEMPT the portal endpoint
+with the billing vault's credentials (best-effort, `--no-portal` to skip — the
+portal API is undocumented and unverified, so a 404 there is expected, not a
+bug), and
+(2) REGISTER the org/project in the local fleet map (utils/fleet.json) so the
+rest of this tool sees it. Registration is the part that always works; use
+`--register-only` after you create in the web UI.
+
+The SaladCloud API has no list-orgs / list-projects operations, so this walks
+a fixed map of the account's orgs and their projects: KNOWN_PROJECTS below,
+overlaid by utils/fleet.json (tracked; what create-org/create-project write).
+
+For every group (active or not) it prints: status, age (since creation),
+uptime (time in the current state), instance counts, and the gateway URL from
+networking.dns (the host Salad assigns per group; the port is routed by the
+gateway itself, so no :port suffix is needed). For groups that are running it
+also fetches their live instances and prints the SSH line (`ssh -p PORT
+root@IP`) plus the host-key fingerprint.
+
+Notes:
+  * start bills you: running instances are charged per second.
+  * delete is irreversible and leaves a NAME TOMBSTONE: recreating a just-
+    deleted group name 400s with name_conflict for 10+ minutes — use a fresh
+    name if you recreate (keep the model alias stable for clients).
+  * There is no group-level image "refresh" in the API (live-probed
+    2026-10-06); to run a new image, PATCH a new image ref — the deployers do
+    this (digest-pinned, to bypass the worker image cache).
