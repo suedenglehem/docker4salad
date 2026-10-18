@@ -108,7 +108,7 @@ python3 utils/sl_admin.py [ACTION] [ORG[/PROJECT]] [GROUP] [--interval N]
 |---|---|
 | `list` *(default)* | one-shot status table — status, age (since creation), uptime (time in the current state), instance counts, gateway URL from `networking.dns` (no `:port` suffix; the gateway routes it). Running groups also get their `ssh -p PORT root@IP` line + host-key fingerprint |
 | `refresh` | re-render the table every `--interval N` seconds (Ctrl-C stops) |
-| `start` | pick a group (# or name) and start it — **INCURS COST**, running instances bill per second. `--gpu CARD` reconfigures the card(s) first, `--prio` recreates the group at that priority (CREATE-only) |
+| `start` | pick a group (# or name) and start it — **INCURS COST**, running instances bill per second. `--gpu CARD` reconfigures the card(s) first, `--prio` recreates the group at that priority (CREATE-only), `--wait` keeps polling in-process until it is ready, `--tmax N` bounds that wait |
 | `stop` | pick a group and stop it |
 | `wait` | poll a group until at least one instance reports `ready`, then exit — group status alone is not enough: Salad marks a group `running` while instances are still allocating/downloading/creating |
 | `describe` | **dump one group's whole config, read-only**: identity (id/version/pending_change/timestamps), state, lifecycle (replicas, restart/autostart, priority, scaling), networking (dns/port/auth), **image** (repo, tag, manifest digest, Hub link, the `docker image inspect` line), container (hash, image_caching, cpu/memory/shm/storage, **GPU classes by NAME**, volume, CMD), probes, the **full env** (secret-looking values redacted), live instances (id, state, ready, machine_id, pull progress, ssh line) + the derived client lines. `--raw` also dumps the whole GET as JSON. `describe ORG --project P --group G [--raw]`, or pick from the numbered table |
@@ -133,6 +133,8 @@ python3 utils/sl_admin.py [ACTION] [ORG[/PROJECT]] [GROUP] [--interval N]
 |---|---|
 | `--interval N` | poll period in seconds for `refresh` / `wait` / `stats` (default 5) |
 | `--min-bw-mbps N` | `start` only: the **bandwidth arbitrator** — after the start is accepted, watch the HF model download's speed (read from the container's `${API_STATE_DIR}/bw.log` over SSH, written by `docker/bw_reporter.py`); when the median rate over a 2-min window falls below N Mbps, POST the instance `/reallocate` so Salad places it on a **new node** (the rejected node is excluded from the account's pool for 48 h, so every shot is a genuinely new host). Max **3 shots**; if no faster host appears in 3, the **4th host is KEPT** and the download continues. The group is **never stopped/SIGTERMed** for bandwidth. Needs a bw_reporter image (base/generic v8, q6 v10, ampere v6) + SSH access. Exit codes: **0** accepted / download complete / kept 4th host · **1** group bail (stopped/failed) · **2** usage · **3** arbitrator bail (persistent ssh failure, alloc timeout, reallocate API failure, missing `bw.log` = old image). Ctrl-C leaves the group running |
+| `--wait` | `start` only: after the start is accepted (202), keep polling **in this process** (exactly like the `wait` action) until at least one instance reports ready — the command's final state is "ready". The group is **never stopped** by this: if the group bails (stopped/failed/…) the wait exits and Salad's state stands — re-run `wait` to pick the polling up. Exit codes: **0** ready · **1** group bail or (with `--tmax`) budget expiry · **2** usage |
+| `--tmax N` | `start` only: a **time budget** for the readiness wait — N seconds (`90`) or N minutes (`5m`). **Implies `--wait`**. When the budget runs out the wait **stops trying** (exit 1): the group is **left running** — nothing is stopped — re-run `wait` (or `start … --wait`) to keep polling. With `--min-bw-mbps` the arbitrator (own internal timeouts) runs first; the wait then gets the full budget |
 
 **card & priority**
 
@@ -174,6 +176,8 @@ python3 utils/sl_admin.py stats                             # stats, only if ful
 python3 utils/sl_admin.py start ma-casa-in-paris/llm atx-swift-27b-q5   # start that group
 python3 utils/sl_admin.py ssh ma-casa-in-paris/llm atx-swift-27b-q5     # ssh into it
 python3 utils/sl_admin.py start ma-casa-in-paris/llm atx-swift-27b-q5 --min-bw-mbps 100
+python3 utils/sl_admin.py start ma-casa-in-paris/llm atx-swift-27b-q5 --wait   # start + wait for ready
+python3 utils/sl_admin.py start akl-on-salad --tmax 5m              # start, wait up to 5 min
 python3 utils/sl_admin.py deploy                            # prompt: type -> org/project/group
 python3 utils/sl_admin.py deploy --type ampere --project llm --group my-atx
 python3 utils/sl_admin.py deploy --type generic --group my-gguf -- \

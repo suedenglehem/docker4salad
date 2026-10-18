@@ -9,7 +9,9 @@ Usage:
             refresh         re-render the table every N seconds (Ctrl-C to stop)
             start           pick a group (by # or name) and start it — INCURS COST
                             (`--gpu CARD` reconfigures the card(s) first, `--prio`
-                            recreates the group at that priority — CREATE-only)
+                            recreates the group at that priority — CREATE-only,
+                            `--wait` keeps polling until it is ready, `--tmax N`
+                            bounds that wait)
             stop            pick a group and stop it
             wait            poll a group until at least one instance reports
                             ready, then exit (group status alone is not enough:
@@ -72,6 +74,22 @@ Usage:
             1 group bail (group stopped/failed); 2 usage; 3 arbitrator bail
             (persistent ssh failure, alloc timeout, reallocate API failure,
             missing bw.log = old image). Ctrl-C leaves the group running.
+  --wait
+            start only: after the start is accepted (202), keep polling IN
+            THIS PROCESS (exactly like the `wait` action) until at least one
+            instance reports ready — the command's final state is "ready".
+            The group is NEVER stopped by this: if the group bails
+            (stopped/failed/...) the wait exits 1 and Salad's state stands;
+            re-run `wait` to pick the polling up. Exit codes: 0 ready;
+            1 group bail or (with --tmax) budget expiry; 2 usage.
+  --tmax N
+            start only: a time budget for the readiness wait — N seconds
+            (90) or N minutes (5m). Implies --wait. When the budget runs out
+            the wait STOPS TRYING (exit 1): the group is left RUNNING —
+            nothing is stopped — re-run `wait` (or `start … --wait`) to keep
+            polling. With --min-bw-mbps the arbitrator (which has its own
+            internal timeouts) runs first; the wait then gets the full
+            budget.
 
   card / priority flags
   --gpu CARD
@@ -141,6 +159,8 @@ Usage:
   python3 utils/sl_admin.py start ma-casa-in-paris/llm atx-swift-27b-q5   # start that group
   python3 utils/sl_admin.py ssh ma-casa-in-paris/llm atx-swift-27b-q5     # ssh into it
   python3 utils/sl_admin.py start ma-casa-in-paris/llm atx-swift-27b-q5 --min-bw-mbps 100
+  python3 utils/sl_admin.py start ma-casa-in-paris/llm atx-swift-27b-q5 --wait
+  python3 utils/sl_admin.py start akl-on-salad --tmax 5m              # start, wait up to 5 min
   python3 utils/sl_admin.py deploy              # prompt: docker type -> org/project/group
   python3 utils/sl_admin.py deploy --type ampere --project llm --group my-atx
   python3 utils/sl_admin.py deploy --type generic --group my-gguf -- \
@@ -223,6 +243,9 @@ FLEET_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fleet.jso
 # Salad's own name rules (OpenAPI OrganizationName / ProjectName): 2-63 chars,
 # lowercase, start [a-z], end [a-z0-9], inner [a-z0-9-].
 SALAD_NAME_RE = re.compile(r"^[a-z][a-z0-9-]{0,61}[a-z0-9]$")
+
+# --tmax N: plain int = seconds (90), int + m = minutes (5m).
+TMAX_RE = re.compile(r"^(\d+)(m?)$")
 
 # The portal backend the WEB UI uses (utils/billing.py logs into this).
 PORTAL_BASE = "https://portal-api.salad.com/api/portal"
@@ -626,14 +649,18 @@ def _confirm(action: str, sel: tuple[str, str, sc.ContainerGroupInfo]) -> bool:
     return ans in ("y", "yes")
 
 
-def _run_action(action: str, sel: tuple[str, str, sc.ContainerGroupInfo], key: str) -> int:
+def _run_action(action: str, sel: tuple[str, str, sc.ContainerGroupInfo], key: str,
+                auto_wait: bool = False) -> int:
     org, project, g = sel
     name = g.name
     try:
         if action == "start":
             sc.start_container_group(sc.StartContainerGroupRequest(org, project, name), api_key=key)
             print(f"202 Accepted — {name} is starting.")
-            print(f"wait for it to become ready:  python3 utils/sl_admin.py wait {org}")
+            if auto_wait:
+                print("this process keeps polling until it is ready (--wait)…")
+            else:
+                print(f"wait for it to become ready:  python3 utils/sl_admin.py wait {org}")
             print(
                 f"then run Claude Code:        sl_claude_deploy --org {org} --project {project} --group {name}"
             )
@@ -761,7 +788,8 @@ def _refresh(orgs: list[str], key: str, interval: float) -> int:
         time.sleep(interval)
 
 
-def _wait(scope: str, name: str, key: str, interval: float) -> int:
+def _wait(scope: str, name: str, key: str, interval: float,
+          deadline: float | None = None) -> int:
     """Poll one group every `interval` seconds until an instance is ready.
 
     "Ready" = current_status running AND at least one live instance reports
@@ -772,12 +800,25 @@ def _wait(scope: str, name: str, key: str, interval: float) -> int:
     (only allocating/creating/running/stopping counts). Before the first
     instance shows up we keep polling, same while none is ready yet.
 
-    Returns 0 when ready; 1 when the group gives up (stopped/failed/...)
-    or the group GET itself fails.
+    deadline (time.monotonic()): when set (--tmax on `start --wait`), stop
+    trying once it passes — the group is LEFT RUNNING, nothing is stopped.
+
+    Returns 0 when ready; 1 when the group gives up (stopped/failed/...),
+    the group GET itself fails, or the time budget runs out.
     """
     org, project = scope.split("/", 1)
-    print(f"waiting for {name} to become ready (polling every {interval:g}s, Ctrl-C to stop)")
+    if deadline is not None:
+        budget = max(0.0, deadline - time.monotonic())
+        print(f"waiting for {name} to become ready (polling every {interval:g}s, "
+              f"time budget {budget:g}s, Ctrl-C to stop)")
+    else:
+        print(f"waiting for {name} to become ready (polling every {interval:g}s, Ctrl-C to stop)")
     while True:
+        if deadline is not None and time.monotonic() >= deadline:
+            print(f"time budget exhausted — {name} is not ready yet. Stopping the wait "
+                  f"(NOT the group): it keeps running, re-run "
+                  f"`wait {org}/{project} {name}` to keep polling.")
+            return 1
         try:
             g = sc.get_container_group(org, project, name, api_key=key)
         except sc.SaladApiError as e:
@@ -1957,6 +1998,8 @@ def _deploy(key: str, type_key: str | None, org: str | None, project: str | None
 def main(argv: list[str]) -> int:
     interval = 5.0
     min_bw_mbps: float | None = None
+    tmax: float | None = None
+    wait_after = False
     type_key: str | None = None
     org_flag: str | None = None
     project_flag: str | None = None
@@ -2001,6 +2044,23 @@ def main(argv: list[str]) -> int:
             if min_bw_mbps <= 0:
                 print("error: --min-bw-mbps must be > 0", file=sys.stderr)
                 return 2
+            i += 2
+            continue
+        if arg == "--wait":
+            wait_after = True
+            i += 1
+            continue
+        if arg == "--tmax":
+            if i + 1 >= len(argv):
+                print("error: --tmax needs a value (seconds: 90, or minutes: 5m)",
+                      file=sys.stderr)
+                return 2
+            m = TMAX_RE.match(argv[i + 1])
+            if m is None or int(m.group(1)) <= 0:
+                print(f"error: --tmax: expected a positive number of seconds (90) or "
+                      f"minutes with an m suffix (5m): {argv[i + 1]!r}", file=sys.stderr)
+                return 2
+            tmax = float(int(m.group(1)) * (60 if m.group(2) else 1))
             i += 2
             continue
         if arg in ("--type", "--org", "--project", "--group"):
@@ -2109,6 +2169,14 @@ def main(argv: list[str]) -> int:
     if min_bw_mbps is not None and action != "start":
         print("error: --min-bw-mbps applies to `start` only (the arbitrator "
               "watches the HF download after a start)", file=sys.stderr)
+        return 2
+    if wait_after and action != "start":
+        print("error: --wait applies to `start` only (keep polling until the "
+              "start is ready; for other groups use the `wait` action)", file=sys.stderr)
+        return 2
+    if tmax is not None and action != "start":
+        print("error: --tmax applies to `start` only (a time budget for the "
+              "readiness wait after a start; it implies --wait)", file=sys.stderr)
         return 2
     if gpu_flag and action not in ("deploy", "start") and not query:
         print("error: --gpu applies to `deploy` (create/update on that card), to `start` "
@@ -2301,11 +2369,20 @@ def main(argv: list[str]) -> int:
         elif not _confirm(action, sel):
             print("aborted — nothing done.")
             return 1
-        rc = _run_action(action, sel, key)
+        wait_phase = action == "start" and (wait_after or tmax is not None)
+        rc = _run_action(action, sel, key, auto_wait=wait_phase)
         if action == "start" and rc == 0 and min_bw_mbps is not None:
             # The arbitrator: keep the HF download on a host whose median
             # download rate clears the cap (max 3 reallocations, 4th kept).
-            return _arbitrate(s_org, s_project, g.name, key, min_bw_mbps, interval)
+            # It has its own internal timeouts and is NOT counted against
+            # --tmax — the budget then applies to the readiness wait.
+            rc = _arbitrate(s_org, s_project, g.name, key, min_bw_mbps, interval)
+        if wait_phase and rc == 0:
+            # --wait / --tmax: keep polling in this process until an instance
+            # reports ready. "Stop trying" = the --tmax budget runs out; the
+            # group is left running either way — nothing is ever stopped.
+            deadline = time.monotonic() + tmax if tmax is not None else None
+            return _wait(f"{s_org}/{s_project}", g.name, key, interval, deadline)
         return rc
     except KeyboardInterrupt:
         print("\nstopped — nothing done.")

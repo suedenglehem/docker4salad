@@ -6,7 +6,7 @@ stdlib-only Python, run from the repo root: `python3 utils/<script>`.
 
 | script | what it does |
 |---|---|
-| `sl_admin.py` | the fleet admin: `list` / `refresh` / `start` / `stop` / `wait` / `stats` / `delete` / `ssh` / `create-org` / `create-project` / `deploy`, plus the card & priority flags `--gpu` / `--prio` / `--query` / `--y` and the `ORG[/PROJECT] GROUP` positionals |
+| `sl_admin.py` | the fleet admin: `list` / `refresh` / `start` / `stop` / `wait` / `stats` / `delete` / `ssh` / `create-org` / `create-project` / `deploy`, plus the start-wait flags `--wait` / `--tmax`, the card & priority flags `--gpu` / `--prio` / `--query` / `--y` and the `ORG[/PROJECT] GROUP` positionals |
 | `llama_stats.py` | llama-server stats (tps / queue / totals) from the host |
 | `billing.py` | per-org portal credit balances (USD + live EUR) |
 
@@ -113,7 +113,28 @@ python3 utils/sl_admin.py deploy --type ampere ... --gpu rtx3090 --prio med
   --start` (the card reconfigure, the priority recreate, and the paid-start `y`).
   **It skips the gate on billing, not the billing**: these runs bill per second.
 
-Offline suite: `python3 -I tools/test_gpu_prio_offline.py` (no API calls).
+### Start-wait flags — `--wait` / `--tmax`
+
+```
+python3 utils/sl_admin.py start  ORG/PROJ GROUP --wait          # start, then poll until ready
+python3 utils/sl_admin.py start  ORG        GROUP --tmax 5m     # same, but give up after 5 min
+```
+
+- `--wait` — `start` only: after the start is accepted (202), keep polling in
+  **this process** (exactly like the `wait` action) until at least one instance
+  reports `ready` — the command's final state is "ready". The group is **never
+  stopped** by this: if the group bails (stopped/failed/…) the wait exits 1
+  and Salad's state stands — re-run `wait` to pick the polling up. Exit codes:
+  **0** ready · **1** group bail or (with `--tmax`) budget expiry · **2** usage.
+- `--tmax N` — `start` only: a **time budget** for the readiness wait — N
+  seconds (`90`) or N minutes (`5m`). **Implies `--wait`**. When the budget
+  runs out the wait stops trying (exit 1): the group is **left running** —
+  nothing is stopped — re-run `wait` (or `start … --wait`) to keep polling.
+  With `--min-bw-mbps` the bandwidth arbitrator (own internal timeouts) runs
+  first; the wait then gets the full budget.
+
+Offline suites: `python3 -I tools/test_gpu_prio_offline.py` and
+`python3 -I tools/test_start_wait_offline.py` (no API calls).
 
 The Salad API key is loaded from `deploy/salad_api.txt` via
 `salad_client.py` (repo root).
