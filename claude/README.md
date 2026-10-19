@@ -169,6 +169,33 @@ cold start. The 1-token keepalive loop (every 30 s) is **ON by default**
 killed by the EXIT trap when the chat ends (the `llm` call runs in the
 foreground, not via `exec`, so the trap fires).
 
+## Large prompts — Cloudflare edge latency (measured 2026-10-19)
+
+The `*.salad.cloud` domain is Cloudflare-fronted, and the edge has a ~100 s
+origin timeout. Measured against a single-instance qwen3.8 group:
+
+| Request | TTFB |
+|---|---|
+| small prompt (~1K tokens), group idle | ~1.7 s |
+| worker-shaped prompt (~5K tokens, prompt_tokens=5189) | ~93 s ([DONE] at 95.5 s) |
+
+Real agentic prompts (12–16K tokens) therefore sit at/past the edge timeout,
+and one instance serializes requests, so a long generation delays everything
+behind it. When the edge gives up, the request can still come back as
+**HTTP 200 + `text/event-stream` headers followed by EOF with zero content**
+(or an in-band `data: {"error": …}` payload mid-stream) — indistinguishable
+from a "clean empty answer" unless the client checks.
+
+The dispatcher's vendored bridge
+(`/dd2/andrei/claude/dispatcher/local_dispatcher/salad_proxy.py`, updated
+2026-10-19) handles this: a zero-content or anomalous stream end emits ONE
+Anthropic `error` event instead of an empty `message_stop`, so Claude Code
+fails loudly and the dispatcher retries it as a backend disconnect. If you
+extend `sl_proxy.py` for long-running agentic use, surface zero-content
+stream ends as errors the same way — never let them render as an empty
+success. Practical expectation on a salad group: ~90–120 s per turn for
+agent-sized prompts, not a throughput backend.
+
 ## Keys — don't mix them up
 
 | Key | File | Header | Notes |
