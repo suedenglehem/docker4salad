@@ -32,6 +32,7 @@ sl_claude_deploy            cl_salad                    Claude Code
 | **`sl_curl.sh`** | **Smoke test**: asks the model 2–3 known-answer questions straight through the gateway (no proxy). Fastest way to confirm a group is up and answering. |
 | **`sl_chat.sh`** | Interactive chat via Simon Willison's `llm` package, direct against the gateway (`llm -H` carries the Salad-Api-Key). |
 | **`salad_api.txt`** | The Salad API key (67 B). Gitignored, chmod 600, **never printed**. Read by everything above; the gateway rejects requests that lack it. |
+| **`TESTS.md`** | Test instructions — the offline zero-content-fix suite (`tools/test_sl_proxy_offline.py`, no group) plus the live group tests (baseline, the fixed `cl_salad` path, and how the edge-kill failure now surfaces). |
 
 `cl_salad` and `sl_claude_deploy` are also available on PATH via
 `/usr/local/bin` symlinks (the scripts resolve their real directory, so the
