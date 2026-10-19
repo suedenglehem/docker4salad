@@ -135,6 +135,16 @@ through untouched. Server-side fix: the deployers now drop `--flag none`
 pairs from EXTRA_ARGS (`strip_none_value_args`), so llama.cpp keeps its
 default think parsing.
 
+A **zero-content or anomalous stream end** — upstream EOF with no text and no
+tool calls, a non-SSE line, an unparseable `data:` payload, or an in-band
+`data: {"error": …}` payload — is surfaced as ONE Anthropic `error` event
+instead of a clean empty `message_stop`, so Claude Code fails loudly rather
+than rendering a bogus empty answer. Detection lives in `_iter_sse` (anomaly
+sentinels) plus `StreamBuilder.is_empty()`; a stream that delivered neither
+text nor tool calls is never a valid turn (thinking is off, tool-only turns
+carry `tool_calls`). See the latency note below for why long prompts hit
+this.
+
 ## sl_curl.sh — smoke test (no proxy)
 
 ```sh
@@ -186,15 +196,14 @@ behind it. When the edge gives up, the request can still come back as
 (or an in-band `data: {"error": …}` payload mid-stream) — indistinguishable
 from a "clean empty answer" unless the client checks.
 
-The dispatcher's vendored bridge
-(`/dd2/andrei/claude/dispatcher/local_dispatcher/salad_proxy.py`, updated
-2026-10-19) handles this: a zero-content or anomalous stream end emits ONE
-Anthropic `error` event instead of an empty `message_stop`, so Claude Code
-fails loudly and the dispatcher retries it as a backend disconnect. If you
-extend `sl_proxy.py` for long-running agentic use, surface zero-content
-stream ends as errors the same way — never let them render as an empty
-success. Practical expectation on a salad group: ~90–120 s per turn for
-agent-sized prompts, not a throughput backend.
+`sl_proxy.py` (this bridge, updated 2026-10-19) handles it, as does the
+dispatcher's vendored copy
+(`/dd2/andrei/claude/dispatcher/local_dispatcher/salad_proxy.py`): a
+zero-content or anomalous stream end emits ONE Anthropic `error` event
+instead of an empty `message_stop`, so Claude Code fails loudly instead of
+rendering a bogus empty answer (the dispatcher additionally retries it as a
+backend disconnect). Practical expectation on a salad group: ~90–120 s per
+turn for agent-sized prompts, not a throughput backend.
 
 ## Keys — don't mix them up
 
